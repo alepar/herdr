@@ -195,7 +195,9 @@ pub(in crate::remote::attach::mosh) mod rendezvous {
 
     /// Advisory exclusive lock; released when dropped (the fd closes).
     #[derive(Debug)]
-    pub(in crate::remote::attach::mosh) struct RendezvousLock(File);
+    pub(in crate::remote::attach::mosh) struct RendezvousLock {
+        _file: File,
+    }
 
     fn open_lock(path: &Path) -> io::Result<File> {
         OpenOptions::new()
@@ -224,14 +226,14 @@ pub(in crate::remote::attach::mosh) mod rendezvous {
     /// Non-blocking: `None` when another open file description holds the lock.
     pub(in crate::remote::attach::mosh) fn try_lock(path: &Path) -> io::Result<Option<RendezvousLock>> {
         let file = open_lock(path)?;
-        Ok(flock(&file, libc::LOCK_EX | libc::LOCK_NB)?.then_some(RendezvousLock(file)))
+        Ok(flock(&file, libc::LOCK_EX | libc::LOCK_NB)?.then_some(RendezvousLock { _file: file }))
     }
 
     /// Blocking variant of `try_lock`.
     pub(in crate::remote::attach::mosh) fn lock(path: &Path) -> io::Result<RendezvousLock> {
         let file = open_lock(path)?;
         flock(&file, libc::LOCK_EX)?;
-        Ok(RendezvousLock(file))
+        Ok(RendezvousLock { _file: file })
     }
 
     #[cfg(test)]

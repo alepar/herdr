@@ -3,7 +3,9 @@
 //! Owns: `start_ui_bridge`, the status capability constant, the `--x-mosh-*` flag
 //! constants and the env knobs (`HERDR_MOSH_RESUME=0` kill switch, `HERDR_MOSH_GRACE`
 //! seconds, default 60, clamped 5..=3600). Does not own: any I/O.
-#![allow(dead_code)] // scaffold: items are filled and wired by mosh-dqw.4..8, 10
+// The resume stack (session, ring, link frames, ssh leg, remote) is only reached from the
+// unix bridge, so a non-unix build sees it as unused; unix builds keep dead-code strict.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 mod link_frames;
 #[cfg(unix)]

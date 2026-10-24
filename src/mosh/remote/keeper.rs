@@ -636,7 +636,7 @@ fn server_writer(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::remote::attach::mosh::session::{LinkPhase, WINDOW};
+    use crate::remote::attach::mosh::session::WINDOW;
     use std::sync::atomic::AtomicBool;
 
     fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -1051,10 +1051,6 @@ mod tests {
         fn send_data(&mut self, bytes: &[u8]) {
             self.endpoint.push_source(bytes).unwrap();
             self.flush();
-        }
-
-        fn is_up(&self) -> bool {
-            self.endpoint.phase() != LinkPhase::Down && self.endpoint.is_up()
         }
     }
 
