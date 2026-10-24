@@ -19,16 +19,48 @@ use std::io;
 /// A new flag is a match arm. Every other `--x-mosh-*` flag (and every flag on non-Unix) is
 /// an error with upstream's message, never a plain pump.
 pub(in crate::remote) fn dispatch(args: &[String]) -> Option<io::Result<()>> {
-    match args {
+    match route(args) {
+        Route::NotMosh => None,
         #[cfg(unix)]
-        [flag] if flag == super::SESSION_FLAG => Some(attacher::run(args)),
+        Route::Attacher { idle } if !idle || crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED => {
+            Some(attacher::run(idle))
+        }
         #[cfg(unix)]
-        [flag] if flag == super::KEEPER_FLAG => Some(keeper::run(args)),
-        [flag, ..] if flag.starts_with("--x-mosh-") => Some(Err(io::Error::new(
+        Route::Keeper => Some(keeper::run(args)),
+        _ => Some(Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "unsupported remote client bridge option",
         ))),
-        _ => None,
+    }
+}
+
+/// Where `dispatch` sends an argument list. Pure, so routing is testable without running
+/// the attacher or keeper.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// `[SESSION_FLAG]`, or `["--idle-timeout-v1", SESSION_FLAG]` (upstream's idle opt-in,
+    /// which comes first so the resume command keeps upstream's `remote-client-bridge
+    /// --idle-timeout-v1` prefix).
+    Attacher { idle: bool },
+    Keeper,
+    /// A `--x-mosh-` flag in position 0 or 1 that matches no valid shape (or non-Unix).
+    Reject,
+    NotMosh,
+}
+
+fn route(args: &[String]) -> Route {
+    const IDLE: &str = "--idle-timeout-v1";
+    match args {
+        #[cfg(unix)]
+        [flag] if flag == super::SESSION_FLAG => Route::Attacher { idle: false },
+        #[cfg(unix)]
+        [idle, flag] if idle == IDLE && flag == super::SESSION_FLAG => {
+            Route::Attacher { idle: true }
+        }
+        #[cfg(unix)]
+        [flag] if flag == super::KEEPER_FLAG => Route::Keeper,
+        [flag, ..] | [_, flag, ..] if flag.starts_with("--x-mosh-") => Route::Reject,
+        _ => Route::NotMosh,
     }
 }
 
@@ -44,6 +76,20 @@ mod tests {
     fn non_mosh_args_are_not_routed() {
         assert!(dispatch(&[]).is_none());
         assert!(dispatch(&args(&["--idle-timeout-v1"])).is_none());
+    }
+
+    #[test]
+    fn idle_flag_precedes_session_flag() {
+        use super::super::{KEEPER_FLAG, SESSION_FLAG};
+        let r = |list: &[&str]| route(&args(list));
+        assert_eq!(r(&["--idle-timeout-v1", SESSION_FLAG]), Route::Attacher { idle: true });
+        assert_eq!(r(&[SESSION_FLAG]), Route::Attacher { idle: false });
+        assert_eq!(r(&[KEEPER_FLAG]), Route::Keeper);
+        assert_eq!(r(&["--idle-timeout-v1", KEEPER_FLAG]), Route::Reject);
+        assert_eq!(r(&["junk", SESSION_FLAG]), Route::Reject);
+        assert_eq!(r(&[SESSION_FLAG, "--idle-timeout-v1"]), Route::Reject);
+        assert_eq!(r(&["--idle-timeout-v1"]), Route::NotMosh);
+        assert_eq!(r(&[]), Route::NotMosh);
     }
 
     #[test]

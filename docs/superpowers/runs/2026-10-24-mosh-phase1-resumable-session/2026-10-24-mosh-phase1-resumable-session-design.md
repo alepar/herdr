@@ -247,7 +247,7 @@ The keeper closes the leg after any `END` answer. `token-in-use` needs a 128-bit
 | `src/remote/attach.rs` | `#[path = "../mosh/mod.rs"] pub(super) mod mosh; // mosh-fork hook` after the `use` block | 1 |
 | `src/remote/attach.rs` l.90 | `SshStdioBridge::start(` → `mosh::start_ui_bridge(&remote_ssh, ` (same remaining arguments) | 1 |
 | `src/remote/saved.rs` l.35 | `SshStdioBridge::start(` → `super::attach::mosh::start_ui_bridge(&ssh, ` | 1 |
-| `src/remote/host.rs` l.7-21 | match arm `[o, ..] if o.starts_with("--x-mosh-") => false, // mosh-fork hook` | 1 |
+| `src/remote/host.rs` l.7-21 | match arm `[o, ..] \| [_, o] if o.starts_with("--x-mosh-") => false, // mosh-fork hook` (also admits `--idle-timeout-v1 --x-mosh-session-v1`) | 1 |
 | `src/remote/host.rs` after l.24 | `if let Some(result) = super::attach::mosh::remote::dispatch(args) { return result; } // mosh-fork hook` | 1 |
 | `src/cli/status.rs` l.298-302 | push `"x-mosh-resume-bridge-v1"` into `endpoint_capabilities` on Unix | 1 |
 | `src/update.rs` l.25-26 | `STABLE_/PREVIEW_UPDATE_MANIFEST_URL` take `option_env!("HERDR_STABLE_UPDATE_MANIFEST_URL")` / `option_env!("HERDR_PREVIEW_UPDATE_MANIFEST_URL")` overrides, defaulting to today's URLs (release blocker: `auto_update` would replace a fork build) | 2 |

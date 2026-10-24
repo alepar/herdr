@@ -150,19 +150,14 @@ pub(in crate::remote) fn start_ui_bridge(
             }
         };
         // Exactly `SshStdioBridge::start`'s command, from the ORIGINAL (not re-selected) binary.
-        let plain_command = if noninteractive && remote_herdr.bridge_idle_timeout {
-            remote_herdr
-                .executable
-                .bridge_command_with_idle_timeout(&session_name, true)
-        } else {
-            remote_herdr.executable.bridge_command(&session_name)
-        };
+        let plain_command = plain_bridge_command(&remote_herdr, &session_name, noninteractive);
         let dialer = ssh_leg::SshLegDialer::new(
             target.clone(),
             &candidate,
             &session_name,
             ssh_options,
             noninteractive,
+            idle_opt_in(&candidate, noninteractive),
         );
         local_bridge::start(
             local_bridge::BridgeParams {
@@ -185,6 +180,21 @@ pub(in crate::remote) fn start_ui_bridge(
 
 /// `true` means try the resume path; `false` (kill switch or a Windows remote) takes the plain
 /// upstream bridge.
+/// Upstream's idle opt-in rule for `remote-client-bridge` (saved machines only, when the
+/// remote advertises it). Shared by the plain command and the resume leg command.
+#[cfg(unix)]
+fn idle_opt_in(herdr: &RemoteHerdr, noninteractive: bool) -> bool {
+    noninteractive && herdr.bridge_idle_timeout
+}
+
+/// Exactly `SshStdioBridge::start`'s remote command for `herdr`.
+#[cfg(unix)]
+fn plain_bridge_command(herdr: &RemoteHerdr, session_name: &str, noninteractive: bool) -> String {
+    herdr
+        .executable
+        .bridge_command_with_idle_timeout(session_name, idle_opt_in(herdr, noninteractive))
+}
+
 fn platform_gate(config: MoshConfig, remote_is_windows: bool) -> bool {
     config.resume_enabled && !remote_is_windows
 }
