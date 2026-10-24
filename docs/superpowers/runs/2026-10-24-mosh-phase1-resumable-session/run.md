@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-24-mosh-phase1-resumable-session
 
 flags: planOneShot=true skipPlanRoast=false skipCodeRoast=false autonomous=true
-phase: roast-code
+phase: report
 codeMechanism: Workflow
 runTag: mosh-phase1-resumable-session-20261024T052906
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -15,7 +15,7 @@ roastCodeRound: 4
 redesignCycles-code: 1
 redesign-code-1: round 2 · triggers shared-cause, defect-type · amended §Legs, §Post-Implementation Note (2026-10-24, code redesign cycle 1) · lastGood d49f3d93 · designRoast r3 fixed · state applied
 stepBackCode-round-2: redesign — applied: scattered inline teardown (per-site deadlines, end_sent set/reset in many places) → one Closing drain-then-close phase per endpoint with a single deadline (dissolves 8)
-roast-code: 2026-10-24-mosh-phase1-resumable-session-roast-pr-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-2.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-3.md
+roast-code: 2026-10-24-mosh-phase1-resumable-session-roast-pr-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-2.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-3.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-4.md
 findingsLedger: findings-ledger.md
 findingsLedgerDesign: findings-ledger-design.md
 redesignCycles-design: 1
@@ -78,3 +78,5 @@ scopeFilter-round-3: [Should-fix] tests/mosh_integration.rs:169 in-scope — The
 scopeFilter-round-3: [Nit] src/mosh/remote/keeper.rs:518 punch-list — A spurious 'stolen' leg_down trace line is written on resume. This affects trace fidelity only; wire behavior, data and correctness are unchanged, and the goal names no trace behavior.
 cluster dropped: C7-detach-leg-trace — In `Shared::detach_leg`, emit `leg_down{reason}` and start grace only when a leg was actually taken, or have the Resumed admit arm do only the shutdown-and-rewind it needs, so `leg_down{stolen}` once again means a steal.
 scope-filter: 2 in-scope · 1 punch-listed
+stepBackCode-round-4: local — cap round; all three findings are test-only ordering races in one new test (dqw.33), no design decision owns them (step-back not dispatched; see friction log)
+roastCodeExit: capped
