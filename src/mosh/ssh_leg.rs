@@ -31,7 +31,16 @@ pub(super) struct LegEndReport {
     pub killed_by_bridge: bool,
 }
 
-type Teardown = Box<dyn FnOnce(bool) -> (Option<ExitStatus>, Option<String>) + Send>;
+/// Upper bound on reaping a leg nobody waits on (drop, dial abort, dying leg): the child gets
+/// this long to exit on its own before it is killed.
+pub(super) const LEG_REAP_BUDGET: Duration = Duration::from_millis(500);
+
+/// Poll interval while waiting for a child or its stderr thread within a deadline.
+const REAP_POLL: Duration = Duration::from_millis(5);
+
+/// Arguments: whether to kill the process first, and the instant by which the process must be
+/// gone (it is killed and reaped when the deadline passes).
+type Teardown = Box<dyn FnOnce(bool, Instant) -> (Option<ExitStatus>, Option<String>) + Send>;
 
 /// One live connection to the keeper side (transport-neutral).
 ///
@@ -46,7 +55,7 @@ type Teardown = Box<dyn FnOnce(bool) -> (Option<ExitStatus>, Option<String>) + S
 pub(super) struct Leg {
     reader: Option<Box<dyn io::Read + Send>>,
     writer: Option<Box<dyn io::Write + Send>>,
-    /// Argument: whether to kill the underlying process before reaping it.
+    /// Arguments: whether to kill the underlying process before reaping it, and the reap deadline.
     teardown: Option<Teardown>,
     welcome_reached: bool,
     pre_welcome_end: Option<String>,
@@ -82,12 +91,7 @@ impl Leg {
         Ok(Leg::new(
             Box::new(stdout),
             Box::new(stdin),
-            Box::new(move |kill| {
-                if kill {
-                    let _ = child.kill();
-                }
-                (child.wait().ok(), None)
-            }),
+            Box::new(move |kill, deadline| (reap_child(&mut child, kill, deadline), None)),
         ))
     }
 
@@ -108,14 +112,16 @@ impl Leg {
         self.pre_welcome_end = Some(reason);
     }
 
-    /// Tear the leg down (killing the process when `kill`) and return its end report.
-    pub(super) fn finish(mut self, kill: bool) -> LegEndReport {
+    /// Tear the leg down (killing the process when `kill`) and return its end report. The
+    /// process gets until `deadline` to exit on its own, then it is killed and reaped; the
+    /// stderr capture is joined only if it finished by then.
+    pub(super) fn finish(mut self, kill: bool, deadline: Instant) -> LegEndReport {
         let (exit_status, stderr) = match self.teardown.take() {
             Some(teardown) => {
                 // Close our stream halves first so a child waiting on stdin can exit.
                 self.writer = None;
                 self.reader = None;
-                teardown(kill)
+                teardown(kill, deadline)
             }
             None => (None, None),
         };
@@ -134,7 +140,7 @@ impl Drop for Leg {
         if let Some(teardown) = self.teardown.take() {
             self.writer = None;
             self.reader = None;
-            teardown(true);
+            teardown(true, Instant::now() + LEG_REAP_BUDGET);
         }
     }
 }
@@ -177,6 +183,24 @@ pub(super) trait LegDialer: Send {
     fn backoff(&self, attempt: u32) -> Duration;
 }
 
+/// Reap `child` within `deadline`: optionally kill it first, give it until `deadline` to exit,
+/// then kill it and wait (prompt after SIGKILL).
+fn reap_child(child: &mut std::process::Child, kill: bool, deadline: Instant) -> Option<ExitStatus> {
+    if kill {
+        let _ = child.kill();
+    }
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(REAP_POLL),
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    let _ = child.kill();
+    child.wait().ok()
+}
+
 /// Spawn `command` as a leg: stdin/stdout piped (the leg's duplex stream), stderr piped and
 /// drained on a thread when `capture_stderr` (capped like `capture_ssh_stderr`), else as set on
 /// the command. Returns the leg (reader not yet attached) and the child's buffered stdout, so
@@ -201,13 +225,17 @@ fn spawn_leg(
     let leg = Leg {
         reader: None,
         writer: Some(Box::new(stdin)),
-        teardown: Some(Box::new(move |kill| {
-            if kill {
-                let _ = child.kill();
-            }
-            let status = child.wait().ok();
-            let stderr = stderr_thread.map(|handle| {
-                String::from_utf8_lossy(&handle.join().unwrap_or_default()).into_owned()
+        teardown: Some(Box::new(move |kill, deadline| {
+            let status = reap_child(&mut child, kill, deadline);
+            // A grandchild (ProxyCommand) can hold the stderr pipe open after ssh exits; join
+            // the capture only if it finished within the deadline, else let it end on its own.
+            let stderr = stderr_thread.and_then(|handle| {
+                while !handle.is_finished() && Instant::now() < deadline {
+                    thread::sleep(REAP_POLL);
+                }
+                handle.is_finished().then(|| {
+                    String::from_utf8_lossy(&handle.join().unwrap_or_default()).into_owned()
+                })
             });
             (status, stderr)
         })),
@@ -372,11 +400,11 @@ impl SshLegDialer {
         });
         loop {
             if stop.load(Ordering::SeqCst) {
-                leg.finish(true);
+                leg.finish(true, Instant::now() + LEG_REAP_BUDGET);
                 return Err(LegError::Retryable(io::Error::other("leg dial stopped")));
             }
             if setup_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                leg.finish(true);
+                leg.finish(true, Instant::now() + LEG_REAP_BUDGET);
                 return Err(LegError::Retryable(io::Error::other(
                     "leg did not become ready before the setup deadline",
                 )));
@@ -387,12 +415,12 @@ impl SshLegDialer {
                     return Ok(leg);
                 }
                 Ok((Err(_), _)) => {
-                    let report = leg.finish(false);
+                    let report = leg.finish(false, Instant::now() + LEG_REAP_BUDGET);
                     return Err(self.classify(kind, &report));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    leg.finish(true);
+                    leg.finish(true, Instant::now() + LEG_REAP_BUDGET);
                     return Err(LegError::Retryable(io::Error::other(
                         "leg marker reader ended unexpectedly",
                     )));
@@ -497,6 +525,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::process::ExitStatusExt;
 
+    /// A generous deadline for tests whose child exits (or is killed) promptly.
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
     fn spawn(script: &str) -> std::process::Child {
         Command::new("sh")
             .args(["-c", script])
@@ -509,7 +542,7 @@ mod tests {
     #[test]
     fn finish_reports_exit_code() {
         let leg = Leg::from_child(spawn("exit 3")).unwrap();
-        let report = leg.finish(false);
+        let report = leg.finish(false, soon());
         assert_eq!(report.exit_status.and_then(|s| s.code()), Some(3));
         assert!(!report.killed_by_bridge);
     }
@@ -518,7 +551,7 @@ mod tests {
     fn finish_kill_returns_promptly() {
         let leg = Leg::from_child(spawn("sleep 30")).unwrap();
         let started = Instant::now();
-        let report = leg.finish(true);
+        let report = leg.finish(true, soon());
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(report.killed_by_bridge);
         assert_eq!(
@@ -548,7 +581,7 @@ mod tests {
         assert!(leg.take_writer().is_none());
         drop(writer);
         drop(reader);
-        leg.finish(true);
+        leg.finish(true, soon());
     }
 
     #[test]
@@ -556,7 +589,7 @@ mod tests {
         let mut leg = Leg::from_child(spawn("exit 0")).unwrap();
         leg.mark_welcome();
         leg.record_pre_welcome_end("nope".into());
-        let report = leg.finish(false);
+        let report = leg.finish(false, soon());
         assert!(report.welcome_reached);
         assert_eq!(report.pre_welcome_end.as_deref(), Some("nope"));
     }
@@ -732,16 +765,36 @@ mod tests {
         let mut rest = String::new();
         reader.read_to_string(&mut rest).unwrap();
         assert_eq!(rest, "abc");
-        let report = leg.finish(false);
+        let report = leg.finish(false, soon());
         assert_eq!(report.exit_status.and_then(|s| s.code()), Some(7));
         assert_eq!(report.stderr.as_deref(), Some("oops\n"));
         assert!(!report.killed_by_bridge);
     }
 
     #[test]
+    fn finish_bounds_child_wait_by_deadline() {
+        let (leg, _reader) = spawn_leg(sh("exec sleep 30"), true).unwrap();
+        let started = Instant::now();
+        let report = leg.finish(false, Instant::now() + Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(report.exit_status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn finish_bounds_stderr_join_by_deadline() {
+        // The background sleep inherits the stderr pipe, so the capture thread outlives ssh.
+        let (leg, _reader) = spawn_leg(sh("sleep 5 & exit 0"), true).unwrap();
+        let started = Instant::now();
+        let report = leg.finish(false, Instant::now() + Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(report.exit_status.and_then(|s| s.code()), Some(0));
+        assert!(report.stderr.is_none());
+    }
+
+    #[test]
     fn leg_stderr_is_capped() {
         let (leg, _reader) = spawn_leg(sh("head -c 65536 /dev/zero >&2"), true).unwrap();
-        let report = leg.finish(false);
+        let report = leg.finish(false, soon());
         assert_eq!(
             report.stderr.unwrap().len(),
             attach::NONINTERACTIVE_SSH_STDERR_LIMIT
@@ -751,7 +804,7 @@ mod tests {
     #[test]
     fn leg_without_capture_reports_no_stderr() {
         let (leg, _reader) = spawn_leg(sh("exit 0"), false).unwrap();
-        assert!(leg.finish(false).stderr.is_none());
+        assert!(leg.finish(false, soon()).stderr.is_none());
     }
 
     #[test]
@@ -772,7 +825,7 @@ mod tests {
         reader.read_exact(&mut echo).unwrap();
         assert_eq!(&echo, b"xy");
         drop((reader, writer));
-        leg.finish(true);
+        leg.finish(true, soon());
     }
 
     #[test]
