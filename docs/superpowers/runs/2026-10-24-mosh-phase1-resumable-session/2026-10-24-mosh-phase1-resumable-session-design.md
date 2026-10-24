@@ -277,6 +277,104 @@ These are in-process tests that can reach private `attach` items through the `#[
 - [ ] Builds with `HERDR_STABLE_UPDATE_MANIFEST_URL`/`HERDR_PREVIEW_UPDATE_MANIFEST_URL` set use those manifest URLs; builds without them are unchanged.
 - [ ] `cargo clippy` (repo `clippy.toml`) and the full test suite pass.
 
+## Key abstractions
+
+**SessionMsg** — new closed enum (`session.rs`), the six session wire messages (HELLO, WELCOME, DATA, ACK, HEARTBEAT, END) with their `[u8 type][u32 LE len][payload]` codec and incremental decoder.
+- Owns: encode/decode, the JSON bodies of HELLO/WELCOME/END, malformed/unknown input → leg protocol error.
+- Hides: message byte layout.
+- Must not: do I/O or apply offset/ack rules (`SessionEndpoint` does). Never grows a per-transport variant (Phase 3 keeps it as is).
+- Relationships: used by `SessionEndpoint`, `LocalBridge`, `Keeper`; depends on nothing fork-side.
+- Errors: decode error always means "end this leg", never "end this session".
+
+**SessionEndpoint** — new struct (`session.rs`), one end of a resumable byte session, sans-IO, used symmetrically by the local end (per client connection) and the keeper end (per token).
+- Owns: the session `Token` (128-bit newtype from `/dev/urandom`); outbound offset; inbound `recv_offset` and dedup (rule 2: overlap discarded, gap = error); ack scheduling (64 KiB / 200 ms / every heartbeat); heartbeat timing and the 8 s silence verdict; HELLO/WELCOME negotiation and the new/resumed/unknown/ended meaning; replay from the peer's offset on resume. Holds its outbound `ReplayRing`, told its capacity at construction (8 MiB local, 16 MiB keeper).
+- Hides: offset arithmetic and ack/heartbeat rules, so neither end re-implements them.
+- Must not: touch sockets, threads or the clock directly (time is an input); decide what overflow means (reports it; owner ends the session).
+- Relationships: composes `ReplayRing`, uses `SessionMsg`. Two users — `LocalBridge`'s connection run and the keeper's per-token session — the duplication that justifies sharing it.
+- Lifecycle: created at HELLO time (local: per accepted client connection; keeper: per fresh token); lives for the session across any number of legs; single owner, not shared across threads.
+- Errors: callers distinguish leg protocol error (drop leg, redial), ring overflow (end session), peer END (end session, with reason), resume refused (`unknown`/`ended`).
+
+**ReplayRing** — new struct (`ring.rs`), bounded byte ring keyed by absolute offset.
+- Owns: push, ack-trim, replay-from-offset, free-space query (keeper uses it for leg-up backpressure).
+- Hides: storage and wraparound.
+- Must not: decide overflow policy — reports overflow; the owner chooses backpressure or session end (spec §Ring caps).
+- Lifecycle: owned by one `SessionEndpoint`.
+- Errors: overflow, reported, never silent.
+
+**FrameSplitter** — new struct (`link_frames.rs`), incremental u32-LE length-prefix splitter, plus a free function encoding an injected `x-mosh.link.v1` `EndpointControl` frame via `crate::protocol`'s frame writer.
+- Owns: partial-frame hold-back, "at a frame boundary" knowledge, rejecting frames over `MAX_GRAPHICS_FRAME_SIZE`.
+- Hides: herdr framing; nothing else in the fork parses length prefixes.
+- Must not: interpret frame contents or status semantics.
+- Relationships: used by `LocalBridge` (whole-frame delivery, inject-between-frames) and `Keeper` (EOF at a frame boundary) — two users now.
+- Errors: oversized/torn frame → session end (spec §Error handling).
+
+**Leg** — new struct (`ssh_leg.rs`, transport-neutral), one live connection to the keeper side.
+- Owns: a duplex byte stream, a teardown handle, a failure report. For ssh it is one end of a socketpair whose other end is driven by upstream `bridge_child`, so preamble stripping and child ownership stay upstream's.
+- Hides: which process or transport carries the bytes.
+- Must not: know session semantics.
+- Lifecycle: produced by a `LegDialer`, owned by the connection run; teardown kills the child and joins the pump on silence, protocol error or session end.
+
+**LegDialer** — new trait, "produce the next leg". One implementation now (`SshLegDialer`); the spec names the next one: the Phase 3a QUIC leg with ssh fallback (`HERDR_MOSH_VISION.md` §4.2).
+- Owns (`SshLegDialer`): per-leg remote command via upstream builders; leg-0 vs reconnect options (BatchMode, piped stderr, `control_path: None` / `-o ControlPath=none`); back-off schedule (1, 2, 4, 8, 8… s); failure classification from `reported_failure()`, exit status and stderr.
+- Hides: ssh arguments and ControlMaster bypass.
+- Must not: touch session bytes or the give-up deadline (caller passes the deadline and stop flag and stops dialing when either fires).
+- Relationships: `LocalBridge` holds one as a boxed trait object; dependencies point `local_bridge` → trait, `ssh_leg` → `attach` internals.
+- Lifecycle: created by `start_ui_bridge`, owned by the `LocalBridge` for the bridge's lifetime.
+- Errors: `Retryable`, `Fatal` (auth, host key, generation mismatch), `Unsupported` (a downgraded remote rejected `--x-mosh-session-v1` → plain fallback once). Kept distinct.
+
+**LocalBridge** — new struct (`local_bridge.rs`), the resume-mode body of the thread inside an `SshStdioBridge`.
+- Owns: the user-facing listener; serial connection serving; `last_token` for ghost eviction; the per-connection run: client↔session pump, resuming/linked state, 1 s `LinkStatus` injection (only after the first frame, only between frames, never past the deadline), the give-up deadline, session-end triggers, polling `should_stop` ≤100 ms.
+- Hides: that an outage is happening at all; the client sees whole frames plus status frames.
+- Must not: build ssh commands (`LegDialer`), parse frames beyond `FrameSplitter`, or block on the network.
+- Lifecycle: built by `start_ui_bridge`; runs on the bridge thread until `should_stop` or listener failure; released by upstream `SshStdioBridge::Drop` (stop flag, socket removal, join).
+- Errors: fatal leg class → `failure_tx`, so `reported_failure()` keeps its meaning; every other session end closes the client socket at a frame boundary (outcome (b)).
+
+**`start_ui_bridge` (mosh/mod.rs)** — new module function, the single plain-vs-resume choice.
+- Owns: reading env config once (kill switch; grace clamped 5..=3600 s), the Windows check, capability probe and candidate re-selection (implemented in `ssh_leg`), choosing the `LegDialer`, returning the `SshStdioBridge`.
+- Must not: be called from anywhere except the two swap points.
+
+**Keeper** — new struct (`remote/keeper.rs`), the detached process-lifetime daemon.
+- Owns: listener; token table (per token: server `LocalStream`, a `SessionEndpoint` with a 16 MiB ring, current leg, grace deadline); leg stealing; `previous_token` eviction; drain policy (backpressure while the leg is up, drain into the ring while down); server EOF then `END{"server-eof"}`; idle exit after 30 s.
+- Hides: the parked server connection from both peers.
+- Must not: parse herdr frames beyond `FrameSplitter`'s boundary. Its leg handler takes a plain duplex stream so a Phase 3 UDP acceptor can feed the same handler.
+- Lifecycle: spawned by the attacher; bind race picks the winner. The table is shared by each session's server-drain thread and the leg threads behind one lock; releasing a session closes its server stream.
+- Errors: answers `unknown`/`ended`; ends a session on ring overflow or grace expiry; drops the leg on leg protocol error.
+
+**Attacher** — new function (`remote/attacher.rs`), a dumb pump.
+- Owns: locating or spawning the keeper and connecting to it; then reuses `crate::platform::forward_remote_bridge_stdio(keeper_stream, false)` unchanged — not a new pump.
+
+**`remote::dispatch`** — new closed `match` over the two `--x-mosh-*` flags. Fixed kinds, no trait.
+
+**LinkStatus** — new serde enum (`src/mosh/outage.rs`, mounted as `client::mosh_outage`), `Resuming{last_contact_ms}` / `Linked`, tagged by `state`. The one definition of the payload: the bridge encodes it, the client decodes it.
+
+**OutageState** — new process-global per-endpoint map behind `observe`/`paint`.
+- Owns: transitions (clear on `linked`, on endpoint removal, after a 2 s stale gap) and painting the banner row.
+- Must not: detect outages (the bridge does).
+
+**SshStdioBridge** — extended: constructed by struct literal from the fork, its thread running `LocalBridge`; fields and Drop unchanged.
+
+Variation: leg transport (ssh now, QUIC in Phase 3a) → the `LegDialer` trait, the kind chosen once in `start_ui_bridge`. Session message kinds and link-status states are fixed → closed enums with `match`. Plain vs resume → decided once in `start_ui_bridge`; downgrade surfaces as `LegError::Unsupported`.
+Walk-through: `attach.rs:90` calls `start_ui_bridge` → capability probe → `SshLegDialer` → `LocalBridge` thread → returns `SshStdioBridge`. Client connects; local end creates a `SessionEndpoint`, dials leg 0 (`bridge_child` over a socketpair, `--x-mosh-session-v1`); remote `dispatch` runs the attacher, which connects to the keeper and runs `forward_remote_bridge_stdio`; keeper gets HELLO with a fresh token, answers `new`, connects to the server. DATA/ACK flow; downstream passes `FrameSplitter` to the client as whole frames. ssh is killed → 8 s silence or EOF → leg torn down; `LocalBridge` injects `Resuming` every 1 s; `observe`/`paint` show the banner. Dialer back-off → reconnect leg N (BatchMode, no ControlMaster) → HELLO with the token → keeper steals the leg, answers `resumed` → both rings replay from peer offsets → `Linked` clears the banner. Future change, Phase 3a QUIC: one new `QuicLegDialer` (wrapping `SshLegDialer` for the 3 s fallback) plus one registration in `start_ui_bridge`; keeper side, one new acceptor feeding the existing leg handler. Session, ring and splitter untouched.
+Per spec §Discovery step 4: `start_ui_bridge` returns an upstream `SshStdioBridge` struct literal rather than a fork type — deliberate, so callers' types don't change.
+Per spec §Outage banner: `observe`/`paint` hooks take no handle, so `OutageState` is deliberately process-global.
+Per spec §Legs: the dialer deliberately branches on leg 0 vs reconnect legs for interactivity and ControlMaster use.
+Per spec §Discovery: a downgraded remote falls back to upstream's plain `bridge_connection` mid-session, once — deliberate.
+
+Digest:
+- SessionMsg: owns the session message codec; new message kinds are a variant plus a match arm; callers never hand-pack type/len bytes.
+- SessionEndpoint: owns offsets, dedup, acks, heartbeats and resume negotiation for one session end; protocol rule changes go here; bridge and keeper never do offset arithmetic themselves.
+- ReplayRing: owns offset-keyed replay storage; capacity supplied by the owner; never decides overflow policy.
+- FrameSplitter: owns herdr length-prefix framing and injected-frame encoding; nothing else parses frame lengths.
+- Leg: owns one live transport connection and its teardown; never interprets bytes.
+- LegDialer: owns how the next leg is made, back-off and failure classification; a new transport is a new impl registered in `start_ui_bridge`; callers never build ssh commands.
+- LocalBridge: owns the user-facing socket, per-connection pump, injection, deadline and end triggers; new outage behaviour goes here; never touches ssh arguments.
+- start_ui_bridge: the single choice of plain vs resume and of dialer kind; callers never branch on mosh support.
+- Keeper: owns parked server connections, token table, grace and drain policy; new leg sources are acceptors feeding its one leg handler; never parses frames beyond boundaries.
+- Attacher: owns locating/spawning the keeper; pumps via existing `forward_remote_bridge_stdio`; never interprets session bytes.
+- remote::dispatch: owns `--x-mosh-*` flag routing; a new flag is a match arm.
+- LinkStatus: the one definition of the `x-mosh.link.v1` payload; new states are variants; never redefined bridge-side.
+- OutageState: owns per-endpoint banner state and transitions; new display rules go in `observe`/`paint`; never detects outages.
+
 ## Post-Implementation Notes
 
 > *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
