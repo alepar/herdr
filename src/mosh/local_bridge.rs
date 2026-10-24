@@ -1413,6 +1413,8 @@ mod tests {
         last_rx: Option<Instant>,
         stall: bool,
         kill_now: bool,
+        /// Append a gap DATA to the next write that carries a DATA message.
+        corrupt_next: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1445,6 +1447,9 @@ mod tests {
         }
         fn kill_leg(&self) {
             self.st().kill_now = true;
+        }
+        fn corrupt_next_write(&self) {
+            self.st().corrupt_next = true;
         }
         fn last_rx(&self) -> Option<Instant> {
             self.st().last_rx
@@ -1606,6 +1611,18 @@ mod tests {
                     ep.delivered(now, ep.recv_offset());
                     while let Some(message) = ep.poll_send(now) {
                         out.push(message);
+                    }
+                    let has_data = out.iter().any(|message| {
+                        let mut probe = Decoder::default();
+                        probe.push(message);
+                        matches!(probe.next(), Ok(Some(SessionMsg::Data { .. })))
+                    });
+                    if has_data && std::mem::take(&mut st.corrupt_next) {
+                        // One write: the valid DATA, then a DATA far past the stream end
+                        // that is not in the ring and so is never replayed.
+                        let gap = st.endpoint.as_ref().unwrap().outbound_end() + 1000;
+                        out.push(SessionMsg::Data { offset: gap, bytes: b"x".to_vec() }.encode());
+                        out = vec![out.concat()];
                     }
                 }
                 if !eof {
@@ -2328,5 +2345,27 @@ mod tests {
         wait_until("END", WAIT, || !keeper.ends().is_empty());
         assert_eq!(keeper.ends(), [end_reason::CLIENT_GONE]);
         assert_eq!(keeper.st().upstream_at_end, Some(300 * 1024), "END follows every ring byte");
+    }
+
+    #[test]
+    fn valid_data_then_gap_in_one_write_is_delivered_once() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        keeper.corrupt_next_write();
+        keeper.push_down(frame("lead"));
+        // The bridge delivers `lead`, drops the leg on the gap, and resumes from a
+        // recv_offset that already counts `lead`.
+        wait_until("second leg", WAIT, || keeper.hellos().len() == 2);
+        keeper.push_down(frame("after"));
+        let mut frames = Vec::new();
+        while frames.len() < 2 {
+            match client.next_seen(WAIT) {
+                (_, Seen::Link(_)) => {}
+                (_, got) => frames.push(got),
+            }
+        }
+        assert_eq!(frames, [data("lead"), data("after")]);
+        assert!(keeper.hellos()[1].resume, "second leg is a resume");
     }
 }

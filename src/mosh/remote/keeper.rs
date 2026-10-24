@@ -1517,4 +1517,30 @@ mod tests {
         let err = run(&["--something-else".to_string()]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
+
+    #[test]
+    fn valid_data_then_gap_in_one_write_reaches_server_once() {
+        let h = Harness::new();
+        let mut local = new_session(&h);
+        let conn = h.server().conn(0);
+        // Built from the local endpoint so its offsets stay consistent, then a DATA far past
+        // the stream end, all in one write.
+        local.endpoint.push_source(b"lead").unwrap();
+        let mut buf = Vec::new();
+        while let Some(message) = local.endpoint.poll_send(Instant::now()) {
+            buf.extend(message);
+        }
+        buf.extend(SessionMsg::Data { offset: 1000, bytes: b"x".to_vec() }.encode());
+        local.stream.write_all(&buf).unwrap();
+        h.wait_trace("leg_down", "reason", "protocol");
+        // The keeper's recv_offset is 4, matching the local's outbound_end: nothing is replayed.
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::Resumed);
+        local.send_data(b"after");
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received() == b"leadafter"),
+            "server saw {:?}",
+            String::from_utf8_lossy(&conn.received())
+        );
+    }
 }
