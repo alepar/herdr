@@ -1,0 +1,1016 @@
+diff --git a/src/mosh/ssh_leg.rs b/src/mosh/ssh_leg.rs
+new file mode 100644
+index 00000000..6a6a0f3b
+--- /dev/null
++++ b/src/mosh/ssh_leg.rs
+@@ -0,0 +1,1010 @@
++//! Leg abstraction and its ssh implementation: per-leg command construction, spawn/kill,
++//! failure classification, reconnect back-off. Does not own session bytes.
++
++use super::super as attach;
++use attach::{ManagedSshOptions, RemoteClientStatusJson, RemoteHerdr, RemoteSsh};
++use std::io::{self, BufReader};
++use std::process::{ChildStdout, Command, ExitStatus, Stdio};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::mpsc;
++use std::thread;
++use std::time::{Duration, Instant};
++
++/// Which leg of a session is being dialed: leg 0 (first connection, today's options) or a
++/// reconnect leg (noninteractive, ControlMaster bypassed).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum LegKind {
++    Initial,
++    Reconnect,
++}
++
++/// Structured end report of one leg; classification input for `LegDialer::classify`.
++#[derive(Debug, Default)]
++pub(super) struct LegEndReport {
++    pub exit_status: Option<ExitStatus>,
++    /// Captured on reconnect legs only.
++    pub stderr: Option<String>,
++    pub welcome_reached: bool,
++    /// `END` reason seen before `WELCOME`.
++    pub pre_welcome_end: Option<String>,
++    /// Pre-`WELCOME` bound, setup deadline or stop.
++    pub killed_by_bridge: bool,
++}
++
++type Teardown = Box<dyn FnOnce(bool) -> (Option<ExitStatus>, Option<String>) + Send>;
++
++/// One live connection to the keeper side (transport-neutral).
++///
++/// Owns: a duplex byte stream, a teardown handle, and a structured end report (`ExitStatus`,
++/// captured stderr on reconnect legs, whether `WELCOME` was reached, any pre-`WELCOME` `END`
++/// reason). For ssh it owns the ssh child directly: no socketpair, no `bridge_child`.
++/// Hides: which process or transport carries the bytes.
++/// Must not: know session semantics (it never interprets bytes).
++/// Lifecycle: produced by a `LegDialer`, owned by the connection run; teardown kills the
++/// child on silence, protocol error or session end. Dropping an unfinished leg tears it down
++/// with `kill = true`.
++pub(super) struct Leg {
++    reader: Option<Box<dyn io::Read + Send>>,
++    writer: Option<Box<dyn io::Write + Send>>,
++    /// Argument: whether to kill the underlying process before reaping it.
++    teardown: Option<Teardown>,
++    welcome_reached: bool,
++    pre_welcome_end: Option<String>,
++}
++
++impl Leg {
++    #[cfg(test)]
++    pub(super) fn new(
++        reader: Box<dyn io::Read + Send>,
++        writer: Box<dyn io::Write + Send>,
++        teardown: Teardown,
++    ) -> Leg {
++        Leg {
++            reader: Some(reader),
++            writer: Some(writer),
++            teardown: Some(teardown),
++            welcome_reached: false,
++            pre_welcome_end: None,
++        }
++    }
++
++    /// Wrap a spawned child whose stdin/stdout are the leg's byte stream.
++    #[cfg(test)]
++    pub(super) fn from_child(mut child: std::process::Child) -> io::Result<Leg> {
++        let stdin = child
++            .stdin
++            .take()
++            .ok_or_else(|| io::Error::other("leg child has no stdin"))?;
++        let stdout = child
++            .stdout
++            .take()
++            .ok_or_else(|| io::Error::other("leg child has no stdout"))?;
++        Ok(Leg::new(
++            Box::new(stdout),
++            Box::new(stdin),
++            Box::new(move |kill| {
++                if kill {
++                    let _ = child.kill();
++                }
++                (child.wait().ok(), None)
++            }),
++        ))
++    }
++
++    /// The pumps run on separate threads, so each half is taken once.
++    pub(super) fn take_reader(&mut self) -> Option<Box<dyn io::Read + Send>> {
++        self.reader.take()
++    }
++
++    pub(super) fn take_writer(&mut self) -> Option<Box<dyn io::Write + Send>> {
++        self.writer.take()
++    }
++
++    pub(super) fn mark_welcome(&mut self) {
++        self.welcome_reached = true;
++    }
++
++    pub(super) fn record_pre_welcome_end(&mut self, reason: String) {
++        self.pre_welcome_end = Some(reason);
++    }
++
++    /// Tear the leg down (killing the process when `kill`) and return its end report.
++    pub(super) fn finish(mut self, kill: bool) -> LegEndReport {
++        let (exit_status, stderr) = match self.teardown.take() {
++            Some(teardown) => {
++                // Close our stream halves first so a child waiting on stdin can exit.
++                self.writer = None;
++                self.reader = None;
++                teardown(kill)
++            }
++            None => (None, None),
++        };
++        LegEndReport {
++            exit_status,
++            stderr,
++            welcome_reached: self.welcome_reached,
++            pre_welcome_end: self.pre_welcome_end.take(),
++            killed_by_bridge: kill,
++        }
++    }
++}
++
++impl Drop for Leg {
++    fn drop(&mut self) {
++        if let Some(teardown) = self.teardown.take() {
++            self.writer = None;
++            self.reader = None;
++            teardown(true);
++        }
++    }
++}
++
++/// Why a leg could not be made or ended, each carrying the error that explains it.
++/// `Retryable` (including silence or EOF before `WELCOME` on a reconnect leg, within the
++/// give-up deadline), `Fatal` (auth/host key at exit 255 on a reconnect leg, or a positive
++/// remote refusal), `Unsupported` (any remote-side failure before `WELCOME` on leg 0 only,
++/// which falls back to the plain bridge). Kept distinct.
++#[derive(Debug)]
++pub(super) enum LegError {
++    Retryable(io::Error),
++    Fatal(io::Error),
++    Unsupported(io::Error),
++}
++
++/// "Produce the next leg."
++///
++/// Owns (`SshLegDialer`, mosh-dqw.6): per-leg remote command via upstream builders, leg-0 vs
++/// reconnect options, the back-off schedule, and failure classification from the leg's end
++/// report. Hides: ssh arguments and ControlMaster bypass. Must not: touch session bytes or the
++/// give-up deadline (the caller owns the deadline and stop flag and stops dialing when either
++/// fires). A new transport is a new impl registered in `start_ui_bridge`; callers never build
++/// ssh commands.
++/// Lifecycle: created by `start_ui_bridge`, owned by the `LocalBridge` for the bridge's lifetime.
++pub(super) trait LegDialer: Send {
++    /// Spawn the next leg and return once its ready marker is consumed (the caller writes HELLO
++    /// immediately). `setup_deadline`: `None` on leg 0 (prompts may take arbitrarily long); on a
++    /// reconnect leg the caller passes `session::setup_deadline(now, give_up_at)`.
++    /// On deadline or `stop`, the child is killed and the result is `Retryable`.
++    fn dial(
++        &mut self,
++        kind: LegKind,
++        setup_deadline: Option<Instant>,
++        stop: &AtomicBool,
++    ) -> Result<Leg, LegError>;
++    /// Classify a finished leg from its structured end report.
++    fn classify(&self, kind: LegKind, end: &LegEndReport) -> LegError;
++    /// Delay before reconnect attempt `attempt` (0-based): 1, 2, 4, 8, 8... s.
++    fn backoff(&self, attempt: u32) -> Duration;
++}
++
++/// Spawn `command` as a leg: stdin/stdout piped (the leg's duplex stream), stderr piped and
++/// drained on a thread when `capture_stderr` (capped like `capture_ssh_stderr`), else as set on
++/// the command. Returns the leg (reader not yet attached) and the child's buffered stdout, so
++/// the caller can consume the ready marker before handing the same buffer to the leg.
++fn spawn_leg(
++    mut command: Command,
++    capture_stderr: bool,
++) -> io::Result<(Leg, BufReader<ChildStdout>)> {
++    command.stdin(Stdio::piped()).stdout(Stdio::piped());
++    if capture_stderr {
++        command.stderr(Stdio::piped());
++    }
++    let mut child = command.spawn()?;
++    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
++        let _ = child.kill();
++        let _ = child.wait();
++        return Err(io::Error::other("leg child has no piped stdio"));
++    };
++    let stderr_thread = child.stderr.take().map(|stderr| {
++        thread::spawn(move || attach::capture_ssh_stderr(stderr).unwrap_or_default())
++    });
++    let leg = Leg {
++        reader: None,
++        writer: Some(Box::new(stdin)),
++        teardown: Some(Box::new(move |kill| {
++            if kill {
++                let _ = child.kill();
++            }
++            let status = child.wait().ok();
++            let stderr = stderr_thread.map(|handle| {
++                String::from_utf8_lossy(&handle.join().unwrap_or_default()).into_owned()
++            });
++            (status, stderr)
++        })),
++        welcome_reached: false,
++        pre_welcome_end: None,
++    };
++    Ok((leg, BufReader::new(stdout)))
++}
++
++/// Classify a leg that ended before the session was established (or after, which is always
++/// retryable). A pure function of `kind` and the report; a leg torn down for stop or session
++/// end is not classified (the caller's job). Order: post-`WELCOME`, ssh-level failure
++/// (exit 255), explicit pre-`WELCOME` `END`, remote error exit, otherwise EOF/silence.
++pub(super) fn classify_leg(kind: LegKind, end: &LegEndReport) -> LegError {
++    let reconnect = kind == LegKind::Reconnect;
++    let code = end.exit_status.and_then(|status| status.code());
++    let stderr = end.stderr.as_deref().unwrap_or("");
++    if end.welcome_reached {
++        return LegError::Retryable(io::Error::other(format!(
++            "leg ended after WELCOME ({})",
++            describe_exit(end)
++        )));
++    }
++    if code == Some(255) && !end.killed_by_bridge {
++        if !reconnect {
++            let status = end.exit_status.expect("code implies status");
++            return LegError::Fatal(attach::ssh_bridge_exit_error(status, stderr.as_bytes()));
++        }
++        let evidence = format!("ssh failed (exit 255): {}", stderr.trim());
++        return if stderr.contains("Permission denied")
++            || stderr.contains("Host key verification failed")
++        {
++            LegError::Fatal(io::Error::other(evidence))
++        } else {
++            LegError::Retryable(io::Error::other(evidence))
++        };
++    }
++    if let Some(reason) = &end.pre_welcome_end {
++        let err = io::Error::other(format!("remote refused the session before WELCOME: {reason}"));
++        return if reconnect {
++            LegError::Fatal(err)
++        } else {
++            LegError::Unsupported(err)
++        };
++    }
++    if matches!(code, Some(c) if c != 0) && !end.killed_by_bridge {
++        let err = io::Error::other(format!(
++            "remote bridge failed before WELCOME ({}){}",
++            describe_exit(end),
++            if stderr.trim().is_empty() {
++                String::new()
++            } else {
++                format!(": {}", stderr.trim())
++            }
++        ));
++        return if reconnect {
++            LegError::Fatal(err)
++        } else {
++            LegError::Unsupported(err)
++        };
++    }
++    let err = io::Error::other(format!(
++        "leg ended before WELCOME ({})",
++        describe_exit(end)
++    ));
++    if reconnect {
++        LegError::Retryable(err)
++    } else {
++        LegError::Unsupported(err)
++    }
++}
++
++fn describe_exit(end: &LegEndReport) -> String {
++    let status = end
++        .exit_status
++        .map_or_else(|| "no exit status".to_owned(), |status| status.to_string());
++    if end.killed_by_bridge {
++        format!("{status}, killed by the bridge")
++    } else {
++        status
++    }
++}
++
++/// Ssh implementation of `LegDialer`: builds each leg's ssh command and owns the spawned child.
++pub(super) struct SshLegDialer {
++    target: String,
++    remote_command: String,
++    options: Option<ManagedSshOptions>,
++    noninteractive: bool,
++}
++
++impl SshLegDialer {
++    pub(super) fn new(
++        target: String,
++        remote_herdr: &RemoteHerdr,
++        session_name: &str,
++        options: Option<&ManagedSshOptions>,
++        noninteractive: bool,
++    ) -> Self {
++        let args = attach::RemoteExecutable::session_args(
++            session_name,
++            &["remote-client-bridge", super::SESSION_FLAG],
++        );
++        let remote_command = attach::posix_remote_output_command(&format!(
++            "exec {}",
++            remote_herdr.executable.command(&args)
++        ));
++        SshLegDialer {
++            target,
++            remote_command,
++            options: options.cloned(),
++            noninteractive,
++        }
++    }
++
++    /// Leg 0 mirrors `bridge_connection` exactly. Every reconnect leg is noninteractive and
++    /// bypasses any ControlMaster (never `-S`, `ControlPath=none`), whatever the config says.
++    fn leg_command(&self, kind: LegKind) -> Command {
++        let mut command = Command::new("ssh");
++        match kind {
++            LegKind::Initial => {
++                attach::apply_managed_ssh_options(&mut command, self.options.as_ref());
++                if self.noninteractive {
++                    attach::apply_noninteractive_ssh_options(&mut command);
++                }
++            }
++            LegKind::Reconnect => {
++                let no_master = self.options.as_ref().map(|options| ManagedSshOptions {
++                    control_path: None,
++                    ..options.clone()
++                });
++                attach::apply_managed_ssh_options(&mut command, no_master.as_ref());
++                attach::apply_noninteractive_ssh_options(&mut command);
++                command.args(["-o", "ControlPath=none", "-o", "ControlMaster=no"]);
++            }
++        }
++        command.arg("-T").arg(&self.target).arg(&self.remote_command);
++        command
++    }
++
++    /// Spawn `command` as a leg and wait for its ready marker, honouring `stop` and the setup
++    /// deadline. Split from `dial` so tests can drive it without ssh.
++    fn dial_command(
++        &self,
++        command: Command,
++        kind: LegKind,
++        setup_deadline: Option<Instant>,
++        stop: &AtomicBool,
++    ) -> Result<Leg, LegError> {
++        let capture = kind == LegKind::Reconnect || self.noninteractive;
++        let (mut leg, mut reader) = spawn_leg(command, capture)
++            .map_err(|err| LegError::Fatal(io::Error::new(err.kind(), format!("could not start ssh: {err}"))))?;
++        let (tx, rx) = mpsc::channel();
++        thread::spawn(move || {
++            let result = attach::discard_remote_output_preamble(&mut reader);
++            let _ = tx.send((result, reader));
++        });
++        loop {
++            if stop.load(Ordering::SeqCst) {
++                leg.finish(true);
++                return Err(LegError::Retryable(io::Error::other("leg dial stopped")));
++            }
++            if setup_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
++                leg.finish(true);
++                return Err(LegError::Retryable(io::Error::other(
++                    "leg did not become ready before the setup deadline",
++                )));
++            }
++            match rx.recv_timeout(Duration::from_millis(100)) {
++                Ok((Ok(()), reader)) => {
++                    leg.reader = Some(Box::new(reader));
++                    return Ok(leg);
++                }
++                Ok((Err(_), _)) => {
++                    let report = leg.finish(false);
++                    return Err(self.classify(kind, &report));
++                }
++                Err(mpsc::RecvTimeoutError::Timeout) => {}
++                Err(mpsc::RecvTimeoutError::Disconnected) => {
++                    leg.finish(true);
++                    return Err(LegError::Retryable(io::Error::other(
++                        "leg marker reader ended unexpectedly",
++                    )));
++                }
++            }
++        }
++    }
++}
++
++impl LegDialer for SshLegDialer {
++    fn dial(
++        &mut self,
++        kind: LegKind,
++        setup_deadline: Option<Instant>,
++        stop: &AtomicBool,
++    ) -> Result<Leg, LegError> {
++        self.dial_command(self.leg_command(kind), kind, setup_deadline, stop)
++    }
++
++    fn classify(&self, kind: LegKind, end: &LegEndReport) -> LegError {
++        classify_leg(kind, end)
++    }
++
++    fn backoff(&self, attempt: u32) -> Duration {
++        Duration::from_secs(1 << attempt.min(3))
++    }
++}
++
++/// Probe the selected remote binary, then the other candidates, for the resume capability.
++/// `Ok(Some(h))`: resume with `h` (possibly a different candidate than `selected`);
++/// `Ok(None)`: plain. Silent: the caller prints the `HERDR_REMOTE_BINARY` hint.
++pub(super) fn select_resume_candidate(
++    ssh: &RemoteSsh,
++    selected: &RemoteHerdr,
++) -> io::Result<Option<RemoteHerdr>> {
++    select_with(
++        selected,
++        |herdr| attach::remote_client_status(ssh, herdr),
++        || attach::remote_binary_candidates(ssh, selected),
++    )
++}
++
++fn select_with(
++    selected: &RemoteHerdr,
++    mut status: impl FnMut(&RemoteHerdr) -> io::Result<Option<RemoteClientStatusJson>>,
++    candidates: impl FnOnce() -> io::Result<Vec<RemoteHerdr>>,
++) -> io::Result<Option<RemoteHerdr>> {
++    fn qualifies(herdr: &RemoteHerdr, status: &RemoteClientStatusJson) -> bool {
++        status
++            .endpoint_capabilities
++            .iter()
++            .any(|capability| capability == super::STATUS_CAPABILITY)
++            && status.supports_endpoint_requirement(&herdr.platform, true)
++    }
++
++    if selected.platform.is_windows() {
++        return Ok(None);
++    }
++    if let Some(found) = status(selected)? {
++        if qualifies(selected, &found) {
++            return Ok(Some(selected.clone()));
++        }
++    }
++    for mut candidate in candidates()? {
++        if candidate.executable == selected.executable {
++            continue; // already probed
++        }
++        if let Some(found) = status(&candidate).unwrap_or(None) {
++            if qualifies(&candidate, &found) {
++                candidate.bridge_idle_timeout = found.remote_bridge_idle_timeout;
++                return Ok(Some(candidate));
++            }
++        }
++    }
++    Ok(None)
++}
++
++#[cfg(all(test, unix))]
++mod tests {
++    use super::*;
++    use std::io::{Read, Write};
++    use std::os::unix::process::ExitStatusExt;
++
++    fn spawn(script: &str) -> std::process::Child {
++        Command::new("sh")
++            .args(["-c", script])
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .spawn()
++            .expect("spawn sh")
++    }
++
++    #[test]
++    fn finish_reports_exit_code() {
++        let leg = Leg::from_child(spawn("exit 3")).unwrap();
++        let report = leg.finish(false);
++        assert_eq!(report.exit_status.and_then(|s| s.code()), Some(3));
++        assert!(!report.killed_by_bridge);
++    }
++
++    #[test]
++    fn finish_kill_returns_promptly() {
++        let leg = Leg::from_child(spawn("sleep 30")).unwrap();
++        let started = Instant::now();
++        let report = leg.finish(true);
++        assert!(started.elapsed() < Duration::from_secs(5));
++        assert!(report.killed_by_bridge);
++        assert_eq!(
++            report.exit_status.and_then(|s| s.signal()),
++            Some(libc::SIGKILL)
++        );
++    }
++
++    #[test]
++    fn drop_kills_unfinished_leg() {
++        let leg = Leg::from_child(spawn("sleep 30")).unwrap();
++        let started = Instant::now();
++        drop(leg);
++        assert!(started.elapsed() < Duration::from_secs(5));
++    }
++
++    #[test]
++    fn stream_echoes_through_child() {
++        let mut leg = Leg::from_child(spawn("cat")).unwrap();
++        let mut writer = leg.take_writer().unwrap();
++        let mut reader = leg.take_reader().unwrap();
++        writer.write_all(b"ping").unwrap();
++        writer.flush().unwrap();
++        let mut buf = [0u8; 4];
++        reader.read_exact(&mut buf).unwrap();
++        assert_eq!(&buf, b"ping");
++        assert!(leg.take_writer().is_none());
++        drop(writer);
++        drop(reader);
++        leg.finish(true);
++    }
++
++    #[test]
++    fn welcome_and_pre_welcome_end_are_reported() {
++        let mut leg = Leg::from_child(spawn("exit 0")).unwrap();
++        leg.mark_welcome();
++        leg.record_pre_welcome_end("nope".into());
++        let report = leg.finish(false);
++        assert!(report.welcome_reached);
++        assert_eq!(report.pre_welcome_end.as_deref(), Some("nope"));
++    }
++
++    // ---- SshLegDialer commands -------------------------------------------------------------
++
++    use attach::{ManagedSshConfigDirectory, RemotePlatform};
++    use std::sync::Arc;
++
++    const MARKER_PRINTF: &str = "printf '\\nherdr-remote-output-ready:1\\n'";
++
++    fn linux() -> RemotePlatform {
++        RemotePlatform {
++            os: "linux",
++            arch: "x86_64",
++        }
++    }
++
++    fn herdr_at(path: &str) -> RemoteHerdr {
++        RemoteHerdr::for_platform(linux()).with_posix_path(path)
++    }
++
++    fn managed() -> ManagedSshOptions {
++        let directory = crate::platform::create_remote_ssh_config_dir("mosh-test").unwrap();
++        ManagedSshOptions {
++            config_path: directory.join("config"),
++            control_path: Some(directory.join("ctl")),
++            _directory: Arc::new(ManagedSshConfigDirectory(directory)),
++        }
++    }
++
++    fn dialer(options: Option<&ManagedSshOptions>, noninteractive: bool) -> SshLegDialer {
++        SshLegDialer::new(
++            "user@host".into(),
++            &RemoteHerdr::for_platform(linux()),
++            "work",
++            options,
++            noninteractive,
++        )
++    }
++
++    fn args(command: &Command) -> Vec<String> {
++        command
++            .get_args()
++            .map(|arg| arg.to_string_lossy().into_owned())
++            .collect()
++    }
++
++    fn has_pair(args: &[String], a: &str, b: &str) -> bool {
++        args.windows(2).any(|pair| pair[0] == a && pair[1] == b)
++    }
++
++    fn assert_reconnect_bypasses_master(options: Option<&ManagedSshOptions>) {
++        let command = dialer(options, false).leg_command(LegKind::Reconnect);
++        let args = args(&command);
++        assert!(has_pair(&args, "-o", "BatchMode=yes"), "{args:?}");
++        assert!(has_pair(&args, "-o", "ConnectTimeout=10"), "{args:?}");
++        let noninteractive = args.iter().position(|a| a == "BatchMode=yes").unwrap();
++        let none = args.iter().position(|a| a == "ControlPath=none").unwrap();
++        assert!(none > noninteractive);
++        assert_eq!(args[none - 1], "-o");
++        assert!(has_pair(&args, "-o", "ControlMaster=no"), "{args:?}");
++        assert!(!args.iter().any(|a| a == "-S"), "{args:?}");
++        assert!(!args.iter().any(|a| a == "ControlMaster=auto"), "{args:?}");
++        assert!(command
++            .get_envs()
++            .all(|(key, _)| key != "LC_ALL"));
++        assert_eq!(args[args.len() - 3], "-T");
++        assert_eq!(args[args.len() - 2], "user@host");
++    }
++
++    #[test]
++    fn reconnect_command_bypasses_master_managed() {
++        let options = managed();
++        assert_reconnect_bypasses_master(Some(&options));
++        let args = args(&dialer(Some(&options), false).leg_command(LegKind::Reconnect));
++        assert!(args.iter().any(|a| a == "-F"), "managed config still used");
++    }
++
++    #[test]
++    fn reconnect_command_bypasses_master_unmanaged() {
++        assert_reconnect_bypasses_master(None);
++    }
++
++    #[test]
++    fn initial_command_matches_today() {
++        let options = managed();
++        for (opts, interactive) in [(Some(&options), true), (None, false)] {
++            let dialer = dialer(opts, !interactive);
++            let mut expected = Command::new("ssh");
++            attach::apply_managed_ssh_options(&mut expected, opts);
++            if !interactive {
++                attach::apply_noninteractive_ssh_options(&mut expected);
++            }
++            expected
++                .arg("-T")
++                .arg("user@host")
++                .arg(&dialer.remote_command);
++            let actual = dialer.leg_command(LegKind::Initial);
++            assert_eq!(args(&actual), args(&expected));
++            assert_eq!(actual.get_program(), expected.get_program());
++            assert!(!args(&actual).iter().any(|a| a == "ControlPath=none"));
++        }
++    }
++
++    #[test]
++    fn remote_command_has_session_flag_and_args() {
++        let remote = dialer(None, false).remote_command;
++        assert!(
++            remote.starts_with(&attach::posix_remote_output_command("")),
++            "{remote}"
++        );
++        let tail = "--session work remote-client-bridge --x-mosh-session-v1";
++        assert!(remote.contains(tail), "{remote}");
++        assert!(remote.contains("exec "), "{remote}");
++        assert!(!remote.contains("idle-timeout"), "{remote}");
++        let default = SshLegDialer::new(
++            "h".into(),
++            &RemoteHerdr::for_platform(linux()),
++            crate::session::DEFAULT_SESSION_NAME,
++            None,
++            false,
++        )
++        .remote_command;
++        assert!(!default.contains("--session"), "{default}");
++        assert!(default.contains("herdr\" remote-client-bridge --x-mosh-session-v1"));
++    }
++
++    // ---- leg ownership and dial ------------------------------------------------------------
++
++    fn sh(script: &str) -> Command {
++        let mut command = Command::new("sh");
++        command.args(["-c", script]);
++        command
++    }
++
++    fn ready_script(rest: &str) -> String {
++        format!("{MARKER_PRINTF}; {rest}")
++    }
++
++    #[test]
++    fn leg_owns_child_exit_status_and_stderr() {
++        let script = ready_script("printf abc; echo oops >&2; exit 7");
++        let (leg, mut reader) = spawn_leg(sh(&script), true).unwrap();
++        attach::discard_remote_output_preamble(&mut reader).unwrap();
++        let mut rest = String::new();
++        reader.read_to_string(&mut rest).unwrap();
++        assert_eq!(rest, "abc");
++        let report = leg.finish(false);
++        assert_eq!(report.exit_status.and_then(|s| s.code()), Some(7));
++        assert_eq!(report.stderr.as_deref(), Some("oops\n"));
++        assert!(!report.killed_by_bridge);
++    }
++
++    #[test]
++    fn leg_stderr_is_capped() {
++        let (leg, _reader) = spawn_leg(sh("head -c 65536 /dev/zero >&2"), true).unwrap();
++        let report = leg.finish(false);
++        assert_eq!(
++            report.stderr.unwrap().len(),
++            attach::NONINTERACTIVE_SSH_STDERR_LIMIT
++        );
++    }
++
++    #[test]
++    fn leg_without_capture_reports_no_stderr() {
++        let (leg, _reader) = spawn_leg(sh("exit 0"), false).unwrap();
++        assert!(leg.finish(false).stderr.is_none());
++    }
++
++    #[test]
++    fn dial_returns_leg_with_bytes_after_marker() {
++        let script = ready_script("printf abc; exec cat");
++        let stop = AtomicBool::new(false);
++        let mut leg = dialer(None, false)
++            .dial_command(sh(&script), LegKind::Reconnect, None, &stop)
++            .unwrap();
++        let mut reader = leg.take_reader().unwrap();
++        let mut buf = [0u8; 3];
++        reader.read_exact(&mut buf).unwrap();
++        assert_eq!(&buf, b"abc");
++        let mut writer = leg.take_writer().unwrap();
++        writer.write_all(b"xy").unwrap();
++        writer.flush().unwrap();
++        let mut echo = [0u8; 2];
++        reader.read_exact(&mut echo).unwrap();
++        assert_eq!(&echo, b"xy");
++        drop((reader, writer));
++        leg.finish(true);
++    }
++
++    #[test]
++    fn dial_stop_kills_child_and_is_retryable() {
++        let stop = Arc::new(AtomicBool::new(false));
++        let flag = Arc::clone(&stop);
++        let setter = thread::spawn(move || {
++            thread::sleep(Duration::from_millis(200));
++            flag.store(true, Ordering::SeqCst);
++        });
++        let started = Instant::now();
++        let result =
++            dialer(None, false).dial_command(sh("exec sleep 30"), LegKind::Reconnect, None, &stop);
++        setter.join().unwrap();
++        assert!(matches!(result, Err(LegError::Retryable(_))));
++        assert!(started.elapsed() < Duration::from_secs(1));
++    }
++
++    #[test]
++    fn dial_setup_deadline_kills_child_and_is_retryable() {
++        let stop = AtomicBool::new(false);
++        let started = Instant::now();
++        let deadline = started + Duration::from_millis(300);
++        let result = dialer(None, false).dial_command(
++            sh("exec sleep 30"),
++            LegKind::Reconnect,
++            Some(deadline),
++            &stop,
++        );
++        assert!(matches!(result, Err(LegError::Retryable(_))));
++        let elapsed = started.elapsed();
++        assert!(elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(1));
++    }
++
++    #[test]
++    fn dial_eof_before_marker_is_classified_from_exit() {
++        let stop = AtomicBool::new(false);
++        let d = dialer(None, true);
++        let fatal = d.dial_command(sh("echo Permission denied >&2; exit 255"), LegKind::Reconnect, None, &stop);
++        assert!(matches!(fatal, Err(LegError::Fatal(_))));
++        let leg0 = d.dial_command(sh("exit 3"), LegKind::Initial, None, &stop);
++        assert!(matches!(leg0, Err(LegError::Unsupported(_))));
++        let eof = d.dial_command(sh("exit 0"), LegKind::Reconnect, None, &stop);
++        assert!(matches!(eof, Err(LegError::Retryable(_))));
++    }
++
++    // ---- classification --------------------------------------------------------------------
++
++    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
++    enum Class {
++        Retryable,
++        Fatal,
++        Unsupported,
++    }
++
++    fn class(error: LegError) -> Class {
++        match error {
++            LegError::Retryable(_) => Class::Retryable,
++            LegError::Fatal(_) => Class::Fatal,
++            LegError::Unsupported(_) => Class::Unsupported,
++        }
++    }
++
++    fn report(code: Option<i32>, stderr: &str) -> LegEndReport {
++        LegEndReport {
++            exit_status: code.map(|c| ExitStatus::from_raw(c << 8)),
++            stderr: Some(stderr.to_owned()),
++            ..LegEndReport::default()
++        }
++    }
++
++    fn killed() -> LegEndReport {
++        LegEndReport {
++            exit_status: Some(ExitStatus::from_raw(libc::SIGKILL)),
++            stderr: Some(String::new()),
++            killed_by_bridge: true,
++            ..LegEndReport::default()
++        }
++    }
++
++    fn with_end(mut end: LegEndReport, reason: &str) -> LegEndReport {
++        end.pre_welcome_end = Some(reason.into());
++        end
++    }
++
++    fn with_welcome(mut end: LegEndReport) -> LegEndReport {
++        end.welcome_reached = true;
++        end
++    }
++
++    #[test]
++    fn classification_table() {
++        use Class::{Fatal, Retryable, Unsupported};
++        use LegKind::{Initial, Reconnect};
++        let cases: Vec<(&str, LegEndReport, Class, Class)> = vec![
++            ("255 permission denied", report(Some(255), "x: Permission denied (publickey)"), Fatal, Fatal),
++            ("255 host key", report(Some(255), "Host key verification failed."), Fatal, Fatal),
++            ("255 other", report(Some(255), "ssh: connect to host h: Connection timed out"), Fatal, Retryable),
++            ("non-255 exit", report(Some(1), "unsupported remote client bridge option"), Unsupported, Fatal),
++            ("generation mismatch exit", report(Some(2), "generation mismatch"), Unsupported, Fatal),
++            ("bridge-killed", killed(), Unsupported, Retryable),
++            ("attacher END", with_end(report(Some(0), ""), "keeper-unavailable"), Unsupported, Fatal),
++            ("EOF exit 0", report(Some(0), ""), Unsupported, Retryable),
++            ("EOF no status", LegEndReport::default(), Unsupported, Retryable),
++            ("255 beats END", with_end(report(Some(255), "Permission denied"), "keeper-unavailable"), Fatal, Fatal),
++            ("255 other beats END", with_end(report(Some(255), "timed out"), "keeper-unavailable"), Fatal, Retryable),
++            ("END beats remote exit", with_end(report(Some(3), ""), "protocol-version"), Unsupported, Fatal),
++            ("post-WELCOME exit 255", with_welcome(report(Some(255), "Permission denied")), Retryable, Retryable),
++            ("post-WELCOME exit 1", with_welcome(report(Some(1), "")), Retryable, Retryable),
++            ("post-WELCOME killed", with_welcome(killed()), Retryable, Retryable),
++        ];
++        for (name, end, leg0, reconnect) in cases {
++            assert_eq!(class(classify_leg(Initial, &end)), leg0, "leg 0: {name}");
++            assert_eq!(
++                class(classify_leg(Reconnect, &end)),
++                reconnect,
++                "reconnect: {name}"
++            );
++        }
++    }
++
++    #[test]
++    fn leg_zero_255_keeps_todays_message() {
++        let end = report(Some(255), "Permission denied (publickey).\n");
++        let LegError::Fatal(err) = classify_leg(LegKind::Initial, &end) else {
++            panic!("expected Fatal");
++        };
++        let expected = attach::ssh_bridge_exit_error(end.exit_status.unwrap(), b"Permission denied (publickey).\n");
++        assert_eq!(err.to_string(), expected.to_string());
++        assert_eq!(err.kind(), expected.kind());
++    }
++
++    #[test]
++    fn backoff_schedule() {
++        let d = dialer(None, false);
++        let secs: Vec<u64> = (0..6).map(|n| d.backoff(n).as_secs()).collect();
++        assert_eq!(secs, [1, 2, 4, 8, 8, 8]);
++    }
++
++    // ---- probe and re-selection ------------------------------------------------------------
++
++    fn status_json(capability: bool, generation: u32) -> RemoteClientStatusJson {
++        let mut caps = vec![
++            crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY,
++            crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY,
++            crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
++        ];
++        if capability {
++            caps.push(super::super::STATUS_CAPABILITY);
++        }
++        attach::parse_client_status_json(
++            &serde_json::json!({
++                "version": "9.9.9",
++                "endpoint_protocol_generation": generation,
++                "endpoint_capabilities": caps,
++                "remote_bridge_idle_timeout": true,
++            })
++            .to_string(),
++        )
++        .unwrap()
++    }
++
++    fn good() -> u32 {
++        crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION
++    }
++
++    fn path_of(herdr: &RemoteHerdr) -> String {
++        herdr.resolved_executable.clone().unwrap()
++    }
++
++    /// Statuses keyed by resolved path; unknown paths answer `Ok(None)`.
++    fn select(
++        selected: &str,
++        candidates: &[&str],
++        table: Vec<(&str, io::Result<Option<RemoteClientStatusJson>>)>,
++    ) -> (io::Result<Option<RemoteHerdr>>, Vec<String>, bool) {
++        let mut table = table;
++        let mut probed = Vec::new();
++        let mut asked = false;
++        let result = select_with(
++            &herdr_at(selected),
++            |herdr| {
++                let path = path_of(herdr);
++                probed.push(path.clone());
++                match table.iter().position(|(p, _)| *p == path) {
++                    Some(i) => table.remove(i).1,
++                    None => Ok(None),
++                }
++            },
++            || {
++                asked = true;
++                Ok(candidates.iter().map(|p| herdr_at(p)).collect())
++            },
++        );
++        (result, probed, asked)
++    }
++
++    #[test]
++    fn capable_first_candidate() {
++        let (result, probed, asked) = select(
++            "/a/herdr",
++            &["/b/herdr"],
++            vec![("/a/herdr", Ok(Some(status_json(true, good()))))],
++        );
++        assert_eq!(path_of(&result.unwrap().unwrap()), "/a/herdr");
++        assert_eq!(probed, ["/a/herdr"]);
++        assert!(!asked, "candidates must not be discovered");
++    }
++
++    #[test]
++    fn upstream_first_skipped_for_capable_later() {
++        let (result, probed, _) = select(
++            "/a/herdr",
++            &["/a/herdr", "/b/herdr", "/c/herdr"],
++            vec![
++                ("/a/herdr", Ok(Some(status_json(false, good())))),
++                ("/b/herdr", Ok(Some(status_json(false, good())))),
++                ("/c/herdr", Ok(Some(status_json(true, good())))),
++            ],
++        );
++        let chosen = result.unwrap().unwrap();
++        assert_eq!(path_of(&chosen), "/c/herdr");
++        assert!(chosen.bridge_idle_timeout, "copied from the candidate's status");
++        assert_eq!(probed, ["/a/herdr", "/b/herdr", "/c/herdr"]);
++    }
++
++    #[test]
++    fn none_capable_is_plain() {
++        let (result, _, asked) = select(
++            "/a/herdr",
++            &["/b/herdr"],
++            vec![
++                ("/a/herdr", Ok(Some(status_json(false, good())))),
++                ("/b/herdr", Ok(None)),
++            ],
++        );
++        assert!(result.unwrap().is_none());
++        assert!(asked);
++    }
++
++    #[test]
++    fn wrong_generation_candidate_is_skipped() {
++        let (result, _, _) = select(
++            "/a/herdr",
++            &["/b/herdr", "/c/herdr"],
++            vec![
++                ("/b/herdr", Ok(Some(status_json(true, good() + 1)))),
++                ("/c/herdr", Ok(Some(status_json(true, good())))),
++            ],
++        );
++        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
++    }
++
++    #[test]
++    fn candidate_status_error_is_skipped_but_selected_error_propagates() {
++        let (result, _, _) = select(
++            "/a/herdr",
++            &["/b/herdr", "/c/herdr"],
++            vec![
++                ("/b/herdr", Err(io::Error::other("boom"))),
++                ("/c/herdr", Ok(Some(status_json(true, good())))),
++            ],
++        );
++        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
++
++        let (result, _, asked) = select(
++            "/a/herdr",
++            &["/c/herdr"],
++            vec![("/a/herdr", Err(io::Error::other("ssh down")))],
++        );
++        assert!(result.is_err());
++        assert!(!asked);
++    }
++
++    #[test]
++    fn windows_remote_is_plain_without_probing() {
++        let windows = RemoteHerdr::for_platform(RemotePlatform {
++            os: "windows",
++            arch: "x86_64",
++        });
++        let result = select_with(
++            &windows,
++            |_| panic!("must not probe a Windows remote"),
++            || panic!("must not discover candidates"),
++        );
++        assert!(result.unwrap().is_none());
++    }
++}

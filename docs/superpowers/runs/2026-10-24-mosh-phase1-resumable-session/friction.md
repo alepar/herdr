@@ -9,3 +9,5 @@
 - [phase 3 prep] zig 0.16.0 was missing (vendored libghostty-vt build dep); installed official release to ~/.local/opt (sha256 verified) and symlinked ~/.local/bin/zig. bun missing → just check's maintenance-test unavailable; sweep = cargo nextest + clippy -D warnings + fmt --check
 - [phase 3 prep] .superpowers/ (super-code workspace) excluded via .git/info/exclude, not .gitignore (fork minimal-diff)
 - [phase 3 prep] run-start baseline: 4116 run, 4102 passed, 14 failed (pre-run: agent/api_ping/cross_area/live_handoff agent-status tests; evidence/run-start-baseline.txt). Not this run's fix scope.
+- [phase 3] review collection gap: final-review-*.md and 4 cluster reports use ### finding headings; report-verdict --complete rejects them (empty finding section). Producer/extractor format mismatch in super-code final review.
+- [phase 3] coordinator run-failure attribution compared against base 992f6a45 (already contains fork code) instead of run-start baseline; caller re-attributed the 15th failure (client_mode idle-timeout) as run-introduced.

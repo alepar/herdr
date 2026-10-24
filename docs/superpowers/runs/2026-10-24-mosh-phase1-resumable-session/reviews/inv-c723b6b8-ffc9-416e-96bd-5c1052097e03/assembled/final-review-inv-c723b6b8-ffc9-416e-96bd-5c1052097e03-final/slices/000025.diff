@@ -1,0 +1,512 @@
+diff --git a/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md
+new file mode 100644
+index 00000000..6ce3e3b7
+--- /dev/null
++++ b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md
+@@ -0,0 +1,506 @@
++# How mosh delivers an uninterrupted, low-latency shell
++
++**Basis.** This report combines four research notes: SSP, transport, prediction, and limits/alternatives. All four read mosh source at commit `decd9b70` (author date 2026-03-06, commit date 2026-03-22; the notes quoted one date each, and both are correct). The latest release tag is `mosh-1.4.0`.
++
++The notes also used:
++- the USENIX ATC 2012 paper (Winstein & Balakrishnan, mosh.org/mosh-paper.pdf);
++- the mosh.org site and FAQ;
++- the mosh/mosh-server man pages;
++- GitHub issue metadata;
++- Eternal Terminal source at `7ee361a`.
++
++**Tags.**
++- **[src]**: verified in source.
++- **[paper]**: from the paper.
++- **[doc]**: from the site or man pages.
++- **[issue]**: from GitHub issues.
++- **[2nd]**: from a README or secondary source, not checked in code.
++- **[inf]**: inference.
++
++Two contradictions between notes were re-checked in source for this report: the MTU arithmetic and the prediction thresholds. See §2.4 and §4.3.
++
++---
++
++## 1. Architecture overview
++
++### 1.1 Bootstrap via SSH [src scripts/mosh.pl, mosh-server.cc, mosh-client.cc]
++
++1. `mosh.pl` runs `ssh -n [-tt] host -- "mosh-server new -c <colors> [-i ip] [-p port] -l LANG=… [-- cmd]"`.
++2. The UDP target IP is chosen with `--experimental-remote-ip`:
++   - `proxy` (the default): mosh.pl installs itself as ssh's `ProxyCommand` (`--fake-proxy`). It resolves the host and prints `MOSH IP <addr>`, so UDP goes to exactly the address ssh used.
++   - `remote`: uses `$SSH_CONNECTION` from the server.
++   - `local`: uses local DNS resolution.
++3. `mosh-server` then:
++   - binds a UDP port in 60001–60999;
++   - generates a 128-bit AES key;
++   - prints `MOSH CONNECT <port> <22-char base64 key>`;
++   - ignores SIGHUP and SIGPIPE;
++   - forks. The parent prints `[mosh-server detached, pid = N]` and exits, so **the SSH session closes**. SSH is used only for authentication and key transport.
++4. The child calls `forkpty()`, but it holds the login shell back until the first authentic client datagram arrives (`child_released`).
++5. If no client makes contact within 60 s, the child exits (`timeout_if_no_client = 60000`).
++6. `mosh.pl` passes the key to `mosh-client` in the `MOSH_KEY` environment variable. The client calls `unsetenv()` on it immediately, so the key never appears in argv or in child environments.
++
++### 1.2 Roles and layering [paper §2.1, src]
++
++- **Server: `mosh-server`.** It owns the PTY and runs the authoritative terminal emulator (`Terminal::Complete`, which is the framebuffer plus `echo_ack`).
++- **Client: `mosh-client`.** It runs a second copy of the same emulator and draws onto the user's real terminal. Over that it draws a prediction overlay that never touches synced state.
++- **SSP (State Synchronization Protocol)** has two layers:
++  - **Datagram layer** (`Network::Connection`, `network.{h,cc}`): UDP, AES-128-OCB, sequence numbers, timestamps/RTT, roaming and port hopping.
++  - **Transport layer** (`Network::Transport<MyState,RemoteState>` plus `TransportSender`): synchronizes numbered object states with idempotent diffs. It is generic: a state type only needs `diff_from`, `apply_string`, `subtract`, `init_diff`, `operator==` and `reset_input`.
++- **SSP runs twice, once per direction, with deliberately different semantics:**
++  - Client→server, `UserStream`: an **append-only, reliable, ordered log** of `UserByte` and `Resize` events. `diff_from` serializes only the suffix after the acked prefix (consecutive bytes become one `Keystroke`), and `subtract` trims the acked prefix. Every keystroke is delivered [paper: "the diff contains every intervening keystroke"].
++  - Server→client, `Terminal::Complete`: **latest-state-only**, so `subtract` is a no-op. The diff is a protobuf `HostMessage` with optional `EchoAck`, `ResizeMessage` and `HostBytes`. `HostBytes` is a **VT/ANSI escape string** produced by `Display::new_frame(true, old_fb, new_fb)`. The client applies it by feeding it through its own emulator (`act()`), and asserts that this produces no terminal→host output.
++- `MOSH_PROTOCOL_VERSION = 2`, commented "bumped for echo-ack". The receiver throws on a mismatch, and there is no algorithm negotiation (#306 open) [src, issue].
++
++---
++
++## 2. Datagram transport, crypto and roaming
++
++### 2.1 Wire format [src, verified byte by byte in the transport note]
++
++```
++UDP payload = 8B nonce (bit63 = direction, low 63 bits = seq)
++            + AES-128-OCB( 2B timestamp | 2B timestamp_reply | fragment ) + 16B tag
++fragment    = 8B instruction id | 2B (final<<15 | frag_num) | slice of zlib(protobuf Instruction)
++Instruction = { protocol_version, old_num, new_num, ack_num, throwaway_num, diff, chaff(0–16B) }
++```
++
++Overhead is `Connection::ADDED_BYTES = 12` (8 nonce + 4 timestamps), plus `Session::ADDED_BYTES = 16` (tag), plus `frag_header_len = 10`.
++
++### 2.2 Crypto [src crypto.cc, ocb_openssl.cc]
++
++- **Cipher.** AES-128-OCB with a 12-byte nonce (4 zero bytes followed by a big-endian u64) and a 16-byte tag, with no associated data. The default backend is OpenSSL EVP. Nettle, CommonCrypto and a bundled `ocb_internal.cc` are alternatives.
++- **One key, two directions.** Both directions share the key. The direction bit keeps the two nonce spaces disjoint. The receiver also `dos_assert`s the expected direction, which stops a packet from being reflected back to its sender.
++- **Sequence numbers.** `seq` comes from the process-wide counter `Crypto::unique()`, which is fatal on wrap. The session also dies after 2^47 blocks, from the OCB bound halved because the key is shared.
++- **Failure handling.** A failed tag throws a non-fatal `CryptoException`, so garbage is dropped silently. Packets shorter than 24 bytes are rejected.
++- **Key hygiene.** Core dumps are disabled so the key never reaches disk.
++- **Chaff.** 0–16 random bytes per Instruction (`CHAFF_MAX`) blur length side channels.
++- **Compression.** The whole Instruction is zlib-compressed.
++
++### 2.3 Replay protection through idempotency [paper §2.2, src]
++
++There is no replay window. Every datagram means "diff from numbered state A to numbered state B", so replaying one is harmless [paper: "does not need to maintain a replay cache"].
++
++- **Datagram layer.** Packets with `seq < expected_receiver_seq` are still passed to the transport. They are **not** used for RTT samples or for retargeting the peer address. The source flags this as "security-sensitive".
++- **Transport layer.** An Instruction is dropped if its `new_num` is already held, or if its `old_num` base state is missing ("part of how we enforce idempotency").
++
++### 2.4 Fragmentation and MTU [src network.h/.cc, transportfragment.cc]
++
++**Resolved contradiction.** The SSP note listed `DEFAULT_IPV4_MTU = DEFAULT_IPV6_MTU = 1280` and left open how this is applied at runtime. The transport note said 1280 − 28. Re-checking `Connection::set_MTU()` settles it:
++- IPv4: `MTU = DEFAULT_IPV4_MTU - IPV4_HEADER_LEN`, which is **1252** (the transport note gives IPV4_HEADER_LEN as 28, i.e. IP plus UDP).
++- IPv6: `MTU = DEFAULT_IPV6_MTU - IPV6_HEADER_LEN`, which the transport note gives as **1216**.
++- On `sendto` failing with `EMSGSIZE`: MTU falls back to `DEFAULT_SEND_MTU = 500` ("payload MTU of last resort"). Confirmed at network.cc:384.
++- Per-fragment payload on IPv4 is therefore 1252 − 12 − 16 − 10 = **1214 B**.
++
++Other MTU behaviour:
++- **PMTUD is disabled** (`IP_PMTUDISC_DONT`): DF is cleared, and the comment says "fragmentation is not dangerous, just inefficient". RFC 4821 PLPMTUD is noted as future work.
++- **Unverified:** behaviour on macOS/BSD, where `IP_MTU_DISCOVER` does not exist.
++- `RECEIVE_MTU = 2048`. A truncated datagram throws.
++
++Fragment rules:
++- A 15-bit fragment number caps one Instruction at 32767 fragments (`fatal_assert`).
++- `FragmentAssembly` holds **one in-progress instruction id**. A fragment with a newer id discards the partial assembly.
++- The id changes only when the header fields, chaff or MTU change. Pure retransmits of the same (old, new) pair therefore reuse the fragments and can complete an earlier partial assembly.
++
++### 2.5 Roaming and port hopping [src recv_one, Connection::send/hop_port; paper; doc]
++
++**Server-side roaming.**
++- Any authentic packet with a new highest `seq` retargets `remote_addr` to that packet's source address:port. The source comments "only client can roam".
++- The client does not need to know that its public IP changed.
++- An off-path attacker cannot forge the tag. An on-path attacker replaying a captured packet from a new address fails because its seq is not new.
++
++**Server binding.** The server binds exactly one socket and never hops (`assert(fd_list.size() == 1)`).
++
++**Client port hop.**
++- Trigger: `now − last_port_choice > 10 s` and `now − last_roundtrip_success > 10 s` (`PORT_HOP_INTERVAL = 10000`). The client then opens a fresh socket, which gives it a new ephemeral port and a new NAT mapping.
++- Up to `MAX_PORTS_OPEN = 10` sockets are kept and all of them are polled.
++- Old sockets are dropped once the new one has been current for `MAX_OLD_SOCKET_AGE = 60 s`.
++- "Round-trip success" is fed in from the transport layer (`get_sent_state_acked_timestamp`).
++
++**Heartbeat.** An empty ack every 3 s (`ACK_INTERVAL`). It keeps NAT bindings alive and lets the server learn a roamed address.
++
++**Server detach.** After `SERVER_ASSOCIATION_TIMEOUT = 40 s` of silence the server sets `has_remote_addr = false` and sleeps until a packet arrives.
++
++### 2.6 Ports, NAT and firewalls
++
++- **Resolved discrepancy on the port range.** Source and FAQ say **60001–60999**, with a linear scan for the first free port. The man page and site usage text say 60000–61000. The source is authoritative. The difference does not matter for the usual `60000:61000` firewall rule.
++- **Options.** `-p PORT[:PORT2]` sets the port or range, and `-p 0` lets the OS choose. `-i IP` / `--bind-server` controls the bind address.
++- **Reachability.** The server must accept inbound UDP. The client can sit behind NAT. There is no TCP fallback, relay, hole punching or ProxyJump (#13 open since 2012; #970 open) [issue].
++
++---
++
++## 3. SSP state synchronization and frame pacing
++
++### 3.1 Sender state [src transportsender{.h,-impl.h}]
++
++- **`sent_states`** is a list of {timestamp, num, state}.
++  - The front is the **acked** receiver state.
++  - The back is the **last-sent** state.
++  - The iterator `assumed_receiver_state` points somewhere in between.
++- **Optimistic diff base.** `update_assumed_receiver_state()` walks forward from the front. It accepts each state sent less than `timeout() + ACK_DELAY` ago as "probably received". Diffs are computed **from the assumed state**, so the sender can pipeline frames without waiting a full RTT. When the assumption expires, the base falls back to the acked state, and the next diff repairs any loss.
++- **Prospective resend optimization.** The sender also computes the diff from the acked front. It sends that diff instead when it is no larger, or when it is under 1000 B and at most 100 B larger. The packet then doubles as a free retransmit.
++- **Bounds.**
++  - `rationalize_states()` trims acked keystroke prefixes. It is a no-op for the screen.
++  - `sent_states` is capped at 32. Overflow erases the state 16th from the end, keeping the acked front and the recent tail.
++- **Numbering.**
++  - A retransmit of an unchanged state reuses `back().num` and only refreshes the timestamp. A new state gets `back().num + 1`.
++  - **Empty acks also mint a new number.**
++  - Shutdown sends `new_num = UINT64_MAX` up to 16 times, giving up after 10 s.
++
++### 3.2 Receiver logic [src networktransport-impl.h Transport::recv]
++
++1. Reassemble the fragments and check the protocol version.
++2. Process `ack_num`. Acks ride on every packet in both directions.
++3. Feed round-trip success to the datagram layer, which uses it for port hopping.
++4. If `new_num` is already held, drop the packet. This makes replays no-ops.
++5. If the `old_num` base is not held, drop the packet.
++6. `process_throwaway_until(throwaway_num)`: the sender promises never to diff from older states again, so they are discarded.
++7. Flow limit: with more than 1024 states held, refuse new ones for a 15 s quench period. The source's reasoning: "we don't want to ACK a state and then discard it later".
++8. Apply the diff to a copy of the base and insert the result in sorted position. **Only a state appended at the tail advances `ack_num`.** An out-of-order state is stored but not acked as newest.
++9. The application consumes `back().diff_from(last_receiver_state)`. The server writes the resulting `UserStream` to the PTY, collapsing consecutive resizes into one.
++
++Consequences:
++- **No head-of-line blocking.** Any packet whose base is present can be applied immediately.
++- **Loss heals itself.** It is not repaired by byte-exact retransmission.
++
++### 3.3 Frame skipping [src mosh-server.cc serve(), stmclient.cc; paper]
++
++- **Server.** It reads the PTY in chunks of up to 16 KiB, calls `terminal.act(buf)`, then `network.set_current_state(terminal)`. That updates memory only. Nothing is sent until `tick()` decides to send, so any number of PTY reads collapse into one diff of *current vs. assumed*. **Intermediate frames never exist on the wire.**
++- **Client.** It renders only `get_latest_remote_state()`.
++- **Consequences** [paper]:
++  - A flooding process (`cat bigfile`, `yes`) cannot fill network buffers, so Ctrl-C keeps working.
++  - The price is that scrolled-past output is lost, so there is no accurate scrollback (§6).
++
++### 3.4 Screen diff algorithm [src terminaldisplay.cc Display::new_frame]
++
++- **Copy-on-write rows.** Rows are `shared_ptr<Row>` with a `gen` counter. An unchanged row costs one pointer comparison. This is also what keeps the full-framebuffer `operator==`, run on every timer evaluation, cheap.
++- **Non-cell state** is emitted only when it changes, or on the first frame: title (OSC), reverse video, size and scroll region, cursor visibility, SGR, OSC 8 hyperlinks, bracketed paste, mouse, focus and encoding modes.
++- **Scroll detection.** The algorithm finds the old row that matches new row 0. It then emits newlines, inside a DECSTBM region if needed, and diffs the cells against the post-scroll image.
++- **Per row.**
++  - Cells equal to the old cell are skipped.
++  - Runs of more than 4 identical blank cells use ECH (`CSI n X`).
++  - Cursor movement is kept silent.
++  - When writing the last column of a wrapping row, the diff deliberately trashes the cursor position, so the result is the same under either autowrap interpretation.
++- **Verification.** In verbose mode the sender round-trips each diff on a copy of the assumed state and reports any mismatch.
++
++### 3.5 Timing constants and pacing [src transportsender.h; paper]
++
++| Constant | Value | Role |
++|---|---|---|
++| `SEND_INTERVAL_MIN` / `MAX` | 20 / 250 ms | frame interval `= clamp(ceil(SRTT/2), 20, 250)`; "roughly two frames per RTT"; the paper describes it as "about one Instruction in flight". The 50 Hz cap is "roughly the limit of human perception" [paper]. |
++| `SEND_MINDELAY` | 8 ms on the server; the client sets 1 ms (`stmclient.cc:265`) | collection interval after the first change, so bursts clump together. The paper says it was first guessed at 15 ms and then tuned by trace sweep to 8 ms, "the minimum of the curve". |
++| `ACK_DELAY` | 100 ms | delayed ack; piggybacked on host data in more than 99.9% of cases [paper] |
++| `ACK_INTERVAL` | 3000 ms | empty-ack heartbeat |
++| `ACTIVE_RETRY_TIMEOUT` | 10 000 ms | retransmit at frame rate only while the peer has been heard within 10 s |
++| `SHUTDOWN_RETRIES` | 16 | |
++
++`calculate_timers()` works in tiers:
++1. **New data.** Send at `max(first_change + mindelay, last_send + send_interval)`.
++2. **Sent but not assumed received.** Resend at `last_send + send_interval`.
++3. **Assumed but not acked.** Retransmit at `last_send + RTO + ACK_DELAY`.
++4. **Otherwise.** Nothing is scheduled.
++
++Two extra rules apply:
++- A pending data ack pulls the ack timer to `now + 100 ms`.
++- After any send, the ack timer is reset to `now + 3 s`.
++
++### 3.6 RTT, RTO and congestion [src network.cc; paper]
++
++- **Estimator.** RFC 6298 with alpha = 1/8 and beta = 1/4. Initial values are SRTT = 1000 and RTTVAR = 500; the first sample sets SRTT = R and RTTVAR = R/2. Samples of 5000 ms or more are ignored ("server was Ctrl-Zed").
++- **RTO.** `ceil(SRTT + 4·RTTVAR)` clamped to **[50, 1000] ms**. TCP's floor is 1 s.
++- **Timestamp echo with hold-time correction.** The echoed value is `saved_ts + (now − saved_at)`, and only if `saved_ts` is less than 1 s old. Each timestamp is echoed once. Delayed acks therefore do not inflate RTT, and unique seqs remove Karn ambiguity.
++- **ECN.** Sockets set ECT(0) (`IP_TOS = 0x02`). On a CE mark, the receiver subtracts `CONGESTION_TIMESTAMP_PENALTY = 500 ms` from the timestamp it echoes. The peer's SRTT inflates and its frame rate drops toward 4 Hz. **This and the SRTT/2 frame interval are the only congestion control.** There is no cwnd.
++
++---
++
++## 4. Speculative local echo (prediction)
++
++All of this is from [src terminaloverlay.{h,cc}, stmclient.cc, completeterminal.{h,cc}] unless marked otherwise.
++
++### 4.1 Architecture
++
++- **Predictions are a display overlay, never synced state.** Each client frame:
++  1. copies the authoritative remote framebuffer;
++  2. runs `predictions.cull(fb)` (validate), then `predictions.apply(fb)` (draw), then the notification bar and title;
++  3. diffs the result against what is on the real terminal and writes the minimal update.
++
++  A wrong prediction is simply not re-applied, and the next diff paints the truth over it.
++- **Input path** (`process_user_input`):
++  - It calls `set_local_frame_sent(net.get_sent_state_last())` first.
++  - It then passes each byte to `new_user_byte(byte, local_framebuffer)`, using the *displayed* framebuffer.
++  - A `read()` of more than 100 bytes resets the engine and skips prediction (paste guard).
++  - A resize or a framebuffer size change also resets the engine.
++- **Feedback** (`process_network_input`): `set_local_frame_acked`, `set_send_interval`, and `set_local_frame_late_acked(echo_ack)`.
++
++### 4.2 Confirmation: the server echo ack
++
++- Each prediction is tagged with `expiration_frame = local_frame_sent + 1`, the client→server state number that will carry the keystroke.
++- **Server side** (`Complete`, `ECHO_TIMEOUT = 50 ms`):
++  - When input from remote state N is applied, the server calls `register_input_frame(N, now)`.
++  - `set_echo_ack(now)` advances `echo_ack` to the newest input frame that reached the PTY at least 50 ms ago.
++  - `echo_ack` is part of the synced state, so a change produces a diff. `wait_time()` wakes the server at the next deadline.
++- **Validation compares contents only, not attributes.** It is gated on `late_ack ≥ expiration_frame`; the `early_ack` argument is unused. The possible results:
++  - `Pending`: the echo ack has not reached the prediction yet.
++  - `Correct`: the content matches.
++  - `CorrectNoCredit`: the cell was unknown, the prediction was blank, or the prediction matched content that was already on screen.
++  - `IncorrectOrExpired`: anything else.
++  - A cursor prediction is `Correct` only if the server cursor is exactly at (row, col).
++- **Why it is designed this way** [paper]:
++  - Client-only checks flickered, because apps can take tens of ms to echo.
++  - Client-side timeouts broke under jitter.
++  - With a 50 ms timeout on the server, "the client has no timeouts of its own".
++  - The cost: the server "often sends an extra datagram 50 ms after a keystroke".
++
++### 4.3 When predictions are shown (adaptive mode)
++
++**Resolved contradiction.** The limits note said predictions show "once SRTT exceeds 30 ms". The prediction note said the thresholds are compared against `send_interval`. Re-checking `terminaloverlay.cc:434–444` confirms the comparison is `if (send_interval > SRTT_TRIGGER_HIGH)` and `send_interval > FLAG_TRIGGER_HIGH`. Since `send_interval = clamp(ceil(SRTT/2), 20, 250)`, the effective RTT thresholds are about **double** the constants, despite the `SRTT_` prefix in the name.
++
++| Trigger | `send_interval` | Approximate SRTT |
++|---|---|---|
++| Show predictions | > 30 ms | > ~60 ms |
++| Stop showing (only when no predictions are outstanding) | ≤ 20 ms | ≤ ~40 ms |
++| Underline on | > 80 ms | > ~160 ms |
++| Underline off | ≤ 50 ms | ≤ ~100 ms |
++
++- **Startup.** Before the first RTT sample, `send_interval` is 250, so predictions show and are underlined from the start.
++- **Glitch trigger.**
++  - A prediction still pending after 250 ms sets `glitch_trigger = 10`, so predictions show even on a fast link.
++  - One still pending after 5 s sets it to 20, which also forces underlining.
++  - Each quick (< 250 ms) correct confirmation decrements it, at most once every 150 ms, so recovery takes about 1.5 s or more.
++- **Timer.** `wait_time()` returns 50 ms while predictions are active, so glitch detection runs even with no network traffic.
++- **Validation runs even while predictions are hidden** (any mode except Never), so confidence builds in the background.
++- **Underlining** [paper]: "trails behind the user's cursor and disappears gradually as responses arrive".
++
++### 4.4 Epochs: the confidence mechanism
++
++- Predictions are grouped into epochs, "with the intention that either all of the predictions in an epoch will be correct, or none will" [paper].
++- A new epoch is **tentative**, meaning computed but not drawn, until one of its predictions is confirmed. Then the whole epoch, and every older one, becomes visible (`confirmed_epoch = max(...)`).
++- **`become_tentative()`, which starts a new epoch, fires on:**
++  - any C0 control character, including CR;
++  - any ESC dispatch;
++  - any CSI except `C`/`D` (right/left arrow);
++  - a wide or combining character (never predicted);
++  - typing in, or wrapping past, the last column.
++- `ESC O x` is rewritten to `ESC [ x`, so arrow prediction works in both cursor modes.
++- **Result:** password prompts and modal editors are handled with no special cases.
++  - After Enter at a `passwd` prompt, the following keystrokes land in a tentative epoch. The server never echoes them, so they are never confirmed and never shown, and the epoch is killed quietly.
++  - vi normal mode after ESC works the same way.
++  - [paper] This works "even with full-screen programs (like emacs) that put the terminal driver in raw mode".
++
++### 4.5 What is predicted
++
++- **Printable width-1 characters.**
++  - Insert mode (the default) shifts cells right to the edge. The last column, and any cell after an unknown one, becomes `unknown`. Original contents are recorded.
++  - Overwrite mode (`--predict-overwrite`) changes only the cursor cell.
++  - Attributes copy the cell to the left.
++  - The cursor moves right, or wraps into a new epoch.
++- **Backspace** moves the cursor left and shifts cells left (or blanks the cell in overwrite mode). It does not bump the epoch.
++- **Left/right arrows** move the cursor only.
++- **CR** predicts col 0 on the next row, in a new epoch. On the bottom row, scrolling is not predicted; the row is predicted blank.
++- **Not predicted:** up/down, Tab, Ctrl keys, Delete (`CSI 3~`), wide and combining characters, scrolling, and navigation keys such as `n` in a mail reader [paper].
++
++### 4.6 Misprediction repair (`cull`)
++
++- **Wrong and still tentative** (never shown): `kill_epoch(epoch)` drops that epoch and newer ones, starts a fresh cursor prediction at the real cursor, and makes the engine tentative. The user sees nothing.
++- **Wrong and already displayed:** a full `reset()`. The next diff overwrites the bad echo, so mistakes are "removed within an RTT" [paper].
++- **Wrong newest cursor prediction:** a full `reset()`.
++- **Correct cell:** copies the server's real attributes onto that cell and every later predicted cell in the row, so colour and bold follow what the app actually drew.
++- **Measured error rate** [paper]: 0.9% of keystrokes showed an erroneous prediction, mostly from word-wrap.
++
++### 4.7 Display modes [src, man]
++
++- **`adaptive`** (the default) uses the triggers in §4.3.
++- **`always`** skips the RTT gate but keeps the epoch gate. [man] "only show predictions when it is confident".
++- **`never`** disables prediction.
++- **`experimental`** effectively removes epochs. On a misprediction it resets only the bad cell. mosh.pl describes it as "aggressively echo even when incorrect".
++- **Configuration:** `--predict=…`, `-a`/`-n`, `MOSH_PREDICTION_DISPLAY`, and `-o` / `MOSH_PREDICTION_OVERWRITE`.
++
++---
++
++## 5. Behaviour under adverse conditions
++
++### Packet loss
++
++- The diff base decays back to the acked state after RTO + 100 ms, and RTO is at least 50 ms. The next frame then repairs whatever was lost.
++- There is no byte-exact retransmit queue.
++- **Paper measurement** at 100 ms RTT with 29% i.i.d. loss each way (about 50% round trip), predictions off:
++
++| | Median | Mean | σ |
++|---|---|---|---|
++| SSH | 0.416 s | 16.8 s | 52.2 s |
++| Mosh | 0.222 s | 0.329 s | 1.63 s |
++
++### High RTT
++
++- The frame rate stretches to `SRTT/2`, at a 4 Hz floor.
++- Prediction covers most typing.
++
++| Network | SSH median / mean | Mosh median / mean |
++|---|---|---|
++| Sprint EV-DO (3G) | 503 / 515 ms | < 5 / 173 ms |
++| MIT–Singapore | 273 / 272 ms | < 5 / 86 ms |
++
++- About 70% of keystrokes were displayed instantly.
++- Mosh's latency variance is higher than SSH's: σ 132 ms vs 9 ms on MIT–Singapore. Keystrokes it cannot predict still take a full RTT, with a distribution close to SSH's.
++- **Caveat:** the 50 ms echo ack and the 8 ms collection interval were added *after* the evaluation trace was frozen [paper footnote].
++
++### Bufferbloat
++
++- On LTE with a concurrent TCP download: SSH median 5.36 s (mean 5.03 s); Mosh median < 5 ms (mean 1.70 s) [paper].
++- Frame skipping keeps mosh's own queue occupancy at about one instruction.
++
++### IP or interface change
++
++- The next authentic packet with a higher seq retargets the server, with no handshake.
++- If round trips stall for 10 s, the client opens a new source port to get past a dead NAT mapping.
++
++### Long outage
++
++- After 10 s, active retransmission stops and only the 3 s heartbeats continue. The client keeps hopping ports every 10 s.
++- After 40 s, the server detaches and waits silently.
++- The server process **lives indefinitely** unless `MOSH_SERVER_NETWORK_TMOUT` is set. With `MOSH_SERVER_SIGNAL_TMOUT` set, SIGUSR1 kills only sessions idle at least that long; unset, SIGUSR1 kills any session.
++- **Client UI:**
++  - "server late" after 6.5 s without hearing from the server;
++  - "reply late" after 10 s without an ack;
++  - both show "mosh: Last contact N seconds ago";
++  - if the client never connects, it gives up after 15 s.
++
++### Sleep/suspend
++
++- Timers use `CLOCK_MONOTONIC`, or `CLOCK_MONOTONIC_RAW` on Apple after ticket #1014, where the clock went backwards after suspend [src timestamp.cc].
++- **[inf]** Recovery does not depend on the clock. On wake, the first packet retargets the server, and one Instruction (current vs. acked) jumps straight to the present screen, with no backlog replay.
++- The 5 s RTT-sample filter drops stale samples.
++- On SIGCONT, the client restores raw termios and forces a full repaint.
++- **Unverified:** the exact wake behaviour on Linux, where `CLOCK_MONOTONIC` stops during suspend. This is OS semantics and was not tested.
++
++---
++
++## 6. Limitations
++
++1. **No scrollback** [src, doc, issue]:
++   - Only the visible framebuffer is synced.
++   - Rows that scroll off are dropped (`Framebuffer::scroll` → `delete_line`).
++   - Output that scrolls past within one frame never reaches the client.
++   - #122 "mosh prevents the use of scrollback" has been open since 2012 with 118 comments.
++   - The FAQ's workaround is tmux or screen on the server. Better scrollback was targeted for 1.3 and never shipped [2nd].
++2. **No reattach after the client process dies** [src, inf]:
++   - The key exists only in client memory.
++   - A new client would restart `seq` at 0, so its packets would never retarget the server.
++   - Its state numbers would not match the server's, so `old_num` lookups fail.
++   - Hence the usual "mosh + tmux" pairing; the site's own example is `mosh host -- screen -dr`.
++3. **No channels**:
++   - The protocol has exactly four instruction kinds: keystroke, resize, host bytes and echo ack.
++   - So there is no agent, port or X11 forwarding: #120, PR #696 open, #337, #499 and #261 [issue].
++4. **UDP only**:
++   - The server must be reachable.
++   - There is no TCP fallback, relay or ProxyJump (#13, #970).
++   - macOS UDP problems are tracked in #1254.
++5. **UTF-8 only**: the client and server exit without a UTF-8 locale [src stmclient.cc:84, mosh-server.cc:338/355]. Cells are `wchar_t`, and repaints are regenerated from cells rather than passed through.
++6. **An emulator in the middle drops what it does not model** [src, issue]:
++   - OSC 52: only the literal prefix `52;c;` is honoured. Queries and other selections are dropped. Identical consecutive copies coalesce because the clipboard is compared per frame. It is one-way.
++   - OSC 8: only on master (late 2025), not in any release.
++   - Not supported: tmux `-CC` (#1078) and `ESC k` titles (#992).
++   - True colour does work.
++7. **Weak congestion control**: frame-rate clamp plus the ECN penalty only, with no cwnd.
++8. **Fragile on large diffs**: the single-assembly reassembler means a full repaint spanning many fragments restarts on every new instruction id under loss or reordering [src, inf].
++9. **Maintenance cadence** [src ChangeLog, git]:
++   - Releases: 1.3.2 in 2017, then 1.4.0 in 2022.
++   - True colour and OSC 52 sat unreleased for years.
++   - There is no tag after 1.4.0, despite 2025–26 work.
++10. **Key handling and negotiation**: no algorithm negotiation (#306). Passing the key through `$MOSH_KEY` has been criticised (#156).
++
++---
++
++## 7. Successors and alternatives
++
++| System | Transport | State model | Prediction | Reattach / roam | Verified level |
++|---|---|---|---|---|---|
++| **Eternal Terminal** | TCP:2022, libsodium secretbox, SSH bootstrap with passkey | raw byte stream; resend from sequence number via `BackedWriter`/`BackedReader` `CatchupBuffer` (64 MiB buffers; PTY backpressure while disconnected; `forceReset` with new salt as escape hatch) | none | reconnect, no migration; keepalive-driven | [src] |
++| **RoSE** | QUIC streams plus RFC 9221 datagrams; mTLS or SSH cert bootstrap | wezterm emulator on the server; scrollback on a separate low-priority stream | yes | 1-RTT reconnect | [2nd], early-stage |
++| **oxutrm** | QUIC, ALPN `oxutrm/1`, UDP/443; SSH-pinned SPKI and PSK per attach | host-authoritative diffs; pure sync engine tested against drop, dup and reorder; pacing `clamp(rtt/2, 8, 100) ms` | **none** | standby path takes over in ~3 s; NAT ladder (direct → PCP/UPnP → STUN → birthday → SSH tunnel); re-SSH after 20 s; holds input typed during an outage and asks whether to send it | [2nd] |
++| **WezTerm mux** | SSH domain (remote mux daemon over SSH), or TLS domain (SSH-bootstrapped cert, TLS/TCP, reconnects) | mux PDU protocol | `local_echo_threshold_ms` | TLS domain survives interruptions | [doc]; repair logic undocumented |
++| **Zellij web** (0.43/0.44) | 2 WebSockets, hashed tokens, HTTPS | server renders | none | `zellij attach https://…` | [doc] |
++| **SSH3** | QUIC (migration) | byte stream | none (per blog) | QUIC migration | [2nd] |
++| Others | qsh, morsh (QUIC/TLS 1.3), mosh-rs and morsh-n3fariox (mosh-1.4 wire-compatible; mosh-rs adds opt-in scrollback), quosh (WebTransport) | | | | [2nd] |
++
++Two other reference points:
++- **tmux** has no network transport. `-CC` control mode is an escape-sequence protocol over any pipe.
++- **VS Code Remote-SSH** (from memory, unverified) runs a remote server with a reconnection grace period. It is not a latency design.
++
++**Take-away.** ET and mosh each cover half the problem:
++- ET is reliable and complete but replays everything, with no prediction or migration.
++- Mosh is latest-wins and fast but lossy for history and has no channels.
++
++The QUIC successors try to get both by combining datagrams (latest-wins) with streams (reliable). The WezTerm mux is the closest structural analogue to herdr: an existing mux PDU protocol extended with local echo and a reconnecting TLS transport.
++
++---
++
++## 8. Design lessons for a multiplexer with an existing client/server split
++
++**Premise [inf].** A multiplexer server already holds the authoritative emulator and history; for herdr that is libghostty-vt. That is mosh's hardest component, and it removes mosh's two biggest weaknesses: lost scrollback and no reattach. The missing pieces are:
++- a loss- and address-change-tolerant transport;
++- idempotent latest-wins screen sync;
++- client-side prediction.
++
++**Open question.** Whether this is a transport swap or a protocol change depends on how herdr frames screen updates today. That is the herdr-side investigation, not covered here.
++
++Ranked by impact relative to effort:
++
++| # | Idea | Impact | Effort | Notes |
++|---|---|---|---|---|
++| 1 | **Latest-wins screen sync with frame skipping**: numbered per-pane (or per-client-view) states; send `diff(assumed/acked → current)` with `old/new/ack/throwaway` semantics; drop intermediate frames | Very high: keeps Ctrl-C responsive under floods, bounds catch-up after any outage to one diff, and works over the *existing* reliable transport too | Medium | Needs cheap snapshot equality and diffs. Mosh relies on copy-on-write `shared_ptr` rows plus a `gen` counter; check whether libghostty-vt offers row identity or dirty tracking. Keep a few reference states (mosh: 32 sent, 1024 received). |
++| 2 | **RTT-paced frame interval plus collection delay**: `clamp(SRTT/2, 20, 250)` ms, 8 ms collection on the server and ~1 ms on the client, 100 ms delayed ack, 3 s heartbeat | High: one frame in flight, no self-inflicted bufferbloat | Low | Needs RTT measurement: hold-time-corrected timestamp echo, RFC 6298 estimator, RTO in [50, 1000]. Useful even over TCP/SSH. |
++| 3 | **Asymmetric directions**: input as a reliable ordered log trimmed on ack; output as latest-state | High: correctness | Low | Mosh resends the whole unacked input suffix in every diff. Never drop or reorder keystrokes. |
++| 4 | **Reattach via a server-held session secret**: key plus epoch or resume token in server session state; fresh nonce space per attach | High: fixes mosh's worst gap; a new client process resumes | Low–medium | Bootstrap over existing SSH, mosh/ET/oxutrm style: print port, key and fingerprint, then detach. Replay protection: retarget only on an authentic, strictly newer seq. |
++| 5 | **Two traffic classes**: latest-wins (screen diffs, cursor, echo ack) and reliable (input, resize, clipboard/OSC 52, notifications, titles, file transfer, future forwarding) | High: avoids mosh's dropped and coalesced side-channel events and its channel-less dead end | Medium | Model side-channel sequences as typed reliable events, not per-frame compared state (mosh coalesces identical OSC 52 copies). Design extensible channels now, even if forwarding ships later. |
++| 6 | **Scrollback as a separate reliable, lazy, low-priority stream** keyed by absolute line number | High for UX | Medium | RoSE approach [2nd]. The server already owns history. Avoids both mosh's loss and ET's 64 MiB replay flood. |
++| 7 | **Datagram transport with roaming**: authenticated UDP (AEAD, direction bit plus seq nonce), retarget on newest authentic seq, client port hop after 10 s without a round trip, 3 s keepalive | High on mobile and Wi-Fi roaming | Medium–high if hand-rolled | Alternative: QUIC (connection migration, PLPMTUD, congestion control, streams plus datagrams, UDP/443). **Not evaluated in these notes; needs its own spike.** Fragment carefully: mosh's single-assembly reassembler is fragile for large repaints, so use ~1200 B datagrams or let QUIC handle it. |
++| 8 | **Keep the SSH-tunnelled transport as a fallback** running the same sync semantics | Medium–high: UDP is often blocked (mosh #13, #970) | Low if #1 is transport-agnostic | Loses migration and keeps idempotent catch-up. oxutrm's NAT ladder ends in an SSH tunnel for the same reason [2nd]. |
++| 9 | **Predictive local echo as a client overlay** | High on > 60 ms links, mostly for plain typing | High | Requirements: a client-side emulator copy matching the server; numbered input frames; a server-computed per-pane **echo ack** ("input N has been in the PTY ≥ 50 ms") in each frame; epoch gating (bump on control, ESC or non-arrow CSI); content-only validation; kill or reset on a miss; gate on `send_interval > 30` (SRTT ≳ 60 ms) and underline above 80 (SRTT ≳ 160 ms); glitch triggers at 250 ms / 5 s; skip reads over 100 B (paste); reset on resize; pane-local coordinates. **Risk:** the paper's 70% instant / 0.9% wrong figures come from 2012 bash/emacs/pine traces. Modern TUIs (zsh syntax highlighting and autosuggest, fzf, agent TUIs) will probably yield less (unverified). Ship last, behind a flag. |
++| 10 | **Outage UX** | Medium | Low | "Last contact N s" banner (mosh 6.5 s / 10 s thresholds); optionally hold input typed during an outage and confirm before sending (oxutrm). Server panes must keep running headless indefinitely: do **not** copy mosh's idle-timeout semantics as defaults, and keep output collapsing into state, not into a queue. |
++| 11 | **ECN-based slowdown** | Low | Low | Mosh subtracts 500 ms from the echoed timestamp on CE. Marginal. Only worth it if rolling a custom UDP layer (QUIC handles congestion itself). |
++
++**Suggested sequencing [inf].**
++1. Ship #1–#3 over the existing transport first. That is pure protocol work, testable against simulated drop, duplicate and reorder, as oxutrm does.
++2. Then #4 and #5.
++3. Then #7 with #8, choosing between QUIC and a custom layer.
++4. Prediction (#9) last.
++
++---
++
++## Unverified or open items
++
++- **QUIC vs. a hand-rolled SSP datagram layer** was not researched. Successor claims (RoSE, oxutrm, qsh, morsh, quosh, SSH3) come from READMEs and blogs only.
++- **WezTerm mux internals** were not read in source: the remote daemon channel, PDU framing, and local-echo repair. They are worth reading before designing herdr's prediction layer.
++- **Prediction threshold history**: git history of the `SRTT_TRIGGER`/`FLAG_TRIGGER` constants was not checked. Older secondary sources may quote other values.
++- **Modern-shell misprediction cases** (zsh right prompts, autosuggest, tmux status lines) were not surveyed in mosh issues.
++- **PMTUD on macOS/BSD**, where `IP_MTU_DISCOVER` is absent, is unverified. The value of `IPV6_HEADER_LEN` (64 per the transport note) was not re-read for this report.
++- **Linux suspend/wake** behaviour is inferred from code and OS semantics, not tested.
++- **VS Code Remote-SSH** details are from memory.
++- **herdr specifics**: how herdr frames screen updates today (full redraw vs. diffs, stream vs. latest-wins) and whether libghostty-vt can provide cheap row identity. These decide the effort column for #1 and come from the herdr-side investigation.
++
++## Sources
++
++- **mosh** (github.com/mobile-shell/mosh, @ decd9b705eb81626f694335b8d5940538beb06da):
++  - network: `src/network/{network,transportsender,transportsender-impl,networktransport,networktransport-impl,transportfragment,compressor}.*`
++  - crypto: `src/crypto/{crypto,ocb_openssl}.*`
++  - statesync: `src/statesync/{completeterminal,user}.*`
++  - terminal: `src/terminal/{terminaldisplay,terminalframebuffer,terminalfunctions}.*`
++  - frontend: `src/frontend/{terminaloverlay,stmclient,mosh-server,mosh-client}.*`
++  - other: `src/util/timestamp.cc`, `src/protobufs/*.proto`, `scripts/mosh.pl`, `man/mosh.1`, `man/mosh-server.1`, `ChangeLog`
++- **Paper:** Winstein & Balakrishnan, "Mosh: An Interactive Remote Shell for Mobile Clients", USENIX ATC 2012 (mosh.org/mosh-paper.pdf).
++- **Site:** mosh.org (technical info and FAQ).
++- **mosh issues:** #2, #13, #120, #122, #156, #261, #306, #337, #499, #970, #992, #1078, #1254; PR #696.
++- **mosh-devel mailing list:** 2016-06/001335, 2017-05/001486.
++- **Eternal Terminal** (github.com/MisterTea/EternalTerminal @ 7ee361a): `BackedWriter`, `BackedReader`, `Connection`, `CryptoHandler`, `TerminalServerMain`, `ETerminal.proto`; eternalterminal.dev/howitworks.
++- **Successors:**
++  - github.com/nikhiljha/rose
++  - github.com/oetiker/oxutrm
++  - github.com/yzfly/qsh
++  - github.com/fokx/morsh
++  - github.com/n3fariox/morsh
++  - github.com/Arunjay4213/mosh-rs
++  - github.com/treharne/quosh
++  - bex.co/blog/2026/09/24/ssh3-quic-shell-2026-adoption-map
++- **WezTerm:** wezterm.org/config/lua/SshDomain.html, wezterm.org/multiplexing.html.
++- **Zellij:** zellij.dev news and web-client docs.

@@ -1,0 +1,285 @@
+{
+  "base": "5608de0608918aba2f9d501e7793b984a0ca9cfa",
+  "head": "2bd5303c2b3ab118792a7b9e10672b487158c931",
+  "sourceAvailable": true,
+  "wholeRangeReady": false,
+  "status": "complete",
+  "changed": [
+    "HERDR_MOSH_VISION.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/amend-design-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-ledger.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-requirements.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-requirements.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/run-start-baseline.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-ledger-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-overrides-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/friction.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-remote-report.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-amend1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r2.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+    "docs/superpowers/specs/INDEX.md",
+    "scripts/mosh-diff-budget.sh",
+    "src/cli/status.rs",
+    "src/client/mod.rs",
+    "src/client/shell/composition.rs",
+    "src/mosh/link_frames.rs",
+    "src/mosh/local_bridge.rs",
+    "src/mosh/mod.rs",
+    "src/mosh/outage.rs",
+    "src/mosh/remote/attacher.rs",
+    "src/mosh/remote/keeper.rs",
+    "src/mosh/remote/mod.rs",
+    "src/mosh/ring.rs",
+    "src/mosh/session.rs",
+    "src/mosh/ssh_leg.rs",
+    "src/remote/attach.rs",
+    "src/remote/host.rs",
+    "src/remote/saved.rs",
+    "src/update.rs",
+    "tests/mosh_fallback.rs",
+    "tests/mosh_harness.rs",
+    "tests/mosh_integration.rs",
+    "tests/mosh_multi_client.rs",
+    "tests/mosh_resume.rs",
+    "tests/mosh_status.rs"
+  ],
+  "slices": [
+    {
+      "path": "HERDR_MOSH_VISION.md",
+      "slice": "slices/000001.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md",
+      "slice": "slices/000002.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back-keys.txt",
+      "slice": "slices/000003.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back.md",
+      "slice": "slices/000004.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1.md",
+      "slice": "slices/000005.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-2.md",
+      "slice": "slices/000006.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/amend-design-1.md",
+      "slice": "slices/000007.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-1.md",
+      "slice": "slices/000008.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-2.md",
+      "slice": "slices/000009.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-1.md",
+      "slice": "slices/000010.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-2.md",
+      "slice": "slices/000011.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-ledger.md",
+      "slice": "slices/000012.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-requirements.md",
+      "slice": "slices/000013.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-1.md",
+      "slice": "slices/000014.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-2.md",
+      "slice": "slices/000015.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-requirements.md",
+      "slice": "slices/000016.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-1.md",
+      "slice": "slices/000017.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md",
+      "slice": "slices/000018.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/run-start-baseline.txt",
+      "slice": "slices/000019.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-ledger-design.md",
+      "slice": "slices/000020.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-overrides-design.md",
+      "slice": "slices/000021.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/friction.md",
+      "slice": "slices/000022.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md",
+      "slice": "slices/000023.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-remote-report.md",
+      "slice": "slices/000024.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md",
+      "slice": "slices/000025.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-amend1.json",
+      "slice": "slices/000026.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r1.json",
+      "slice": "slices/000027.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r2.json",
+      "slice": "slices/000028.diff"
+    },
+    {
+      "path": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+      "slice": "slices/000029.diff"
+    },
+    {
+      "path": "docs/superpowers/specs/INDEX.md",
+      "slice": "slices/000030.diff"
+    },
+    {
+      "path": "scripts/mosh-diff-budget.sh",
+      "slice": "slices/000031.diff"
+    },
+    {
+      "path": "src/cli/status.rs",
+      "slice": "slices/000032.diff"
+    },
+    {
+      "path": "src/client/mod.rs",
+      "slice": "slices/000033.diff"
+    },
+    {
+      "path": "src/client/shell/composition.rs",
+      "slice": "slices/000034.diff"
+    },
+    {
+      "path": "src/mosh/link_frames.rs",
+      "slice": "slices/000035.diff"
+    },
+    {
+      "path": "src/mosh/local_bridge.rs",
+      "slice": "slices/000036.diff"
+    },
+    {
+      "path": "src/mosh/mod.rs",
+      "slice": "slices/000037.diff"
+    },
+    {
+      "path": "src/mosh/outage.rs",
+      "slice": "slices/000038.diff"
+    },
+    {
+      "path": "src/mosh/remote/attacher.rs",
+      "slice": "slices/000039.diff"
+    },
+    {
+      "path": "src/mosh/remote/keeper.rs",
+      "slice": "slices/000040.diff"
+    },
+    {
+      "path": "src/mosh/remote/mod.rs",
+      "slice": "slices/000041.diff"
+    },
+    {
+      "path": "src/mosh/ring.rs",
+      "slice": "slices/000042.diff"
+    },
+    {
+      "path": "src/mosh/session.rs",
+      "slice": "slices/000043.diff"
+    },
+    {
+      "path": "src/mosh/ssh_leg.rs",
+      "slice": "slices/000044.diff"
+    },
+    {
+      "path": "src/remote/attach.rs",
+      "slice": "slices/000045.diff"
+    },
+    {
+      "path": "src/remote/host.rs",
+      "slice": "slices/000046.diff"
+    },
+    {
+      "path": "src/remote/saved.rs",
+      "slice": "slices/000047.diff"
+    },
+    {
+      "path": "src/update.rs",
+      "slice": "slices/000048.diff"
+    },
+    {
+      "path": "tests/mosh_fallback.rs",
+      "slice": "slices/000049.diff"
+    },
+    {
+      "path": "tests/mosh_harness.rs",
+      "slice": "slices/000050.diff"
+    },
+    {
+      "path": "tests/mosh_integration.rs",
+      "slice": "slices/000051.diff"
+    },
+    {
+      "path": "tests/mosh_multi_client.rs",
+      "slice": "slices/000052.diff"
+    },
+    {
+      "path": "tests/mosh_resume.rs",
+      "slice": "slices/000053.diff"
+    },
+    {
+      "path": "tests/mosh_status.rs",
+      "slice": "slices/000054.diff"
+    }
+  ],
+  "archives": [],
+  "collectionOrigins": [],
+  "omitted": [],
+  "gaps": []
+}
