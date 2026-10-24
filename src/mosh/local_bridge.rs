@@ -487,11 +487,15 @@ impl Conn<'_> {
         if let Some(handle) = self.dial_thread.take() {
             let _ = handle.join();
         }
-        if self.stop.load(Ordering::Acquire) || self.closing.is_some() {
+        let stopped = self.stop.load(Ordering::Acquire);
+        if stopped || self.closing.is_some() {
             if let Ok(leg) = result {
                 reap_in_background(leg);
             }
-            self.on_stop(Instant::now());
+            // A dial finishing while merely Closing leaves the graceful close and its reason alone.
+            if stopped {
+                self.on_stop(Instant::now());
+            }
             return;
         }
         match result {
@@ -1926,6 +1930,8 @@ mod tests {
         dial_times: Arc<Mutex<Vec<(LegKind, Instant)>>>,
         /// While set, `backoff` is the real reconnect schedule instead of 10 ms.
         real_backoff: Arc<AtomicBool>,
+        /// While set (with `blocked`), a dial stays in flight until it is cleared.
+        hold: Arc<AtomicBool>,
     }
 
     impl MemDialer {
@@ -1955,6 +1961,9 @@ mod tests {
             _stop: &AtomicBool,
         ) -> Result<Leg, LegError> {
             if self.blocked.load(Ordering::SeqCst) {
+                while self.hold.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
                 thread::sleep(Duration::from_millis(5));
                 return Err(LegError::Retryable(io::Error::other("dialer blocked")));
             }
@@ -2253,6 +2262,38 @@ mod tests {
             frames.iter().all(|(at, _)| at.duration_since(started) < Duration::from_millis(1100)),
             "no injection after the deadline: {frames:?}"
         );
+    }
+
+    #[test]
+    fn give_up_with_dial_in_flight_stays_graceful() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let trace = fresh_dir();
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        for i in 0..48 {
+            keeper.push_down(frame_with(&format!("f{i}"), 60_000));
+        }
+        let harness = Harness::start_with(&dialer, secs(1), unused_plain(), Some(trace.clone()), None);
+        // A stalled client keeps the graceful close pending behind its queued frames.
+        let _client = Client::connect_paused(&harness.path);
+        wait_until("leg 0", WAIT, || !keeper.hellos().is_empty());
+        // The reconnect dial is held in flight across the give-up.
+        dialer.hold.store(true, Ordering::SeqCst);
+        dialer.block(true);
+        keeper.kill_leg();
+        thread::sleep(Duration::from_millis(1200));
+        // The dial completes while the connection is Closing for give-up, not stopping.
+        dialer.hold.store(false, Ordering::SeqCst);
+        let log = trace.join("local.jsonl");
+        wait_until("session_end", WAIT, || {
+            std::fs::read_to_string(&log).is_ok_and(|l| l.contains("\"event\":\"session_end\""))
+        });
+        let lines = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            lines.contains("\"reason\":\"give-up\""),
+            "session_end keeps the give-up reason: {lines}"
+        );
+        drop(harness);
+        let _ = std::fs::remove_dir_all(trace);
     }
 
     #[test]
