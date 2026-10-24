@@ -42,3 +42,4 @@ C41 · amend-design-1 · GAP · R2 health mechanism · rejected — spec §Local
 C42 · amend-design-1 · GAP · cross-version interop · applied — already in spec rule 8 + Per-HELLO `v` mismatch → END{protocol-version} → leg-0 plain fallback; R20 appended, .9 case added
 C43 · amend-design-1 · GAP · R14/R15/R18 combined-branch checks · applied — added to mosh-dqw.11 acceptance
 C44 · amend-design-1 · GAP · R18 MoshConfig field scope · applied — .1 marks every MoshConfig field local-only; .7 acceptance tests HELLO grace wins over remote env
+G1 · graph · GRAPH-EDGE · all 12 candidates · kept — graph-shape shows no single-edge removal reduces depth (5→5 for every candidate); judge not dispatched

@@ -10,7 +10,7 @@ idea: Implement Phase 1 of HERDR_MOSH_VISION.md (repo root, branch `mosh`, push 
 spec: 2026-10-24-mosh-phase1-resumable-session-design.md
 epic: mosh-dqw
 roastDesignRound: 2
-roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md
+roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-design-2.md
 findingsLedgerDesign: findings-ledger-design.md
 redesignCycles-design: 1
 redesign-design-1: round 1 · triggers shared-cause, defect-type · amended §Architecture, §Components and responsibilities, §Session wire protocol, §Ring caps and drain policy, §Local bridge behaviour, §Legs, §Discovery and fallback, §Keeper, §Decision points, §Error handling summary, §Testing, §Acceptance criteria, §Key abstractions · lastGood 0a065435 · designRoast - · state applied
@@ -18,8 +18,15 @@ stepBackDesign-round-1: redesign — applied: ring caps as flow control (ACK on 
 branch: super-auto/mosh-phase1-resumable-session
 base: mosh
 
+stepBackDesign-round-2: local — round 2 converged ([converged], 0 Blocking); punch list of 8 sub-Blocking findings applied inline to spec and beads
+graph-pass: depth 5→5 · width 2.2→2.2 · applied 0 · parked 0
+
 approvals:
 - top-split · auto · mosh-dqw.1 LEAF, mosh-dqw.2 LEAF, mosh-dqw.3 LEAF, mosh-dqw.4 LEAF, mosh-dqw.5 LEAF, mosh-dqw.6 LEAF, mosh-dqw.7 LEAF, mosh-dqw.8 LEAF, mosh-dqw.9 LEAF, mosh-dqw.10 LEAF
 - coverage-round-1 · canonical R-list: R1..R15 in coverage-round-1-requirements.md (+R16-R18 from r-new) · requirements: 15 · mapped: 14 · unmapped: 3 (R2, R10, R11) · auto flag-sweep mosh-dqw.2/.3/.8 → kept; auto GAP R2,R3,R9,R10,R11,R12 → applied (summary lines; scope already in bead bodies); auto UNOWNED-SEAM keeper rendezvous → owner mosh-dqw.1 (+spec lock fix); auto UNOWNED-SEAM argv flags/capability/MoshConfig → consumes lines; auto UNOWNED-SEAM link-frame format → owner mosh-dqw.2, edge mosh-dqw.5<-mosh-dqw.2; auto rejected OutageState, Leg-keeper, .8 breadth
 - coverage-round-2 · requirements: 18 · mapped: 18 · unmapped: 0 · divergence: findings 17 → 14, novel 79%, widening: no · auto GAP R18,R11,R17,R16,keeper-lifetime(R19),R2 → applied; auto UNOWNED-SEAM keeper entry point, attacher preamble, capability format, injection encoding consumer, MoshConfig test override → applied; auto rejected touch-list seam, mosh-tree seam; auto ORPHAN mosh-dqw.3 → root goal element added
 - coverage-amend-design-1 · auto UNOWNED-SEAM capability ownership, argv flags, END reasons/HELLO fields, pure-pipe → applied (bead text); auto GAP ring overflow e2e, R6 last-contact accessor, cross-version (R20), combined-branch R14/R15/R18 checks, MoshConfig field scope → applied; auto rejected R15 release wiring (operational), per-leaf hook audit (C24), code-location (evidence), R2 health mechanism (spec names it)
+
+parked:
+- 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md · escalation · "leg-0 ssh stderr diagnostics may print over the running TUI during an outage (UNVERIFIED external); cheap human check: ssh -o ServerAliveInterval=1 -o ServerAliveCountMax=1 host cat, cut network, observe terminal"
+- 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md · degraded-verdict · "round 1 verdict carried [low coverage] [review readiness incomplete] (caller omitted --review-readiness); round 2 ran with readiness and converged"
