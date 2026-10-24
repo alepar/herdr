@@ -32,7 +32,7 @@ pub(crate) fn connect_saved_ssh(
         return Err(super::process::cancelled());
     }
     let path = saved_bridge_path(profile_id);
-    let bridge = SshStdioBridge::start(
+    #[rustfmt::skip] let bridge = super::attach::mosh::start_ui_bridge(&ssh, // mosh-fork hook
         target.to_owned(),
         remote_herdr,
         path.clone(),

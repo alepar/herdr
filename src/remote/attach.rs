@@ -27,6 +27,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+#[rustfmt::skip] #[path = "../mosh/mod.rs"] pub(super) mod mosh; // mosh-fork hook
 
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 const BRIDGE_IO_POLL: Duration = Duration::from_millis(1);
@@ -87,7 +88,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         require_surface_interest,
     )?;
 
-    let _bridge = SshStdioBridge::start(
+    #[rustfmt::skip] let _bridge = mosh::start_ui_bridge(&remote_ssh, // mosh-fork hook
         remote.target.clone(),
         prepared_remote.remote_herdr,
         local_socket.clone(),
