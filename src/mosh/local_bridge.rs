@@ -15,7 +15,7 @@ use super::session::{
     self, end_reason, Decoder, LinkVerdict, Role, SessionEndpoint, SessionEvent, SessionMsg, Token,
     WelcomeStatus, MAX_DATA_CHUNK,
 };
-use super::ssh_leg::{Leg, LegDialer, LegEndReport, LegError, LegKind};
+use super::ssh_leg::{Leg, LegDialer, LegEndReport, LegError, LegKind, LEG_REAP_BUDGET};
 use crate::client::mosh_outage::LinkStatus;
 use crate::ipc::{self, LocalStream};
 use interprocess::local_socket::traits::Listener as _;
@@ -35,8 +35,11 @@ const LOCAL_RING_CAP: usize = 8 * 1024 * 1024;
 /// Upper bound on how long the pump sleeps; also the `should_stop` poll period (spec: <= 100 ms).
 const TICK: Duration = Duration::from_millis(50);
 const RESUMING_INJECT_EVERY: Duration = Duration::from_secs(1);
-/// How long a stop waits for `END{client-gone}` to be flushed before tearing the leg down.
-const STOP_END_FLUSH: Duration = Duration::from_millis(500);
+/// The one deadline of a closing connection: how long the END/ACK has to reach the keeper (leg
+/// write completed and leg EOF), and how long the client writer has to finish behind its frames.
+const CLOSE_BUDGET: Duration = Duration::from_millis(500);
+/// Receive timeout while closing, so flush, EOF and deadline checks are not quantised to `TICK`.
+const CLOSING_TICK: Duration = Duration::from_millis(5);
 /// After a ring overflow the client is already closed; the keeper is told on the next leg, but
 /// only for this long.
 const OVERFLOW_END_LINGER: Duration = Duration::from_secs(5);
@@ -246,8 +249,8 @@ fn serve_connection(
         client_closed: false,
         client_idle: false,
         end_deadline: None,
-        end_flush: None,
-        stop_deadline: None,
+        closing: None,
+        client_shut: false,
         peek: Decoder::default(),
         peer_recv_offset: None,
         dial_thread: None,
@@ -291,17 +294,67 @@ struct Down {
     resuming_injected: bool,
 }
 
+/// How the run loop ended.
 enum Done {
     /// Serve this connection through the upstream plain bridge with the untouched stream.
     Plain,
-    /// Tear down at once; the client socket is shut, nothing more is delivered.
+    /// The Closing phase finished; `finish` only releases resources, bounded by `reap_by`.
+    Closed {
+        error: Option<io::Error>,
+        /// Kill the ssh child at once: no END/ACK was owed to the keeper.
+        kill: bool,
+        reap_by: Instant,
+    },
+}
+
+/// Why the connection is closing.
+enum CloseWhy {
+    /// `should_stop`: `END{client-gone}` goes out now (ahead of unsent ring bytes) and the client
+    /// is shut at once.
     Stopped,
-    /// Deliver every queued frame, then close the client socket.
-    Close {
+    /// The session-final END the endpoint queued (client EOF / ring overflow) was handed to the
+    /// leg writer.
+    EndSent,
+    /// `END{server-eof}` received: deliver the client queue, ack what the client actually wrote,
+    /// then close behind the frames.
+    ServerEof,
+    /// Any other end (give-up, fatal reconnect, session-gone, oversized frame, linger expiry, leg-0
+    /// failure, client setup): close the client behind its queued frames; no END or ACK owed.
+    Ended {
         reason: String,
         error: Option<io::Error>,
-        final_ack: bool,
     },
+}
+
+impl CloseWhy {
+    fn reason(&self) -> &str {
+        match self {
+            CloseWhy::Stopped => "stopped",
+            CloseWhy::EndSent => end_reason::CLIENT_GONE,
+            CloseWhy::ServerEof => end_reason::SERVER_EOF,
+            CloseWhy::Ended { reason, .. } => reason,
+        }
+    }
+}
+
+/// The one teardown phase (spec §Post-Implementation Note, code redesign cycle 1). The run loop
+/// keeps running while it is open: heartbeats, acks, leg EOF and `should_stop` are still
+/// observed, and nothing here blocks on the client socket.
+struct Closing {
+    why: CloseWhy,
+    /// An END or final ACK is owed to the leg: wait for its write and the leg's EOF.
+    leg_owed: bool,
+    /// `LegIo::sent` count that must be flushed: the END and/or the final ACK. `None` until it
+    /// is handed to the leg writer.
+    leg_target: Option<u64>,
+    /// Bounds the END/ACK leg write, leg EOF and the ssh reap.
+    deadline: Instant,
+    /// ServerEof only: keep delivering the client queue until this instant (the remaining
+    /// grace) before the ACK and the client close.
+    drain_until: Option<Instant>,
+    /// Bounds the client writer's own sub-wait after `ClientOut::Close`; `None` until the close
+    /// is sent (ServerEof sends it after the leg settles, so the ACK goes first).
+    client_deadline: Option<Instant>,
 }
 
 struct LegIo {
@@ -360,10 +413,9 @@ struct Conn<'a> {
     /// The client reader waits for a go token.
     client_idle: bool,
     end_deadline: Option<Instant>,
-    /// (leg writer message count that includes the final END, flush deadline)
-    end_flush: Option<(u64, Instant)>,
-    /// The stop budget set by `on_stop`; teardown reuses what remains of it.
-    stop_deadline: Option<Instant>,
+    closing: Option<Closing>,
+    /// The client socket was shut down (stop); nothing waits on its writer.
+    client_shut: bool,
     /// Pre-WELCOME copy of the inbound bytes, only to learn WELCOME's `recv_offset` for tracing.
     peek: Decoder,
     peer_recv_offset: Option<u64>,
@@ -375,7 +427,8 @@ impl Conn<'_> {
     fn run(&mut self) {
         self.start_dial(LegKind::Initial, None);
         while self.done.is_none() {
-            match self.rx.recv_timeout(TICK) {
+            let wait = if self.closing.is_some() { CLOSING_TICK } else { TICK };
+            match self.rx.recv_timeout(wait) {
                 Ok(event) => self.on_event(event),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -395,11 +448,24 @@ impl Conn<'_> {
         }
     }
 
-    fn close_with(&mut self, reason: &str, error: Option<io::Error>) {
-        self.done = Some(Done::Close {
-            reason: reason.to_owned(),
-            error,
-            final_ack: false,
+    /// Enter Closing for any end that owes the keeper nothing: close the client behind its
+    /// queued frames (bounded sub-wait). The first reason wins.
+    fn end_session(&mut self, reason: &str, error: Option<io::Error>) {
+        if self.closing.is_some() {
+            return;
+        }
+        let by = Instant::now() + CLOSE_BUDGET;
+        self.client_send(ClientOut::Close);
+        self.closing = Some(Closing {
+            why: CloseWhy::Ended {
+                reason: reason.to_owned(),
+                error,
+            },
+            leg_owed: false,
+            leg_target: None,
+            deadline: by,
+            drain_until: None,
+            client_deadline: Some(by),
         });
     }
 
@@ -421,8 +487,15 @@ impl Conn<'_> {
         if let Some(handle) = self.dial_thread.take() {
             let _ = handle.join();
         }
-        if self.stop.load(Ordering::Acquire) {
-            self.done = Some(Done::Stopped);
+        let stopped = self.stop.load(Ordering::Acquire);
+        if stopped || self.closing.is_some() {
+            if let Ok(leg) = result {
+                reap_in_background(leg);
+            }
+            // A dial finishing while merely Closing leaves the graceful close and its reason alone.
+            if stopped {
+                self.on_stop(Instant::now());
+            }
             return;
         }
         match result {
@@ -438,16 +511,16 @@ impl Conn<'_> {
                 tracing::debug!(%err, "mosh leg 0 unsupported; plain bridge");
                 self.done = Some(Done::Plain);
             }
-            (LegKind::Initial, LegError::Fatal(err)) => self.close_with("leg0-failed", Some(err)),
+            (LegKind::Initial, LegError::Fatal(err)) => self.end_session("leg0-failed", Some(err)),
             // Only a stop makes leg 0 retryable.
-            (LegKind::Initial, LegError::Retryable(_)) => self.done = Some(Done::Stopped),
+            (LegKind::Initial, LegError::Retryable(_)) => self.on_stop(Instant::now()),
             (LegKind::Reconnect, LegError::Retryable(err)) => {
                 tracing::debug!(%err, attempt = self.attempt, "mosh reconnect attempt failed");
                 self.attempt += 1;
                 self.schedule_backoff();
             }
             (LegKind::Reconnect, LegError::Fatal(err) | LegError::Unsupported(err)) => {
-                self.close_with("reconnect-fatal", Some(err));
+                self.end_session("reconnect-fatal", Some(err));
             }
         }
     }
@@ -460,7 +533,7 @@ impl Conn<'_> {
 
     fn begin_leg(&mut self, mut leg: Leg) {
         let (Some(mut reader), Some(mut writer)) = (leg.take_reader(), leg.take_writer()) else {
-            self.close_with(
+            self.end_session(
                 "leg-io",
                 Some(io::Error::other("leg has no byte stream halves")),
             );
@@ -530,30 +603,20 @@ impl Conn<'_> {
         self.stage = Stage::Welcome;
     }
 
-    /// Tear the current leg down and return its end report.
+    /// Tear the current leg down and return its end report, bounded by `LEG_REAP_BUDGET`.
     fn kill_leg(&mut self, kill: bool) -> Option<LegEndReport> {
         let LegIo { leg, tx, .. } = self.leg.take()?;
         drop(tx);
-        Some(leg.finish(kill))
+        Some(leg.finish(kill, Instant::now() + LEG_REAP_BUDGET))
     }
 
-    /// Graceful leg close: the writer drains what is queued and drops ssh's stdin (EOF), then
-    /// we give the child until `deadline` to hang up before it is killed.
-    fn close_leg(&mut self, deadline: Instant) {
-        let Some(LegIo {
-            leg,
-            tx,
-            reader_done,
-            ..
-        }) = self.leg.take()
-        else {
-            return;
-        };
-        drop(tx);
-        while !reader_done.load(Ordering::Acquire) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(2));
+    /// Drop the current leg without waiting for it: a reaper thread kills and reaps it, so a
+    /// dying leg never blocks the Resuming injection or the give-up timer.
+    fn reap_leg(&mut self) {
+        if let Some(LegIo { leg, tx, .. }) = self.leg.take() {
+            drop(tx);
+            reap_in_background(leg);
         }
-        leg.finish(true);
     }
 
     /// The leg ended before `WELCOME` (explicit END, EOF, protocol error or the bound).
@@ -586,6 +649,15 @@ impl Conn<'_> {
     }
 
     fn leg_ended(&mut self, reason: &str) {
+        if let Some(closing) = &self.closing {
+            // Closing polls the leg itself, except while draining a server-eof, where a dead
+            // leg is dropped and never resumed.
+            if closing.drain_until.is_some() {
+                self.reap_leg();
+                self.endpoint.leg_down();
+            }
+            return;
+        }
         match self.stage {
             Stage::Welcome => self.pre_welcome_failed(reason != "eof"),
             Stage::Linked => self.leg_dead(reason),
@@ -593,7 +665,16 @@ impl Conn<'_> {
         }
     }
 
+    /// Whether leg input and the send pump are live: always, except while Closing for anything
+    /// but a server-eof drain.
+    fn pumping(&self) -> bool {
+        self.closing.as_ref().is_none_or(|c| c.drain_until.is_some())
+    }
+
     fn on_leg_bytes(&mut self, bytes: &[u8]) {
+        if !self.pumping() {
+            return;
+        }
         let now = Instant::now();
         if self.stage == Stage::Welcome {
             self.peek.push(bytes);
@@ -610,17 +691,17 @@ impl Conn<'_> {
         // Bytes decoded before a protocol error are already counted in recv_offset and will
         // not be resent: deliver them before the leg is dropped.
         for event in events {
-            if self.done.is_some() || self.leg.is_none() {
+            if self.leg.is_none() || !self.pumping() {
                 break;
             }
             self.on_session_event(event);
         }
         if let Some(err) = error {
-            if self.done.is_none() && self.leg.is_some() {
+            if self.leg.is_some() && self.pumping() {
                 self.leg_ended(&format!("protocol error: {err}"));
             }
         }
-        if self.done.is_none() && self.stage == Stage::Linked {
+        if self.stage == Stage::Linked && self.pumping() {
             self.pump_sends(Instant::now());
             self.feed_client();
         }
@@ -632,7 +713,7 @@ impl Conn<'_> {
             SessionEvent::Welcomed(status) => self.on_welcomed(status),
             SessionEvent::ResumeRefused => {
                 self.trace.emit("welcome", serde_json::json!({"status": "refused"}));
-                self.close_with("session-gone", None);
+                self.end_session("session-gone", None);
             }
             SessionEvent::PeerEnd(reason) => {
                 if self.stage == Stage::Welcome {
@@ -641,14 +722,9 @@ impl Conn<'_> {
                     }
                     self.pre_welcome_failed(false);
                 } else if reason == end_reason::SERVER_EOF {
-                    self.splitter.drop_partial();
-                    self.done = Some(Done::Close {
-                        reason: reason.clone(),
-                        error: None,
-                        final_ack: true,
-                    });
+                    self.begin_server_eof();
                 } else {
-                    self.close_with(&reason, None);
+                    self.end_session(&reason, None);
                 }
             }
             SessionEvent::Hello(_) => self.leg_ended("unexpected HELLO"),
@@ -670,7 +746,7 @@ impl Conn<'_> {
                     });
                 }
             }
-            Err(oversized) => self.close_with(
+            Err(oversized) => self.end_session(
                 "oversized-frame",
                 Some(io::Error::other(format!(
                     "remote sent a frame of {} bytes (max {})",
@@ -701,7 +777,7 @@ impl Conn<'_> {
             WelcomeStatus::New => {
                 store_token(&self.params.local_socket, self.endpoint.token());
                 if let Err(err) = self.start_client() {
-                    self.close_with("client-setup", Some(err));
+                    self.end_session("client-setup", Some(err));
                     return;
                 }
             }
@@ -804,7 +880,7 @@ impl Conn<'_> {
 
     fn on_client(&mut self, bytes: &[u8]) {
         self.client_idle = true;
-        if self.client_closed {
+        if self.client_closed || self.closing.is_some() {
             return;
         }
         if self.endpoint.push_source(bytes).is_err() {
@@ -825,7 +901,7 @@ impl Conn<'_> {
     }
 
     fn on_client_eof(&mut self) {
-        if self.client_closed {
+        if self.client_closed || self.closing.is_some() {
             return;
         }
         self.endpoint.queue_final_end(end_reason::CLIENT_GONE);
@@ -853,15 +929,18 @@ impl Conn<'_> {
         let now = Instant::now();
         if self.stop.load(Ordering::Acquire) {
             self.cancel.store(true, Ordering::Release);
-            self.on_stop();
-            return;
+            if !matches!(&self.closing, Some(c) if matches!(c.why, CloseWhy::Stopped)) {
+                self.on_stop(now);
+            }
+        } else if self.closing.is_none() && self.end_deadline.is_some_and(|by| now >= by) {
+            self.end_session("end-linger-expired", None);
         }
-        if self.end_deadline.is_some_and(|by| now >= by) {
-            self.close_with("end-linger-expired", None);
+        if self.closing.is_some() {
+            self.tick_closing(now);
             return;
         }
         self.tick_outage(now);
-        if self.done.is_some() {
+        if self.closing.is_some() {
             return;
         }
         self.feed_client();
@@ -911,7 +990,7 @@ impl Conn<'_> {
             return;
         };
         if now >= give_up_at {
-            self.close_with("give-up", None);
+            self.end_session("give-up", None);
             return;
         }
         let due = last_inject.is_none_or(|at| now.duration_since(at) >= RESUMING_INJECT_EVERY);
@@ -939,14 +1018,6 @@ impl Conn<'_> {
         }
         self.update_delivered(now);
         self.pump_sends(now);
-        if self.stage != Stage::Linked {
-            return;
-        }
-        if let (Some((target, by)), Some(io)) = (self.end_flush, &self.leg) {
-            if io.flushed.load(Ordering::Acquire) >= target || now >= by {
-                self.close_with("client-gone", None);
-            }
-        }
     }
 
     /// The ack rule: held-back partial bytes count as delivered, queued bytes do not.
@@ -978,12 +1049,27 @@ impl Conn<'_> {
                     None => return,
                 },
             };
-            let is_end = self.client_closed && is_end_message(&message);
+            let is_end =
+                self.closing.is_none() && self.client_closed && is_end_message(&message);
             match io.tx.try_send(message) {
                 Ok(()) => {
                     io.sent += 1;
                     if is_end {
-                        self.end_flush = Some((io.sent, now + STOP_END_FLUSH));
+                        // The session-final END reached the leg writer: Closing waits for its
+                        // write to complete and for leg EOF. A leg that dies first is not the
+                        // close edge (it resumes and the END is re-sent). If EOF is observed
+                        // just before the writer's `flushed` increment lands the bridge resumes
+                        // needlessly and the keeper answers `unknown`; rare and benign.
+                        let by = now + CLOSE_BUDGET;
+                        self.closing = Some(Closing {
+                            why: CloseWhy::EndSent,
+                            leg_owed: true,
+                            leg_target: Some(io.sent),
+                            deadline: by,
+                            drain_until: None,
+                            client_deadline: Some(by),
+                        });
+                        return;
                     }
                 }
                 Err(TrySendError::Full(message)) => {
@@ -991,7 +1077,13 @@ impl Conn<'_> {
                     return;
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    self.leg_dead("write-failed");
+                    if self.closing.is_some() {
+                        // Draining a server-eof: a dead leg is dropped, never resumed.
+                        self.reap_leg();
+                        self.endpoint.leg_down();
+                    } else {
+                        self.leg_dead("write-failed");
+                    }
                     return;
                 }
             }
@@ -1001,7 +1093,7 @@ impl Conn<'_> {
     /// A linked leg died (EOF, protocol error, silence or write failure): start resuming.
     fn leg_dead(&mut self, reason: &str) {
         let now = Instant::now();
-        self.kill_leg(true);
+        self.reap_leg();
         self.endpoint.leg_down();
         self.trace
             .emit("leg_down", serde_json::json!({ "reason": reason }));
@@ -1015,56 +1107,204 @@ impl Conn<'_> {
         if self.splitter.frames_seen() >= 1 && !self.client_closed {
             self.inject_resuming(now);
         }
-        self.end_flush = None;
         self.schedule_backoff();
     }
 
-    /// `should_stop` is set. With a live leg, tell the keeper the client is gone first.
-    fn on_stop(&mut self) {
-        let live = self.stage == Stage::Linked && self.endpoint.is_up();
-        if live {
-            let deadline = Instant::now() + STOP_END_FLUSH;
-            self.stop_deadline = Some(deadline);
-            let end = self.endpoint.end_now(end_reason::CLIENT_GONE);
+    // ---- closing ----------------------------------------------------------------------------
+
+    /// `should_stop` is set (or seen by a dial): switch to Stopped semantics. The client is shut
+    /// at once (its writer unblocks on EPIPE; nothing ever waits on it) and, with a live leg,
+    /// `END{client-gone}` goes to the leg writer independently of the client drain. A Closing
+    /// already open keeps its leg target and its deadline when that is sooner.
+    fn on_stop(&mut self, now: Instant) {
+        let live = self.stage == Stage::Linked && self.endpoint.is_up() && self.leg.is_some();
+        if let Some(client) = &self.client {
+            shutdown_client(&client.shutdown);
+        }
+        self.client_shut = true;
+        let mut closing = self.closing.take().unwrap_or(Closing {
+            why: CloseWhy::Stopped,
+            leg_owed: false,
+            leg_target: None,
+            deadline: now + CLOSE_BUDGET,
+            drain_until: None,
+            client_deadline: None,
+        });
+        closing.why = CloseWhy::Stopped;
+        closing.drain_until = None;
+        closing.client_deadline = Some(now);
+        if closing.leg_target.is_none() && live {
             if let Some(io) = &mut self.leg {
-                io.pending = None;
-                let mut target = self.end_flush.map(|(target, _)| target);
-                if target.is_none() {
-                    let mut message = end;
-                    loop {
+                io.pending = Some(self.endpoint.end_now(end_reason::CLIENT_GONE));
+            }
+            closing.leg_owed = true;
+            closing.deadline = closing.deadline.min(now + CLOSE_BUDGET);
+        }
+        self.closing = Some(closing);
+    }
+
+    /// `END{server-eof}` received on a linked leg (live handoff): keep the leg running and
+    /// deliver the remaining complete frames, bounded by the remaining grace, not by the stop
+    /// budget. Acks follow delivery (rule 3), so the teardown stays bounded.
+    fn begin_server_eof(&mut self) {
+        if self.closing.is_some() {
+            return;
+        }
+        self.splitter.drop_partial();
+        let now = Instant::now();
+        let drain_until = self
+            .down
+            .as_ref()
+            .map_or(now + self.params.grace, |down| down.give_up_at);
+        self.closing = Some(Closing {
+            why: CloseWhy::ServerEof,
+            leg_owed: false,
+            leg_target: None,
+            deadline: drain_until + CLOSE_BUDGET,
+            drain_until: Some(drain_until),
+            client_deadline: None,
+        });
+    }
+
+    /// Everything the client will ever get is written (or the client side is already closed).
+    fn client_drained(&self) -> bool {
+        self.client_closed
+            || self
+                .client
+                .as_ref()
+                .is_none_or(|client| client.written.load(Ordering::Acquire) >= self.frames_end)
+    }
+
+    /// Advance Closing. Each pass: a server-eof drain, the hand-off of the owed END/ACK, the
+    /// leg's write completion and EOF, and the client writer's sub-wait; all bounded by the
+    /// deadlines set when Closing was entered.
+    fn tick_closing(&mut self, now: Instant) {
+        // Phase A (server-eof only): deliver the client queue.
+        if let Some(by) = self.closing.as_ref().and_then(|c| c.drain_until) {
+            let dead = self
+                .leg
+                .as_ref()
+                .is_some_and(|io| io.reader_done.load(Ordering::Acquire))
+                || self.endpoint.poll_timers(now) == Some(LinkVerdict::Silence);
+            if dead && self.leg.is_some() {
+                self.reap_leg();
+                self.endpoint.leg_down();
+            }
+            self.update_delivered(now);
+            self.pump_sends(now);
+            if !(self.client_drained() || now >= by) {
+                return;
+            }
+            // Ack only what the client wrote (`update_delivered` covers the dropped partial).
+            self.update_delivered(now);
+            let ack = if self.endpoint.is_up() {
+                self.endpoint.ack_now()
+            } else {
+                None
+            };
+            let live = ack.is_some() && self.leg.is_some();
+            if let (Some(ack), Some(io)) = (ack, &mut self.leg) {
+                io.pending = Some(ack);
+            }
+            if let Some(closing) = &mut self.closing {
+                closing.drain_until = None;
+                closing.leg_owed = live;
+                closing.deadline = now + CLOSE_BUDGET;
+            }
+        }
+        // Phase B: hand the owed END/ACK to the leg writer (never blocking), then wait for its
+        // write and the leg's EOF.
+        let Some(closing) = &mut self.closing else {
+            return;
+        };
+        if closing.leg_owed && closing.leg_target.is_none() {
+            match &mut self.leg {
+                Some(io) => {
+                    if let Some(message) = io.pending.take() {
                         match io.tx.try_send(message) {
                             Ok(()) => {
                                 io.sent += 1;
-                                target = Some(io.sent);
-                                break;
+                                closing.leg_target = Some(io.sent);
                             }
-                            Err(TrySendError::Full(back)) if Instant::now() < deadline => {
-                                message = back;
-                                thread::sleep(Duration::from_millis(2));
-                            }
-                            Err(_) => break,
+                            Err(TrySendError::Full(message)) => io.pending = Some(message),
+                            Err(TrySendError::Disconnected(_)) => closing.leg_owed = false,
                         }
+                    } else {
+                        closing.leg_owed = false;
                     }
                 }
-                if let Some(target) = target {
-                    while io.flushed.load(Ordering::Acquire) < target && Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                }
+                None => closing.leg_owed = false,
             }
         }
-        self.trace
-            .emit("session_end", serde_json::json!({"reason": "stopped"}));
-        self.done = Some(Done::Stopped);
+        let mut leg_done = !closing.leg_owed || now >= closing.deadline;
+        if !leg_done {
+            match &self.leg {
+                None => leg_done = true,
+                Some(io) if io.reader_done.load(Ordering::Acquire) => {
+                    let flushed = closing
+                        .leg_target
+                        .is_some_and(|target| io.flushed.load(Ordering::Acquire) >= target);
+                    if !flushed && matches!(closing.why, CloseWhy::EndSent) {
+                        // The leg died before the END write completed: not the close edge.
+                        // Resume; the endpoint re-sends the retained END on the next leg.
+                        self.closing = None;
+                        self.leg_dead("eof-before-end-flushed");
+                        return;
+                    }
+                    leg_done = true;
+                }
+                Some(_) => {}
+            }
+        }
+        if !leg_done {
+            return;
+        }
+        // Phase C: the client writer finishes behind its frames (ServerEof sends the close only
+        // now, so the final ACK reaches the keeper before a `--remote` client can exit).
+        let client_deadline = match closing.client_deadline {
+            Some(by) => by,
+            None => {
+                let by = now + CLOSE_BUDGET;
+                closing.client_deadline = Some(by);
+                self.client_send(ClientOut::Close);
+                by
+            }
+        };
+        let client_done = self.client_shut
+            || self.client.as_ref().is_none_or(|c| c.writer.is_finished())
+            || now >= client_deadline;
+        if client_done {
+            self.complete_closing();
+        }
+    }
+
+    fn complete_closing(&mut self) {
+        let Some(closing) = self.closing.take() else {
+            return;
+        };
+        self.trace.emit(
+            "session_end",
+            serde_json::json!({ "reason": closing.why.reason() }),
+        );
+        let error = match closing.why {
+            CloseWhy::Ended { error, .. } => error,
+            _ => None,
+        };
+        self.done = Some(Done::Closed {
+            error,
+            kill: closing.leg_target.is_none(),
+            reap_by: closing.deadline,
+        });
     }
 
     // ---- teardown -------------------------------------------------------------------------
 
+    /// Release resources, each step bounded: the Closing deadlines were already enforced by the
+    /// loop, so nothing here waits on the client or on a peer.
     fn finish(mut self) -> io::Result<()> {
-        let done = self.done.take().unwrap_or(Done::Stopped);
         self.cancel.store(true, Ordering::Release);
-        let result = match done {
-            Done::Plain => {
+        let (error, kill, reap_by) = match self.done.take() {
+            Some(Done::Plain) => {
                 self.kill_leg(true);
                 self.join_dial();
                 self.trace
@@ -1074,36 +1314,35 @@ impl Conn<'_> {
                     None => Err(io::Error::other("client stream was already taken")),
                 };
             }
-            Done::Stopped => {
-                let deadline = self.stop_deadline.unwrap_or_else(Instant::now);
-                self.close_client(false, deadline);
-                self.close_leg(deadline);
-                Ok(())
-            }
-            Done::Close {
-                reason,
+            Some(Done::Closed {
                 error,
-                final_ack,
-            } => {
-                self.trace
-                    .emit("session_end", serde_json::json!({ "reason": reason }));
-                let deadline = Instant::now() + STOP_END_FLUSH;
-                // The final ACK goes first: a `--remote` client may exit as soon as its
-                // stream closes.
-                if final_ack {
-                    self.final_ack(deadline);
-                }
-                self.close_client(true, deadline);
-                self.close_leg(deadline);
-                match error {
-                    Some(err) => Err(err),
-                    None => Ok(()),
-                }
-            }
+                kill,
+                reap_by,
+            }) => (error, kill, reap_by),
+            None => (None, true, Instant::now() + LEG_REAP_BUDGET),
         };
-        self.kill_leg(true);
+        // The client threads exit on the shutdown, so the joins are bounded.
+        if let Some(client) = self.client.take() {
+            if !self.client_shut {
+                shutdown_client(&client.shutdown);
+            }
+            drop(client.go_tx);
+            drop(client.out_tx);
+            let _ = client.writer.join();
+            let _ = client.reader.join();
+        }
+        self.stream = None;
+        // Dropping the leg's sender gives ssh's stdin EOF; the child then gets until `reap_by`
+        // to exit before it is killed and reaped.
+        if let Some(LegIo { leg, tx, .. }) = self.leg.take() {
+            drop(tx);
+            leg.finish(kill, reap_by);
+        }
         self.join_dial();
-        result
+        match error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn join_dial(&mut self) {
@@ -1111,59 +1350,13 @@ impl Conn<'_> {
             let _ = handle.join();
         }
     }
+}
 
-    /// Close the client socket. Graceful: behind every queued frame, unless stopped meanwhile.
-    fn close_client(&mut self, graceful: bool, deadline: Instant) {
-        let Some(client) = self.client.take() else {
-            self.stream = None;
-            return;
-        };
-        if graceful {
-            let _ = client.out_tx.send(ClientOut::Close);
-            while !client.writer.is_finished()
-                && !self.stop.load(Ordering::Acquire)
-                && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
-        shutdown_client(&client.shutdown);
-        drop(client.go_tx);
-        drop(client.out_tx);
-        let _ = client.writer.join();
-        let _ = client.reader.join();
-    }
-
-    /// Tell the keeper everything delivered was written, so it can drop its server-eof session.
-    /// The ACK is unconditional; the session is over, so nothing can be replayed.
-    fn final_ack(&mut self, deadline: Instant) {
-        if !self.endpoint.is_up() {
-            return;
-        }
-        self.endpoint
-            .delivered(Instant::now(), self.endpoint.recv_offset());
-        let Some(ack) = self.endpoint.ack_now() else {
-            return;
-        };
-        let Some(io) = &mut self.leg else { return };
-        let mut message = ack;
-        loop {
-            match io.tx.try_send(message) {
-                Ok(()) => {
-                    io.sent += 1;
-                    break;
-                }
-                Err(TrySendError::Full(back)) if Instant::now() < deadline => {
-                    message = back;
-                    thread::sleep(Duration::from_millis(2));
-                }
-                Err(_) => return,
-            }
-        }
-        while io.flushed.load(Ordering::Acquire) < io.sent && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(2));
-        }
-    }
+/// Kill and reap a leg on a reaper thread, bounded by `LEG_REAP_BUDGET`.
+fn reap_in_background(leg: Leg) {
+    thread::spawn(move || {
+        leg.finish(true, Instant::now() + LEG_REAP_BUDGET);
+    });
 }
 
 fn is_end_message(message: &[u8]) -> bool {
@@ -1263,43 +1456,71 @@ mod tests {
     struct Client {
         stream: LocalStream,
         rx: mpsc::Receiver<(Instant, Got)>,
+        /// Keeps a paused client's collector parked until dropped.
+        _release: Option<mpsc::Sender<()>>,
     }
 
     impl Client {
         fn connect(path: &Path) -> Client {
+            Client::connect_with(path, false, Duration::ZERO)
+        }
+
+        /// A client whose collector never reads (a stalled terminal) until the client is dropped.
+        fn connect_paused(path: &Path) -> Client {
+            Client::connect_with(path, true, Duration::ZERO)
+        }
+
+        /// A client whose collector sleeps `pause` after each frame.
+        fn connect_slow(path: &Path, pause: Duration) -> Client {
+            Client::connect_with(path, false, pause)
+        }
+
+        fn connect_with(path: &Path, paused: bool, pause: Duration) -> Client {
             let stream = ipc::connect_local_stream(path).unwrap();
             let mut reader = stream.try_clone().unwrap();
             let (tx, rx) = mpsc::channel();
-            thread::spawn(move || loop {
-                let mut prefix = [0u8; 4];
-                let mut have = 0;
-                while have < 4 {
-                    match reader.read(&mut prefix[have..]) {
-                        Ok(0) | Err(_) => {
-                            let got = if have == 0 { Got::Closed } else { Got::Torn };
-                            let _ = tx.send((Instant::now(), got));
-                            return;
-                        }
-                        Ok(n) => have += n,
-                    }
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let release = paused.then_some(release_tx);
+            thread::spawn(move || {
+                if paused {
+                    let _ = release_rx.recv();
                 }
-                let mut frame = prefix.to_vec();
-                frame.resize(4 + u32::from_le_bytes(prefix) as usize, 0);
-                let mut at = 4;
-                while at < frame.len() {
-                    match reader.read(&mut frame[at..]) {
-                        Ok(0) | Err(_) => {
-                            let _ = tx.send((Instant::now(), Got::Torn));
-                            return;
+                loop {
+                    let mut prefix = [0u8; 4];
+                    let mut have = 0;
+                    while have < 4 {
+                        match reader.read(&mut prefix[have..]) {
+                            Ok(0) | Err(_) => {
+                                let got = if have == 0 { Got::Closed } else { Got::Torn };
+                                let _ = tx.send((Instant::now(), got));
+                                return;
+                            }
+                            Ok(n) => have += n,
                         }
-                        Ok(n) => at += n,
                     }
-                }
-                if tx.send((Instant::now(), Got::Frame(frame))).is_err() {
-                    return;
+                    let mut frame = prefix.to_vec();
+                    frame.resize(4 + u32::from_le_bytes(prefix) as usize, 0);
+                    let mut at = 4;
+                    while at < frame.len() {
+                        match reader.read(&mut frame[at..]) {
+                            Ok(0) | Err(_) => {
+                                let _ = tx.send((Instant::now(), Got::Torn));
+                                return;
+                            }
+                            Ok(n) => at += n,
+                        }
+                    }
+                    if tx.send((Instant::now(), Got::Frame(frame))).is_err() {
+                        return;
+                    }
+                thread::sleep(pause);
                 }
             });
-            Client { stream, rx }
+            Client {
+                stream,
+                rx,
+                _release: release,
+            }
         }
 
         fn write(&mut self, bytes: &[u8]) {
@@ -1371,9 +1592,9 @@ mod tests {
         welcome_delay: Duration,
         /// Write this many bytes on the leg, then cut it.
         kill_after: Option<usize>,
-        /// Decode the session-final END but do not record it, then cut the leg: a leg that
-        /// died after the bridge wrote the END.
-        swallow_end: bool,
+        /// The leg's writer fails the session-final END write and cuts the leg, so the END never
+        /// counts as flushed: the leg always dies first.
+        cut_on_end_write: bool,
     }
 
     impl KLeg {
@@ -1382,15 +1603,15 @@ mod tests {
                 answer,
                 welcome_delay: Duration::ZERO,
                 kill_after: None,
-                swallow_end: false,
+                cut_on_end_write: false,
             }
         }
         fn delay(mut self, delay: Duration) -> KLeg {
             self.welcome_delay = delay;
             self
         }
-        fn swallow_end(mut self) -> KLeg {
-            self.swallow_end = true;
+        fn cut_on_end_write(mut self) -> KLeg {
+            self.cut_on_end_write = true;
             self
         }
         fn kill_after(mut self, bytes: usize) -> KLeg {
@@ -1410,6 +1631,14 @@ mod tests {
         pre_welcome_msgs: usize,
         hellos: Vec<Hello>,
         ends: Vec<String>,
+        /// When each entry of `ends` was received.
+        ends_at: Vec<Instant>,
+        /// Bytes written down the leg.
+        down_sent: usize,
+        /// The queued final END was written down the leg.
+        end_written: bool,
+        /// After its END the keeper saw everything acked and hung up.
+        acked_all: bool,
         last_rx: Option<Instant>,
         stall: bool,
         kill_now: bool,
@@ -1581,11 +1810,11 @@ mod tests {
                             for event in events {
                                 match event {
                                     SessionEvent::Deliver(bytes) => st.upstream.extend(bytes),
-                                    SessionEvent::PeerEnd(_) if script.swallow_end => eof = true,
                                     SessionEvent::PeerEnd(reason) => {
                                         let len = st.upstream.len();
                                         st.upstream_at_end = Some(len);
                                         st.ends.push(reason);
+                                        st.ends_at.push(now);
                                         eof = true;
                                     }
                                     _ => {}
@@ -1601,6 +1830,7 @@ mod tests {
                     }
                     let pending = std::mem::take(&mut st.pending_down);
                     let final_end = st.final_end.take();
+                    let end_written = st.end_written;
                     let ep = st.endpoint.as_mut().unwrap();
                     for bytes in pending {
                         ep.push_source(&bytes).expect("keeper ring");
@@ -1609,8 +1839,14 @@ mod tests {
                         ep.queue_final_end(reason);
                     }
                     ep.delivered(now, ep.recv_offset());
+                    let hang_up = end_written && ep.fully_acked();
                     while let Some(message) = ep.poll_send(now) {
                         out.push(message);
+                    }
+                    if hang_up {
+                        // Like the real keeper: a fully acked eof session is removed.
+                        st.acked_all = true;
+                        eof = true;
                     }
                     let has_data = out.iter().any(|message| {
                         let mut probe = Decoder::default();
@@ -1631,6 +1867,11 @@ mod tests {
                         if s.write_all(&message[..take]).is_err() {
                             break 'pump;
                         }
+                        {
+                            let mut st = self.st();
+                            st.down_sent += take;
+                            st.end_written |= is_end_message(&message);
+                        }
                         if let Some(left) = &mut budget {
                             *left -= take;
                             if *left == 0 {
@@ -1647,6 +1888,26 @@ mod tests {
             if let Some(ep) = self.st().endpoint.as_mut() {
                 ep.leg_down();
             }
+        }
+    }
+
+    /// A leg writer that fails the session-final END write and cuts the leg: the END never counts
+    /// as flushed, so the leg always dies before the bridge could close on a flushed END.
+    struct CutOnEnd {
+        inner: UnixStream,
+    }
+
+    impl Write for CutOnEnd {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if is_end_message(buf) {
+                let _ = self.inner.shutdown(std::net::Shutdown::Both);
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
         }
     }
 
@@ -1669,6 +1930,8 @@ mod tests {
         dial_times: Arc<Mutex<Vec<(LegKind, Instant)>>>,
         /// While set, `backoff` is the real reconnect schedule instead of 10 ms.
         real_backoff: Arc<AtomicBool>,
+        /// While set (with `blocked`), a dial stays in flight until it is cleared.
+        hold: Arc<AtomicBool>,
     }
 
     impl MemDialer {
@@ -1698,6 +1961,9 @@ mod tests {
             _stop: &AtomicBool,
         ) -> Result<Leg, LegError> {
             if self.blocked.load(Ordering::SeqCst) {
+                while self.hold.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
                 thread::sleep(Duration::from_millis(5));
                 return Err(LegError::Retryable(io::Error::other("dialer blocked")));
             }
@@ -1716,7 +1982,7 @@ mod tests {
                 Some(LegScript::Exit { code, stderr }) => Ok(Leg::new(
                     Box::new(io::empty()),
                     Box::new(io::sink()),
-                    Box::new(move |_| {
+                    Box::new(move |_, _| {
                         (Some(ExitStatus::from_raw(code << 8)), Some(stderr.to_owned()))
                     }),
                 )),
@@ -1724,11 +1990,17 @@ mod tests {
                     let (local, remote) = UnixStream::pair().unwrap();
                     keeper.spawn_leg(remote, script);
                     let reader = local.try_clone().unwrap();
-                    let writer = local.try_clone().unwrap();
+                    let writer: Box<dyn Write + Send> = if script.cut_on_end_write {
+                        Box::new(CutOnEnd {
+                            inner: local.try_clone().unwrap(),
+                        })
+                    } else {
+                        Box::new(local.try_clone().unwrap())
+                    };
                     Ok(Leg::new(
                         Box::new(reader),
-                        Box::new(writer),
-                        Box::new(move |_| {
+                        writer,
+                        Box::new(move |_, _| {
                             let _ = local.shutdown(std::net::Shutdown::Both);
                             (None, None)
                         }),
@@ -1990,6 +2262,38 @@ mod tests {
             frames.iter().all(|(at, _)| at.duration_since(started) < Duration::from_millis(1100)),
             "no injection after the deadline: {frames:?}"
         );
+    }
+
+    #[test]
+    fn give_up_with_dial_in_flight_stays_graceful() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let trace = fresh_dir();
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        for i in 0..48 {
+            keeper.push_down(frame_with(&format!("f{i}"), 60_000));
+        }
+        let harness = Harness::start_with(&dialer, secs(1), unused_plain(), Some(trace.clone()), None);
+        // A stalled client keeps the graceful close pending behind its queued frames.
+        let _client = Client::connect_paused(&harness.path);
+        wait_until("leg 0", WAIT, || !keeper.hellos().is_empty());
+        // The reconnect dial is held in flight across the give-up.
+        dialer.hold.store(true, Ordering::SeqCst);
+        dialer.block(true);
+        keeper.kill_leg();
+        thread::sleep(Duration::from_millis(1200));
+        // The dial completes while the connection is Closing for give-up, not stopping.
+        dialer.hold.store(false, Ordering::SeqCst);
+        let log = trace.join("local.jsonl");
+        wait_until("session_end", WAIT, || {
+            std::fs::read_to_string(&log).is_ok_and(|l| l.contains("\"event\":\"session_end\""))
+        });
+        let lines = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            lines.contains("\"reason\":\"give-up\""),
+            "session_end keeps the give-up reason: {lines}"
+        );
+        drop(harness);
+        let _ = std::fs::remove_dir_all(trace);
     }
 
     #[test]
@@ -2334,7 +2638,7 @@ mod tests {
     #[test]
     fn final_end_lost_with_leg_is_resent_on_resume() {
         let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
-        dialer.keeper(&keeper, KLeg::new(Answer::New).swallow_end());
+        dialer.keeper(&keeper, KLeg::new(Answer::New).cut_on_end_write());
         dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
         let mut harness = Harness::start(&dialer, secs(30));
         let mut client = harness.connect();
@@ -2346,6 +2650,57 @@ mod tests {
         assert_eq!(keeper.hellos().len(), 2, "the END needed a second leg");
         assert_eq!(keeper.upstream(), b"hello");
         harness.shutdown();
+    }
+
+    #[test]
+    fn stalled_client_does_not_delay_client_gone_end() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let mut harness = Harness::start(&dialer, secs(30));
+        let _client = Client::connect_paused(&harness.path);
+        wait_until("leg 0", WAIT, || !keeper.hellos().is_empty());
+        for _ in 0..48 {
+            keeper.push_down(frame_with("big", 60_000));
+        }
+        // A full window is in flight, so the bridge's client writer is blocked on the stalled
+        // socket with frames queued behind it.
+        wait_until("a window of downstream bytes", WAIT, || {
+            keeper.st().down_sent >= session::WINDOW
+        });
+        let stop_at = Instant::now();
+        let took = harness.shutdown();
+        assert!(took < Duration::from_millis(700), "{took:?}");
+        assert_eq!(keeper.ends(), [end_reason::CLIENT_GONE]);
+        let end_at = keeper.st().ends_at[0];
+        assert!(
+            end_at.saturating_duration_since(stop_at) < Duration::from_millis(500),
+            "END reached the leg {:?} after stop",
+            end_at.saturating_duration_since(stop_at)
+        );
+    }
+
+    #[test]
+    fn server_eof_with_slow_client_delivers_shutdown() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        for _ in 0..20 {
+            keeper.push_down(frame_with("big", 60_000));
+        }
+        keeper.push_down(shutdown_frame());
+        keeper.queue_end(end_reason::SERVER_EOF);
+        let harness = Harness::start(&dialer, secs(30));
+        let started = Instant::now();
+        let client = Client::connect_slow(&harness.path, Duration::from_millis(50));
+        let frames: Vec<_> = client.until_closed(WAIT).into_iter().map(|(_, s)| s).collect();
+        assert!(
+            started.elapsed() > CLOSE_BUDGET,
+            "the drain must outlast the stop budget: {:?}",
+            started.elapsed()
+        );
+        let mut expected = vec![data("big"); 20];
+        expected.push(data("shutdown"));
+        assert_eq!(frames, expected);
+        wait_until("the keeper saw the final ACK", WAIT, || keeper.st().acked_all);
     }
 
     #[test]
