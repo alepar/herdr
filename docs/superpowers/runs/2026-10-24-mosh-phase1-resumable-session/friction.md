@@ -2,3 +2,4 @@
 - [pre-flight] repo had no beads tracker; initialized with `bd init --stealth -p mosh` (tracker excluded via .git/info/exclude) instead of stopping, since the user requested the run explicitly at launch.
 - [pre-flight] `.worktrees/` ignored via .git/info/exclude instead of committing to upstream-owned .gitignore (fork minimal-diff rule).
 - [pre-flight] docs/* is upstream-gitignored; run-directory files are force-added (git add -f) on every commit.
+- [phase 2] design roast rung: Workflow

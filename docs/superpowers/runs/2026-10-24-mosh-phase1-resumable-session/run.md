@@ -10,6 +10,8 @@ idea: Implement Phase 1 of HERDR_MOSH_VISION.md (repo root, branch `mosh`, push 
 spec: 2026-10-24-mosh-phase1-resumable-session-design.md
 epic: mosh-dqw
 roastDesignRound: 1
+roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md
+findingsLedgerDesign: findings-ledger-design.md
 branch: super-auto/mosh-phase1-resumable-session
 base: mosh
 
