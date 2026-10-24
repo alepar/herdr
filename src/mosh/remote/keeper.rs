@@ -32,6 +32,11 @@ const KEEPER_RING_CAP: usize = 16 * 1024 * 1024;
 const IDLE_EXIT_AFTER: Duration = Duration::from_secs(30);
 /// Main-loop poll period (accept, timers, idle check).
 const POLL: Duration = Duration::from_millis(50);
+/// Largest back-off between accept attempts after a non-fatal accept error.
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+/// The one Closing deadline: how long `server_writer` may drain `to_server` into a stalled
+/// server before the server stream is shut down.
+const CLOSE_BUDGET: Duration = Duration::from_millis(500);
 
 /// `args` is the slice `remote::dispatch` receives (the `remote-client-bridge` arguments).
 pub(super) fn run(args: &[String]) -> io::Result<()> {
@@ -52,6 +57,8 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
         before_drain: None,
         #[cfg(test)]
         stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(test)]
+        accept_fault: None,
     })
 }
 
@@ -66,6 +73,9 @@ struct KeeperConfig {
     /// Test seam: lets a test end the main loop.
     #[cfg(test)]
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Test seam: consulted before each accept; `Some(err)` is treated as the accept's error.
+    #[cfg(test)]
+    accept_fault: Option<Arc<dyn Fn() -> Option<io::Error> + Send + Sync>>,
 }
 
 struct Shared {
@@ -112,12 +122,21 @@ impl Shared {
     }
 
     fn trace(&self, event: &str, token: Token, fields: Value) {
+        self.write_trace(json!({"event": event, "token": token.to_string()}), fields);
+    }
+
+    /// A trace line that belongs to the keeper, not to a session: no `token`.
+    fn trace_keeper(&self, event: &str, fields: Value) {
+        self.write_trace(json!({"event": event}), fields);
+    }
+
+    fn write_trace(&self, mut line: Value, fields: Value) {
         let Some(dir) = &self.trace_dir else { return };
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let mut line = json!({"event": event, "token": token.to_string(), "ms": ms});
         if let (Some(line), Some(extra)) = (line.as_object_mut(), fields.as_object()) {
+            line.insert("ms".to_owned(), json!(ms));
             line.extend(extra.clone());
         }
         let _ = OpenOptions::new()
@@ -127,21 +146,42 @@ impl Shared {
             .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
     }
 
-    /// Close the server stream and the leg, forget the session. No tombstone: a later resume
-    /// of the token answers `unknown`.
-    fn remove_session(&self, table: &mut Table, token: Token, reason: &str) {
+    /// The one Closing path. Forgets the session, which drops the `to_server` sender, so
+    /// `server_writer` drains what is queued and then shuts the server stream. The drain is
+    /// bounded by `CLOSE_BUDGET`: the write timeout stops a write into a stalled server and
+    /// the backstop shuts the stream regardless. The leg is shut at once. No tombstone: a
+    /// later resume of the token answers `unknown`.
+    fn close_session(&self, table: &mut Table, token: Token, reason: &str) {
         if let Some(session) = table.sessions.remove(&token) {
-            let _ = session.server.shutdown(Shutdown::Both);
             if let Some(leg) = session.leg {
                 let _ = leg.stream.shutdown(Shutdown::Both);
             }
+            let _ = session.server.set_write_timeout(Some(CLOSE_BUDGET));
+            let server = session.server;
+            thread::spawn(move || {
+                thread::sleep(CLOSE_BUDGET);
+                let _ = server.shutdown(Shutdown::Both);
+            });
             self.trace("session_end", token, json!({"reason": reason}));
         }
         self.kick.notify_all();
     }
 
-    /// The leg `id` is gone: rewind the endpoint and start the grace. No-op when a newer leg
-    /// has replaced it.
+    /// The one leg-down reset: the leg is gone (or replaced); rewind the endpoint and start
+    /// the grace. Callers decide removal with `should_remove` first.
+    fn detach_leg(&self, session: &mut Session, token: Token, now: Instant, reason: &str) {
+        if let Some(leg) = session.leg.take() {
+            let _ = leg.stream.shutdown(Shutdown::Both);
+        }
+        session.endpoint.leg_down();
+        session.end_sent = false;
+        session.grace_deadline = Some(now + session.grace);
+        self.trace("leg_down", token, json!({"reason": reason}));
+        self.kick.notify_all();
+    }
+
+    /// The leg `id` is gone: remove the session if it is finished, else park it. No-op when a
+    /// newer leg has replaced it.
     fn drop_leg(&self, table: &mut Table, token: Token, id: u64, reason: &str) {
         let Some(session) = table.sessions.get_mut(&token) else {
             return;
@@ -149,20 +189,54 @@ impl Shared {
         if session.leg.as_ref().map(|leg| leg.id) != Some(id) {
             return;
         }
-        if session.eof && session.end_sent && session.endpoint.fully_acked() {
+        let now = Instant::now();
+        if let Some(why) = should_remove(session, now) {
             // The local end acked everything and hung up before the next timer pass.
-            self.remove_session(table, token, end_reason::SERVER_EOF);
+            self.close_session(table, token, why);
             return;
         }
-        if let Some(leg) = session.leg.take() {
-            let _ = leg.stream.shutdown(Shutdown::Both);
-        }
-        session.endpoint.leg_down();
-        session.end_sent = false;
-        session.grace_deadline = Some(Instant::now() + session.grace);
-        self.trace("leg_down", token, json!({"reason": reason}));
-        self.kick.notify_all();
+        self.detach_leg(session, token, now, reason);
     }
+}
+
+/// The one removal predicate, evaluated before any per-leg state is reset: the grace has
+/// passed, or the server closed and the local end has been sent the END and acked everything.
+fn should_remove(session: &Session, now: Instant) -> Option<&'static str> {
+    if session
+        .grace_deadline
+        .is_some_and(|deadline| now >= deadline)
+    {
+        Some("grace")
+    } else if session.eof && session.end_sent && session.endpoint.fully_acked() {
+        Some(end_reason::SERVER_EOF)
+    } else {
+        None
+    }
+}
+
+/// True only for an error that means the listener itself can no longer work. Anything else
+/// (EMFILE, ENFILE, ECONNABORTED, ...) is transient and the keeper keeps serving.
+fn accept_error_is_fatal(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP)
+    )
+}
+
+fn next_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(ACCEPT_BACKOFF_MAX)
+}
+
+fn accept_once(
+    config: &KeeperConfig,
+    listener: &UnixListener,
+) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
+    #[cfg(test)]
+    if let Some(err) = config.accept_fault.as_ref().and_then(|fault| fault()) {
+        return Err(err);
+    }
+    let _ = config;
+    listener.accept()
 }
 
 fn serve(config: KeeperConfig) -> io::Result<()> {
@@ -190,6 +264,7 @@ fn serve(config: KeeperConfig) -> io::Result<()> {
         pending: AtomicUsize::new(0),
     });
 
+    let mut backoff = POLL;
     loop {
         #[cfg(test)]
         if config.stop.load(Ordering::Relaxed) {
@@ -197,11 +272,22 @@ fn serve(config: KeeperConfig) -> io::Result<()> {
             return Ok(());
         }
         loop {
-            match listener.accept() {
-                Ok((stream, _)) => spawn_handler(&shared, stream),
+            match accept_once(&config, &listener) {
+                Ok((stream, _)) => {
+                    backoff = POLL;
+                    spawn_handler(&shared, stream);
+                }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => return Err(err),
+                Err(err) if accept_error_is_fatal(&err) => return Err(err),
+                Err(err) => {
+                    // The pending connection stays in the backlog, so retrying at once would
+                    // spin: back off, and keep every session alive meanwhile.
+                    shared.trace_keeper("accept_error", json!({"error": err.to_string()}));
+                    thread::sleep(backoff);
+                    backoff = next_backoff(backoff);
+                    break;
+                }
             }
         }
         let now = Instant::now();
@@ -226,15 +312,24 @@ fn serve(config: KeeperConfig) -> io::Result<()> {
             if let Some(hook) = &config.before_drain {
                 hook();
             }
-            match listener.accept() {
+            match accept_once(&config, &listener) {
                 Ok((stream, _)) => {
                     drop(spawn);
+                    backoff = POLL;
                     spawn_handler(&shared, stream);
                     shared.lock().empty_since = Some(Instant::now());
                     continue;
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                Err(err) => return Err(err),
+                Err(err) if accept_error_is_fatal(&err) => return Err(err),
+                Err(err) => {
+                    drop(spawn);
+                    shared.trace_keeper("accept_error", json!({"error": err.to_string()}));
+                    thread::sleep(backoff);
+                    backoff = next_backoff(backoff);
+                    shared.lock().empty_since = Some(Instant::now());
+                    continue;
+                }
             }
             let busy = !shared.lock().sessions.is_empty() || shared.pending.load(Ordering::SeqCst) > 0;
             if busy {
@@ -259,20 +354,10 @@ fn run_timers(shared: &Shared, table: &mut Table, now: Instant) {
         let Some(session) = table.sessions.get_mut(&token) else {
             continue;
         };
-        if session.leg.is_some() && session.endpoint.poll_timers(now).is_some() {
-            if let Some(leg) = session.leg.take() {
-                let _ = leg.stream.shutdown(Shutdown::Both);
-            }
-            session.endpoint.leg_down();
-            session.end_sent = false;
-            session.grace_deadline = Some(now + session.grace);
-            shared.trace("leg_down", token, json!({"reason": "silence"}));
-            shared.kick.notify_all();
-        }
-        if session.grace_deadline.is_some_and(|deadline| now >= deadline) {
-            shared.remove_session(table, token, "grace");
-        } else if session.eof && session.end_sent && session.endpoint.fully_acked() {
-            shared.remove_session(table, token, end_reason::SERVER_EOF);
+        if let Some(why) = should_remove(session, now) {
+            shared.close_session(table, token, why);
+        } else if session.leg.is_some() && session.endpoint.poll_timers(now).is_some() {
+            shared.detach_leg(session, token, now, "silence");
         }
     }
 }
@@ -352,7 +437,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
     let mut table = shared.lock();
     if let Some(previous) = hello.previous_token {
         if previous != token && table.sessions.contains_key(&previous) {
-            shared.remove_session(&mut table, previous, "evicted");
+            shared.close_session(&mut table, previous, "evicted");
         }
     }
     match session::answer_hello(&hello, table.sessions.contains_key(&token)) {
@@ -430,12 +515,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
             let clone = stream.try_clone()?;
             let now = Instant::now();
             let session = table.sessions.get_mut(&token).expect("checked by answer_hello");
-            if let Some(old) = session.leg.take() {
-                let _ = old.stream.shutdown(Shutdown::Both);
-                shared.trace("leg_down", token, json!({"reason": "stolen"}));
-            }
-            session.endpoint.leg_down();
-            session.end_sent = false;
+            shared.detach_leg(session, token, now, "stolen");
             session.grace = Duration::from_millis(u64::from(hello.grace_ms));
             session.grace_deadline = None;
             let replayed_down = session.endpoint.outbound_end().saturating_sub(hello.recv_offset);
@@ -453,7 +533,6 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
             if session.eof {
                 // The endpoint retains the END and re-sends it on this leg; the queue is a no-op
                 // unless the session is new.
-                session.end_sent = false;
                 session.endpoint.queue_final_end(end_reason::SERVER_EOF);
             }
             let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
@@ -534,7 +613,7 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
             }
         }
         if let Some(reason) = ended {
-            shared.remove_session(&mut table, token, &reason);
+            shared.close_session(&mut table, token, &reason);
             return;
         }
         if failed {
@@ -625,7 +704,7 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
             return;
         }
         if session.endpoint.push_source(&buf[..n]).is_err() {
-            shared.remove_session(&mut table, token, end_reason::RING_OVERFLOW);
+            shared.close_session(&mut table, token, end_reason::RING_OVERFLOW);
             return;
         }
         shared.kick.notify_all();
@@ -651,6 +730,8 @@ fn server_writer(
         }
         shared.kick.notify_all();
     }
+    // The sender is gone (the session closed) and the queue is drained: close the server.
+    let _ = server.shutdown(Shutdown::Both);
 }
 
 #[cfg(all(test, unix))]
@@ -813,7 +894,10 @@ mod tests {
         server: Option<FakeServer>,
         stop: Arc<AtomicBool>,
         keeper: Option<thread::JoinHandle<io::Result<()>>>,
+        accept_fault: Option<AcceptFault>,
     }
+
+    type AcceptFault = Arc<dyn Fn() -> Option<io::Error> + Send + Sync>;
 
     impl Harness {
         fn new() -> Harness {
@@ -824,6 +908,15 @@ mod tests {
             with_server: bool,
             idle_after: Duration,
             before_drain: Option<Box<dyn Fn() + Send + Sync>>,
+        ) -> Harness {
+            Harness::with_fault(with_server, idle_after, before_drain, None)
+        }
+
+        fn with_fault(
+            with_server: bool,
+            idle_after: Duration,
+            before_drain: Option<Box<dyn Fn() + Send + Sync>>,
+            accept_fault: Option<AcceptFault>,
         ) -> Harness {
             let dir = TestDir::new();
             let trace_dir = dir.0.join("trace");
@@ -844,6 +937,7 @@ mod tests {
                 server,
                 stop,
                 keeper: None,
+                accept_fault,
             };
             harness.start_keeper(idle_after, before_drain);
             harness
@@ -861,6 +955,7 @@ mod tests {
                 trace_dir: Some(self.trace_dir.clone()),
                 before_drain,
                 stop: Arc::clone(&self.stop),
+                accept_fault: self.accept_fault.clone(),
             };
             self.keeper = Some(thread::spawn(move || serve(config)));
             let socket = self.rdv.socket.clone();
@@ -1093,6 +1188,100 @@ mod tests {
         local.start_leg(60_000, None);
         local.wait_welcomed(WelcomeStatus::New);
         local
+    }
+
+    #[test]
+    fn peer_end_drains_to_server_before_shutdown() {
+        let h = Harness::new();
+        let mut local = new_session(&h);
+        local.send_data(&pattern(1 << 20));
+        let end = local.endpoint.end_now(end_reason::CLIENT_GONE);
+        local.stream.write_all(&end).unwrap();
+        assert!(wait_until(Duration::from_secs(10), || {
+            h.server().conn(0).received().len() == 1 << 20 && h.server().conn(0).saw_eof()
+        }));
+        assert!(h.server().conn(0).received() == pattern(1 << 20));
+        h.wait_trace("session_end", "reason", "client-gone");
+    }
+
+    #[test]
+    fn silence_verdict_does_not_park_a_finished_eof_session() {
+        let shared = Shared {
+            table: Mutex::new(Table {
+                sessions: HashMap::new(),
+                empty_since: None,
+            }),
+            kick: Condvar::new(),
+            server_socket: PathBuf::new(),
+            trace_dir: None,
+            next_id: AtomicU64::new(1),
+            pending: AtomicUsize::new(0),
+        };
+        let now = Instant::now();
+        let token = Token::generate().unwrap();
+        let mut endpoint = SessionEndpoint::new(Role::Keeper, token, KEEPER_RING_CAP);
+        endpoint.welcome(now, WelcomeStatus::New, 0).unwrap();
+        assert!(endpoint.fully_acked());
+        let (leg, _leg_peer) = UnixStream::pair().unwrap();
+        let (server, _server_peer) = UnixStream::pair().unwrap();
+        let (to_server, _from_client) = mpsc::channel();
+        let mut table = shared.lock();
+        table.sessions.insert(
+            token,
+            Session {
+                gen: 1,
+                endpoint,
+                server,
+                to_server,
+                leg: Some(LegSlot { id: 1, stream: leg }),
+                grace: Duration::from_secs(60),
+                grace_deadline: None,
+                eof: true,
+                end_sent: true,
+            },
+        );
+        run_timers(
+            &shared,
+            &mut table,
+            now + session::SILENCE_TIMEOUT + Duration::from_secs(1),
+        );
+        assert!(table.sessions.is_empty(), "finished eof session was parked");
+    }
+
+    #[test]
+    fn accept_error_classification() {
+        let err = |code| io::Error::from_raw_os_error(code);
+        for code in [libc::EMFILE, libc::ENFILE, libc::ECONNABORTED] {
+            assert!(!accept_error_is_fatal(&err(code)), "errno {code} is transient");
+        }
+        for code in [libc::EBADF, libc::EINVAL] {
+            assert!(accept_error_is_fatal(&err(code)), "errno {code} is fatal");
+        }
+    }
+
+    #[test]
+    fn accept_error_backs_off_and_keeps_serving() {
+        let faults = Arc::new(AtomicUsize::new(0));
+        let armed = Arc::clone(&faults);
+        let fault: AcceptFault = Arc::new(move || {
+            armed
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .ok()
+                .map(|_| io::Error::from_raw_os_error(libc::EMFILE))
+        });
+        let h = Harness::with_fault(true, Duration::from_secs(600), None, Some(fault));
+        let mut live = new_session(&h);
+        faults.store(3, Ordering::SeqCst);
+        assert!(wait_until(Duration::from_secs(10), || faults.load(Ordering::SeqCst) == 0));
+        h.wait_trace("accept_error", "", "");
+        h.server().conn(0).write(b"x");
+        live.wait_received(1);
+        let mut fresh = h.local();
+        fresh.start_leg(60_000, None);
+        fresh.wait_welcomed(WelcomeStatus::New);
+        let errors = h.trace().iter().filter(|l| l["event"] == "accept_error").count();
+        assert_eq!(errors, 3);
+        assert!(h.keeper.as_ref().is_some_and(|k| !k.is_finished()));
     }
 
     #[test]
@@ -1468,6 +1657,7 @@ mod tests {
             trace_dir: None,
             before_drain: None,
             stop: Arc::new(AtomicBool::new(false)),
+            accept_fault: None,
         });
         assert!(second.is_ok());
         assert!(started.elapsed() < Duration::from_millis(500));
