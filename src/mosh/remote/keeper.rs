@@ -505,9 +505,10 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
         }
         let now = Instant::now();
         let mut offset = session.endpoint.recv_offset();
-        let events = match session.endpoint.on_leg_bytes(now, &buf[..n]) {
-            Ok(events) => events,
-            Err(_) => break "protocol",
+        let (events, failed) = match session.endpoint.on_leg_bytes(now, &buf[..n]) {
+            Ok(events) => (events, false),
+            // Deliver what decoded before the error: recv_offset already counts it.
+            Err(err) => (err.delivered, true),
         };
         let mut ended = None;
         for event in events {
@@ -526,6 +527,9 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
         if let Some(reason) = ended {
             shared.remove_session(&mut table, token, &reason);
             return;
+        }
+        if failed {
+            break "protocol";
         }
         shared.kick.notify_all();
     };
