@@ -151,9 +151,7 @@ fn kill_switch_behaves_like_upstream() {
 fn unwritable_rendezvous_dir_falls_back_to_the_plain_bridge() {
     for mode in MODES {
         let remote = Remote::start();
-        // SAFETY: geteuid has no preconditions.
-        let euid = unsafe { libc::geteuid() };
-        let dir = remote.remote_tmp().join(format!("herdr-mosh-{euid}"));
+        let dir = remote.rendezvous_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut client = connect(&remote, mode, &ClientOptions::default());
@@ -164,11 +162,22 @@ fn unwritable_rendezvous_dir_falls_back_to_the_plain_bridge() {
 
 #[test]
 fn keeper_spawn_failure_falls_back_to_the_plain_bridge() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping: RLIMIT_NPROC does not bind root, so the keeper spawn cannot be made to fail"
+        );
+        return;
+    }
     for mode in MODES {
         let remote = Remote::start();
         // The attacher starts with a process limit of 1, so it cannot fork the keeper.
         remote.set_knob(knob::SPAWN_FAIL, "");
         let mut client = connect(&remote, mode, &ClientOptions::default());
+        assert!(
+            remote.base.join("knobs/spawn-fail.applied").exists(),
+            "{mode:?}: the wrapper's shell applied no process limit"
+        );
         assert_fell_back(&remote, &mut client, mode);
         assert!(remote.keeper_pids().is_empty(), "{mode:?}");
     }
@@ -182,6 +191,10 @@ fn keeper_that_never_listens_falls_back_after_the_wait() {
     let mut first = connect(&remote, Mode::Remote, &ClientOptions::default());
     let keeper = remote.keeper_pids();
     assert_eq!(keeper.len(), 1);
+    // The keeper's real socket is in the harness's rendezvous dir.
+    let socket = remote
+        .keeper_socket()
+        .expect("keeper socket in the harness rendezvous dir");
     first.type_keys("\x02q");
     assert!(first.wait_exit(READY));
     for pid in &keeper {
@@ -189,16 +202,12 @@ fn keeper_that_never_listens_falls_back_after_the_wait() {
         unsafe { libc::kill(*pid, libc::SIGKILL) };
     }
     assert!(wait(|| remote.keeper_pids().is_empty()));
-    let live = std::fs::read_dir(
-        remote
-            .remote_tmp()
-            .join(format!("herdr-mosh-{}", unsafe { libc::geteuid() })),
-    )
-    .unwrap()
-    .flatten()
-    .map(|e| e.path())
-    .find(|p| p.extension().is_some_and(|x| x == "live"))
-    .expect("keeper live lock file");
+    let live = std::fs::read_dir(socket.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "live"))
+        .expect("keeper live lock file");
     let held = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
