@@ -1,0 +1,538 @@
+[
+  {
+    "id": "mosh-dqw.11",
+    "title": "Integration sweep: resumable remote session end to end",
+    "description": "Unknown-unknowns net for the whole tree (spec Goal): verify --remote and saved-machine resume end to end on the combined branch, add integration tests no per-bead test covers, and sweep for unwired config values, parameters and interfaces (MoshConfig knobs, trace env, capability string, LINK_KIND, rendezvous private dir/locks, WINDOW and MAX_DATA_CHUNK constants). Fix small gaps inline; file blockers for big ones.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md\nblocked-by mosh-dqw.1: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.2: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.3: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.4: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.5: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.6: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.7: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.8: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.9: consumes all leaves (integration sweep)\nblocked-by mosh-dqw.10: consumes all leaves (integration sweep)\nAcceptance:\n- [ ] scripts/mosh-diff-budget.sh passes; git grep -n 'mosh-fork' lists exactly the spec's upstream touch list (~11 lines); Cargo.toml/Cargo.lock unchanged.\n- [ ] Full test suite and cargo clippy pass on the integrated branch.\n- [ ] Every acceptance criterion in the spec maps to a passing test or a documented manual check (list them in the bead's close note).\n- [ ] On the combined branch: run scripts/mosh-diff-budget.sh (R14); build with HERDR_STABLE_UPDATE_MANIFEST_URL set and confirm the binary embeds that URL (R15); confirm the keeper used HELLO.grace_ms over a differing remote HERDR_MOSH_GRACE (R18).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:49:33Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:48Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.5",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:36Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.3",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:35Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:49:33Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.1",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:33Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.4",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:35Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.10",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:39Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.6",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:37Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.9",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:39Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.2",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:34Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.7",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:37Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.11",
+        "depends_on_id": "mosh-dqw.8",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:49:38Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 10,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.10",
+    "title": "Remote attach path: attacher, dispatch and status capability hooks",
+    "description": "Remote attach path (R1, R12, R16): attacher that validates the private rendezvous dir, finds or spawns the keeper, checks the keeper's peer uid, pumps stdio (and reports its own bring-up failure as END{keeper-unavailable}), the --x-mosh-* dispatch, host.rs hooks, and the status capability advertisement.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Keeper 'Rendezvous', 'Attacher failure reporting' and 'Spawn', §Upstream touch list host.rs/status.rs rows, §Key abstractions Attacher/remote::dispatch).\nsrc/mosh/remote/{mod,attacher}.rs. remote::dispatch: closed match routing --x-mosh-session-v1 to the attacher and --x-mosh-keeper-v1 to the keeper entry point (keeper::run, filled by mosh-dqw.7; the arm calls it by name). Attacher, per the rendezvous contract defined by the scaffold in mosh::remote (mosh-dqw.1): validate the private dir (directory, not symlink, euid-owned, mode 0700), connect to the keeper socket path and, after every successful connect, verify the peer uid (SO_PEERCRED on Linux, getpeereid on macOS, via libc) equals its own euid before forwarding a single byte; on ENOENT/ECONNREFUSED take the spawn lock, retry connect, then try the live lock non-blocking: acquired ⇒ no keeper alive: unlink the stale socket, release the live lock and spawn the keeper; not acquired ⇒ a keeper is alive but not listening yet: retry connect up to 5 s, then re-try the live lock once (if acquired, continue as in the first branch). Spawn: current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1 via detach_server_daemon_command (setsid) plus a plain spawn (not the launchd path), env_remove(SSH_AUTH_SOCK) and Stdio::null() on stdin, stdout and stderr (so the keeper holds none of the sshd channel fds and its output can never reach the leg); wait ≤5 s for the socket, connect; release the spawn lock; then pump with crate::platform::forward_remote_bridge_stdio(keeper_stream, false) unchanged. Any bring-up failure (dir validation, lock or spawn error, 5 s wait, peer-uid mismatch): write exactly one session END{\"keeper-unavailable\"} on stdout (encoded with the session codec) and exit non-zero; this is the only message the attacher originates, once connected it is a pure byte pipe. Upstream hooks: host.rs match arm `[o, ..] if o.starts_with(\"--x-mosh-\") =\u003e false, // mosh-fork hook`; host.rs `if let Some(result) = super::attach::mosh::remote::dispatch(args) { return result; } // mosh-fork hook` after the ssh-agent registration; status.rs pushes \"x-mosh-resume-bridge-v1\" into endpoint_capabilities on Unix (a fork test asserts it equals mosh::STATUS_CAPABILITY).\nowns: Attacher (fills attacher::run); owns: remote::dispatch; owns: the status.rs hook that emits STATUS_CAPABILITY (string and placement owned by mosh-dqw.1); owns: attacher END{keeper-unavailable} reporting and peer-uid check\nconsumes: mosh constants and MoshConfig\nconsumes: keeper and attacher entry-point signatures; consumes: keeper rendezvous protocol (private dir and owner checks, socket path, live lock, spawn lock); consumes: mosh module tree; consumes: SessionMsg\nconsumes: rendezvous pure-pipe rule (attacher writes nothing but END{keeper-unavailable})\nblocked-by mosh-dqw.1: consumes keeper rendezvous protocol and mosh module tree\nblocked-by mosh-dqw.4: consumes SessionMsg (END{keeper-unavailable} encoding)\nFiles: src/mosh/remote/mod.rs, src/mosh/remote/attacher.rs, src/remote/host.rs (2 hook lines), src/cli/status.rs (1 hook line)\nAcceptance:\n- [ ] Exactly 3 upstream lines changed, tagged; existing remote_attach tests pass; an unknown --x-mosh-* flag is an error, not silently accepted as plain.\n- [ ] In-process tests: stale socket file with no listener is recovered (unlinked, keeper spawn path taken); two concurrent attachers spawn at most one keeper (lock); a live keeper is connected to without spawning; live lock held but socket not yet listening retries connect then re-tries the lock.\n- [ ] A foreign-owned, symlinked or wrong-mode private dir, and a peer-uid mismatch, each yield exactly one END{\"keeper-unavailable\"} on stdout and a non-zero exit, before any byte is forwarded; the keeper spawn command has null stdin/stdout/stderr, env_remove(SSH_AUTH_SOCK) and setsid.\n- [ ] status client --json includes x-mosh-resume-bridge-v1 on Unix.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:41:33Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:42Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.10",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:41:33Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.10",
+        "depends_on_id": "mosh-dqw.1",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:41:33Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.10",
+        "depends_on_id": "mosh-dqw.4",
+        "type": "blocks",
+        "created_at": "2026-10-24T06:27:29Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.9",
+    "title": "Configuration smoke: end-to-end resume tests over fake ssh",
+    "description": "End-to-end configuration smoke (R1-R13, R16, R17, R19): resume, stall, saved-machine health, grace expiry, multi-client, ghost eviction, live handoff, D6 late execution, flow-control window, ControlMaster bypass, leg-0 keeper-bring-up fallback, and byte-identical fallback (no capability, kill switch).\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Acceptance criteria, §Testing end-to-end).\ntests/mosh_resume.rs and tests/mosh_multi_client.rs drive the herdr binary with a fake ssh on PATH that runs the remote command locally (pattern tests/remote_attach.rs:69-107). Exercises each enumerated configuration: herdr --remote with a resume-capable remote; saved machine with a resume-capable remote; remote binary without the capability (plain fallback); HERDR_MOSH_RESUME=0 (plain).\nconsumes: mosh constants and MoshConfig (HERDR_MOSH_GRACE=5 for grace tests); consumes: Keeper; consumes: Attacher; consumes: LocalBridge; consumes: start_ui_bridge; consumes: local trace events; consumes: keeper trace events\nblocked-by mosh-dqw.7: consumes Keeper\nblocked-by mosh-dqw.10: consumes attacher, dispatch and status capability\nblocked-by mosh-dqw.8: consumes LocalBridge resume path\nFiles: tests/mosh_resume.rs, tests/mosh_multi_client.rs, tests/support (read-only reuse)\nAcceptance:\n- [ ] Kill the leg ssh mid-stream and mid-frame: keys before/during/after the outage reach the pane exactly once in order (pane content via tests/support screen helpers); HERDR_MOSH_TRACE shows welcome resumed and exactly one server_connect for the token (no reconnect snapshot). Saved-machine cases reuse the tests/machine_setup.rs fake-ssh pattern.\n- [ ] SIGSTOP the leg \u003e8 s: dead-leg detection and resume.\n- [ ] Outage banner: during an outage the active endpoint shows the banner with a last-contact time updating every second; it clears within one frame of resume.\n- [ ] Saved machine outage \u003e10 s within grace: no health timeout, no supervisor reconnect, including when the leg stalls immediately after a client health ping.\n- [ ] Grace expiry: --remote exits with the reattach hint; saved machine takes the supervisor reconnect path; no hang.\n- [ ] Two clients (two local client processes, each with its own bridge and token): killing one leg leaves the other unaffected; the killed one resumes.\n- [ ] Client exit ends the keeper session within 2 s; a full reconnect through the same local socket path evicts the previous token (covers a saved machine's supervisor reconnect, which builds a new bridge, and a second client connection on one --remote bridge); the keeper holds at most one session per local socket path after reconnect.\n- [ ] Live handoff delivers ServerShutdown (not ConnectionLost) and today's reconnect runs; also when the server EOF arrives while the leg is down and the session then resumes.\n- [ ] A resume HELLO reaching a keeper that no longer has the token (keeper restarted, grace expired) is answered unknown, never new, and opens no server connection (trace shows no server_connect).\n- [ ] Flow control on a healthy but slow live leg: unacked bytes in flight never exceed 256 KiB in either direction; a 16 MiB clipboard image sent while the leg is up completes without ending the session.\n- [ ] Reconnect legs never use the ControlMaster even when the user's ssh config sets ControlMaster auto/ControlPath, and always run BatchMode; auth and host-key failures stop retrying immediately and fall to today's path.\n- [ ] Leg-0 fallback: a keeper bring-up failure (unwritable or foreign-owned rendezvous dir, spawn failure, 5 s wait), a downgraded remote, or a keeper server-connect-failed serves that connection through the plain bridge, for --remote as well as saved machines; the client sees upstream behaviour.\n- [ ] Idle healthy link: no traffic for \u003e8 s causes no leg replacement (trace shows no leg_down) (R17).\n- [ ] Keeper lifecycle (R16, R19): first attach spawns the keeper; a second attach reuses it; after kill -9 of the keeper the stale socket is recovered by the next attach; two concurrent first attaches spawn one keeper; the keeper exits ~30 s after its last session ends.\n- [ ] A request buffered past ENDPOINT_COMMAND_TIMEOUT executes exactly once on resume (D6).\n- [ ] Capability-less remote and HERDR_MOSH_RESUME=0 behave like upstream; tests/remote_attach.rs passes unchanged.\n- [ ] Ring overflow during an outage (sustained output while the leg is down until the 16 MiB keeper ring fills) ends the session via today's disconnect path, no hang (R7).\n- [ ] Cross-version: a keeper whose session-protocol v differs answers END{\"protocol-version\"} and leg 0 falls back to the plain bridge (R20).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:40Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:47Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.9",
+        "depends_on_id": "mosh-dqw.10",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:41:34Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.9",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:40Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.9",
+        "depends_on_id": "mosh-dqw.7",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:47Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.9",
+        "depends_on_id": "mosh-dqw.8",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:48Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 1,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.8",
+    "title": "Local bridge: resumable client pump and start_ui_bridge resume path",
+    "description": "Local bridge (R1-R7, R9, R10, R12): per-client resumable pump (leg I/O thread plus a separate client-writer thread, pre-WELCOME read gate) that keeps the client stream whole, buffers input through outages, injects status frames that keep saved-machine health alive and drive the banner, enforces the give-up deadline, delivers server-EOF frames then closes, and takes the plain path for kill switch, Windows or non-Unix-local builds, or no capability.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Local bridge behaviour, §Discovery and fallback step 4, §Session-end triggers, §Error handling summary, §Key abstractions LocalBridge/start_ui_bridge).\nsrc/mosh/local_bridge.rs plus the resume branch of start_ui_bridge in src/mosh/mod.rs. LocalBridge binds the user-facing socket with crate::ipc prepare_socket_path/bind_private_local_listener/restrict_socket_permissions (as start_command does at attach.rs:3038-3051) and serves one connection at a time. Ghost eviction: the last session token is kept in a process-global map in local_bridge.rs keyed by the bridge's local socket path (the local_socket argument of start_ui_bridge), not per bridge instance, so it survives a saved machine's reconnects that build a new bridge (saved.rs:20-55, supervisor.rs:477); a new connection's HELLO carries it as previous_token. Per connection: SessionEndpoint (8 MiB outbound ring, 256 KiB window while a leg is up), dial legs through the LegDialer; threads: a leg I/O thread (session messages, timers, should_stop polled every \u003c=100 ms, never blocks on the network or the client socket) and a client-writer thread owning every blocking client-socket write (whole frames and injected frames, in order). Pre-WELCOME gate: nothing is read from the client socket until leg 0's WELCOME new, so the client's handshake bytes stay in the socket for a leg-0 fallback. Forward only whole frames via FrameSplitter (held-back partial bytes count as delivered for acks); keep reading client writes during an outage up to the 8 MiB cap (overflow ends the session: close client socket at a frame boundary, best-effort END{ring-overflow} on the next leg); inject LinkStatus Resuming only after the first complete downstream frame and only between frames: the first at the dead verdict (8 s silence or leg EOF), then every 1 s while resuming, Linked once after resume, never after the give-up deadline (health margin: a stall right after a client ping must not cause a health expiry, ~2 s margin); give-up deadline = grace from link loss; session-end triggers (client EOF -\u003e END best effort over the live or next leg; drop/stop; grace; overflow; unknown/ended, and new on a reconnect leg treated as session-gone); server EOF: deliver every complete frame (incl. ServerShutdown), drop a trailing partial frame, close the client socket. Leg-0 rule: after WELCOME new the session exists and retry/give-up apply; ssh-level leg-0 failure (exit 255) keeps today's semantics (no retry, failure_tx, close client socket); any remote-side failure before WELCOME (LegError::Unsupported: downgraded binary, END keeper-unavailable / server-connect-failed, non-255 exit, EOF or 8 s silence) serves that one connection via upstream plain bridge_connection with today's leg-0 options and the untouched client stream; on a reconnect leg any remote-side failure is Fatal and ends the session (outcome b), never a plain fallback mid-session. Fatal leg class (auth, host key, remote-side on a reconnect leg) -\u003e failure_tx and close the client socket at a frame boundary. With HERDR_MOSH_TRACE=\u003cdir\u003e, append JSON lines to \u003cdir\u003e/local.jsonl for leg_up, leg_down{reason}, welcome{status}, resume{replayed_up,replayed_down}, session_end{reason}, inject{state}. start_ui_bridge returns an SshStdioBridge struct literal owning the thread, should_stop and failure_tx so reported_failure() and Drop keep their semantics; plain path when kill switch, Windows remote, non-Unix local build, or no capable candidate.\nowns: LocalBridge; owns: local trace events\nconsumes: mosh constants and MoshConfig\nconsumes: start_ui_bridge; consumes: SessionEndpoint; consumes: ReplayRing; consumes: FrameSplitter; consumes: link-frame injection encoding; consumes: LegDialer; consumes: SshLegDialer; consumes: LinkStatus\nconsumes: SessionMsg (HELLO fields it sends; END reasons and their local reactions: keeper-unavailable/server-connect-failed/protocol-version → leg-0 plain fallback, server-eof → deliver then close, ring-overflow → close)\nblocked-by mosh-dqw.4: consumes SessionEndpoint\nblocked-by mosh-dqw.5: consumes FrameSplitter and encode_link_frame\nblocked-by mosh-dqw.6: consumes SshLegDialer and capability probe\nblocked-by mosh-dqw.2: consumes LinkStatus payload type\nFiles: src/mosh/local_bridge.rs, src/mosh/mod.rs\nAcceptance:\n- [ ] In-process tests with an in-memory LegDialer and fake keeper: leg killed mid-frame → client receives only whole frames, first Resuming injection at the dead verdict then every ~1 s, Linked after resume; no injection before the first frame; give-up deadline closes the client socket at a frame boundary; client writes accepted during outage; overflow (including one client message larger than 8 MiB written during an outage) ends session; Fatal → reported_failure(); leg-0 Unsupported → plain fallback.\n- [ ] Pre-WELCOME gate: no client byte is read before leg 0's WELCOME new, and the leg-0 fallback hands bridge_connection the untouched client stream; a slow client socket does not block leg reads, heartbeats, acks or should_stop polling (client-writer thread).\n- [ ] Ghost eviction: the token map is keyed by local socket path and survives a new bridge instance for the same path (saved-machine reconnect); a full reconnect sends the stored token as previous_token.\n- [ ] Health margin: a test stalls the leg immediately after a client ping and asserts no health expiry follows (first injection at the dead verdict).\n- [ ] Server EOF: complete frames (incl. ServerShutdown) delivered, trailing partial frame dropped, client socket then closed; also when the EOF arrived while the leg was down and the session then resumes.\n- [ ] Kill switch, no-capability, Windows-remote and non-Unix-local paths return the plain SshStdioBridge (platform gate unit-tested in-process).\n- [ ] Leg-0 remote-side failure (Unsupported) serves plain; leg-0 ssh-level failure (exit 255) is not retried and goes to failure_tx; any remote-side failure on a reconnect leg ends the session (Fatal, outcome b); new or unknown on a resume ends the session.\n- [ ] Input written by the client while no leg is up is buffered and delivered exactly once after resume (never dropped at the bridge); this plus server-side continuity is the whole D6 delivery mechanism (R11) — no request-level logic.\n- [ ] No upstream lines changed by this bead.\n- [ ] LinkStatus.last_contact_ms is computed from SessionEndpoint's last-inbound-time accessor.",
+    "notes": "sp:demoted-by-session: promotion reviewer PROMOTE (uncertainty: mid-session Unsupported fallback, leg-0 failure policy) overruled to LEAF — both decided in spec commit 4be22e31 (reconnect-leg Unsupported ends session; leg-0 failures keep today's no-retry semantics); one subsystem (local_bridge.rs + its branch in start_ui_bridge).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:39Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:46Z",
+    "labels": [
+      "sp:demoted-by-session",
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.8",
+        "depends_on_id": "mosh-dqw.5",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:45Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.8",
+        "depends_on_id": "mosh-dqw.4",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:44Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.8",
+        "depends_on_id": "mosh-dqw.2",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:47Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.8",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:39Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.8",
+        "depends_on_id": "mosh-dqw.6",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:46Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 4,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.7",
+    "title": "Keeper daemon: parked server sessions, drain and grace",
+    "description": "Remote keeper daemon (R1-R5, R7-R10, R16): parks the server connection per token across legs, drains while down, enforces grace, steals legs, evicts ghost sessions, and forwards server EOF/handoff as the remaining ring bytes then END (it never parses frames).\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Keeper, §Ring caps and drain policy, §Session-end triggers, §Testing Observability, §Key abstractions Keeper; Per HELLO table).\nsrc/mosh/remote/keeper.rs: keeper::run entry point (invoked by remote::dispatch for --x-mosh-keeper-v1, owned by mosh-dqw.10). Takes the \u003csocket\u003e.live lock non-blocking for its whole lifetime (exits at once if another keeper holds it), then binds the rendezvous socket path (mode 0600) defined in mosh::remote by the scaffold (mosh-dqw.1); validates the private dir via the shared helper. Spawned with null stdio and env without SSH_AUTH_SOCK by the attacher; writes diagnostics only to HERDR_MOSH_TRACE. Token table behind one lock; per session a LocalStream to client_socket_path(), a SessionEndpoint with a 16 MiB outbound ring, a server-writer thread (acks only after server writes), reads the server only when SessionEndpoint::may_read_source allows (256 KiB window with a leg up, ring cap while down), state absent/live/parked/eof, current leg, grace deadline from HELLO.grace_ms (never from the remote environment; R18). Per HELLO: previous_token applied first (ends that session if present, differs from token and names a session); v mismatch -\u003e END{protocol-version}; then the table: resume:false x absent = connect server once, create session, WELCOME new (connect failure -\u003e END{server-connect-failed}, create nothing); resume:false x live/parked/eof = END{token-in-use}, session untouched; resume:true x absent = WELCOME unknown, never opens a server connection; resume:true x live = steal leg (close the old), WELCOME resumed{recv_offset}, replay; x parked = cancel grace, resumed, replay; x eof = cancel grace, resumed, replay remaining bytes then END{server-eof}. The keeper closes the leg after any END answer. Grace timer starts when the leg drops (leg EOF or 8 s silence verdict), cancelled on resume, on expiry closes the server stream and removes the session (no tombstones). Drain policy (leg up + window full -\u003e stop reading server; leg down -\u003e keep draining into ring up to 16 MiB; overflow closes server stream, removes session). Server EOF: session enters eof; remaining ring bytes then END{server-eof} are forwarded in stream order over the live leg, or stay queued until resume/grace; removed once the local end acked the final downstream offset or at grace expiry. Idle exit is lock-ordered: once the table has been empty 30 s the keeper takes .spawn non-blocking (re-arm the timer if an attacher holds it), accepts any connection already in the listen backlog (if one exists or the table is non-empty: release .spawn, serve it, re-arm), otherwise closes the listener, unlinks the socket and exits (releasing .live then .spawn). The leg handler takes a plain duplex stream. With HERDR_MOSH_TRACE=\u003cdir\u003e, append JSON lines to \u003cdir\u003e/keeper.jsonl for welcome{status}, server_connect, leg_up, leg_down{reason}, session_end{reason}.\nowns: Keeper (fills keeper::run); owns: keeper trace events\nconsumes: mosh constants and MoshConfig\nconsumes: keeper and attacher entry-point signatures; consumes: SessionEndpoint; consumes: ReplayRing; consumes: keeper rendezvous protocol (private dir and owner checks, socket path, live lock, spawn lock)\nconsumes: SessionMsg (HELLO resume/grace_ms/previous_token fields, END reason vocabulary); consumes: rendezvous pure-pipe rule (keeper expects HELLO first, no preamble)\nblocked-by mosh-dqw.4: consumes SessionEndpoint and ReplayRing\nFiles: src/mosh/remote/keeper.rs\nAcceptance:\n- [ ] In-process tests drive a keeper against a fake server socket: every cell of the Per-HELLO table (resume:true for an absent token answers unknown with no server connection; server-connect-failed creates nothing; token-in-use leaves the session untouched; eof while parked replays the remaining bytes then END{server-eof}); protocol-version refusal; previous_token eviction; leg steal closes the old leg; the keeper closes the leg after any END; window-limited server reads with a leg up and drain-while-down captures server output; overflow ends session and the next resume is unknown; grace expiry closes server stream; server EOF forwards remaining bytes then END (no frame parsing); idle exit against a concurrent attacher (backlogged connect, held spawn lock); second keeper exits when the live lock is held.\n- [ ] No upstream lines changed by this bead.\n- [ ] The keeper never reads grace, kill switch or link thresholds from its own environment (test: remote env HERDR_MOSH_GRACE differs from HELLO.grace_ms; HELLO wins).",
+    "notes": "Promotion reviewer PROMOTE (size + stale-socket uncertainty) applied as a split instead: attacher/dispatch/status hooks moved to mosh-dqw.10; stale-socket recovery decided in spec commit 4be22e31 (flock lock file).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:38Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:46Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.7",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:38Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.7",
+        "depends_on_id": "mosh-dqw.4",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:43Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.6",
+    "title": "SSH leg dialer: probe, re-selection, leg commands and failure classes",
+    "description": "SSH leg dialer (R1, R2, R12, R13): capability probe and candidate re-selection, leg-0 vs reconnect-leg commands (reconnect: noninteractive, ControlMaster bypassed on every leg), the leg owning its ssh child, back-off and setup deadline, and fatal/unsupported/retryable classification from structured signals.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Legs, §Discovery and fallback steps 1-3, §Key abstractions Leg/LegDialer).\nsrc/mosh/ssh_leg.rs: SshLegDialer implementing LegDialer. Capability probe via remote_client_status for STATUS_CAPABILITY; candidate re-selection over remote_binary_candidates requiring the capability plus supports_endpoint_requirement (attach.rs:1519-1540,1588-1593); hint line naming HERDR_REMOTE_BINARY when none qualifies on --remote. Per-leg remote command from posix_remote_output_command + RemoteExecutable::command/session_args with [remote-client-bridge, --x-mosh-session-v1]. The leg spawns and owns its ssh child itself from a Command built with upstream builders (apply_managed_ssh_options, apply_noninteractive_ssh_options, attach.rs:1403-1440); it does NOT use bridge_child (which returns only a formatted io::Error and suppresses the exit error on client close/stop) and uses no socketpair: the child's stdin/stdout are the leg's duplex stream, the ready marker is stripped with upstream's discard_remote_output_preamble (attach.rs:3459, reachable via the #[path] mount), and the leg holds the child's ExitStatus and, on reconnect legs, its piped stderr (drained by a reader thread, capped like capture_ssh_stderr). All fork code, no upstream hook. Leg 0 uses the same ssh options as today's path (interactive inherited stderr for --remote, noninteractive for saved); no stderr is read on leg 0. Every reconnect leg is noninteractive (apply_noninteractive_ssh_options: BatchMode, ConnectTimeout=10, ConnectionAttempts=1, ServerAlive), piped stderr, and always bypasses the ControlMaster with `-o ControlPath=none -o ControlMaster=no` on the command line, with and without managed config (with managed config also a clone of ManagedSshOptions with control_path None so no -S is added, attach.rs:725-731,1421-1440). The ssh Command sets LC_ALL=C. Back-off 1,2,4,8,8… s, one leg at a time, honouring caller deadline + stop flag; a reconnect leg that does not reach HELLO within min(remaining grace, 15 s) of spawn is killed and is Retryable (leg 0 has no fork setup deadline). Classification: a leg that ended after WELCOME is always Retryable; a leg torn down for stop/session end is not classified; before WELCOME, ssh-level failure = exit status 255: on a reconnect leg Fatal if piped stderr contains 'Permission denied' or 'Host key verification failed', else Retryable; on leg 0 reported as today (failure_tx, client socket closed), no classification; remote-side failure (non-255 exit incl. 'unsupported remote client bridge option' and generation mismatch, an END from attacher/keeper before WELCOME, EOF before WELCOME, or no WELCOME within 8 s of HELLO): Unsupported on leg 0, Fatal on a reconnect leg. No stderr string is matched on leg 0.\nowns: SshLegDialer; owns: capability probe and candidate re-selection\nconsumes: mosh constants and MoshConfig\nconsumes: x-mosh-resume-bridge-v1 capability advertisement (an entry in upstream's endpoint_capabilities array of status client --json); consumes: Leg; consumes: LegDialer\nblocked-by mosh-dqw.1: consumes Leg and LegDialer interface\nFiles: src/mosh/ssh_leg.rs\nAcceptance:\n- [ ] In-process #[cfg(test)] tests (fake ssh technique of attach.rs:3684-3709): every reconnect-leg command has the noninteractive options (BatchMode, ConnectTimeout=10), `-o ControlPath=none -o ControlMaster=no`, LC_ALL=C and no -S (both managed and unmanaged config); leg-0 command equals today's; remote command contains --x-mosh-session-v1 and the session args; the leg owns its child (ExitStatus and capped stderr available, no bridge_child, no socketpair).\n- [ ] Classification tests, on leg 0 and on a reconnect leg: exit 255 with each fatal stderr string, exit 255 otherwise, non-255 exit, attacher END before WELCOME, EOF/silence before WELCOME; post-WELCOME end is Retryable; setup-deadline kill is Retryable; back-off schedule and stop/deadline honoured.\n- [ ] Probe/re-selection tests: capable first candidate; upstream-first candidate skipped for a capable later one; none capable → plain.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:32Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:26:52Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.6",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:32Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.6",
+        "depends_on_id": "mosh-dqw.1",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:42Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.5",
+    "title": "Frame splitter and link-frame injection encoder",
+    "description": "Whole-frame splitter and x-mosh.link.v1 injection-frame encoder (R5, R6), so the client never sees a torn frame and status frames go only between frames.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Local bridge behaviour 'Whole frames'/'Injection', §Key abstractions FrameSplitter).\nsrc/mosh/link_frames.rs: FrameSplitter, an incremental u32-LE length-prefix splitter (wire.rs:1647-1715 framing) that yields whole frames, holds back partials, reports at-boundary state and rejects frames larger than MAX_GRAPHICS_FRAME_SIZE as a session-ending error, exposes the held-back partial byte count (the local bridge counts held-back bytes as delivered for acks; the hold-back is bounded by one max frame) and lets the caller drop a trailing partial frame at server EOF; used by the local bridge only (the keeper never parses frames); encode_link_frame(data_json) that produces a ServerMessage::EndpointControl{kind: LINK_KIND, data} frame via crate::protocol's existing frame writer.\nowns: FrameSplitter; owns: link-frame injection encoding\nconsumes: LinkStatus and LINK_KIND\nconsumes: mosh module tree\nblocked-by mosh-dqw.1: consumes mosh module tree\nblocked-by mosh-dqw.2: consumes LINK_KIND\nFiles: src/mosh/link_frames.rs\nAcceptance:\n- [ ] Unit tests: byte-at-a-time and random chunking reproduce the original frame sequence; partial frame held back and its length reported; trailing partial droppable; oversize rejected; an encoded link frame decodes through the real wire reader and crate::client::endpoint::decode_endpoint_control yields Ignored.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:31Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:26:51Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.5",
+        "depends_on_id": "mosh-dqw.2",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:45:31Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.5",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:31Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.5",
+        "depends_on_id": "mosh-dqw.1",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:41Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.4",
+    "title": "Session protocol: SessionMsg, SessionEndpoint and ReplayRing",
+    "description": "Sans-IO session protocol (R3, R4): message codec, per-direction offsets with exactly-once dedup, the one flow-control rule (64 KiB DATA chunks, acks only after delivery, 256 KiB in-flight window while a leg is up), 2 s heartbeats and the 8 s silence verdict, resume negotiation, and the replay ring.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Session wire protocol, §Ring caps and drain policy, §Key abstractions SessionMsg/SessionEndpoint/ReplayRing).\nPure, sans-IO implementation in src/mosh/session.rs and src/mosh/ring.rs: the six messages [u8 type][u32 LE len][payload] with incremental decoder; HELLO JSON {v:1, token, resume:bool, recv_offset, grace_ms, previous_token?} (resume false on the first HELLO of a session, true on every later one; no build id), WELCOME {v, status new|resumed|unknown, recv_offset}, END {reason}; DATA = [u64 LE offset][bytes] with at most 64 KiB bytes (MAX_DATA_CHUNK; larger is a leg protocol error); 128-bit Token from /dev/urandom; per-direction absolute byte offsets, dedup of overlap, gap = leg protocol error (not session). SessionEndpoint is symmetric (local end and keeper end) and owns the single flow-control rule: DATA chunking, ack-after-delivery (the owner reports delivered offsets; at the local bridge bytes in the partial-frame hold-back count as delivered; ack after \u003e=64 KiB newly delivered or 200 ms, and on every heartbeat), the fixed WINDOW = 256 KiB in-flight cap while a leg is up and the may_read_source() answer (below WINDOW while a leg is up, below the ring cap while down), window-limited replay after resume, control-before-data send ordering (pending ACK/HEARTBEAT/END precede the next DATA chunk). Timers (time passed in): 2 s HEARTBEAT while a leg is up; 8 s silence verdict, clock starting when the local end writes HELLO / the keeper reads HELLO and reset by any inbound byte including partial messages (so WELCOME must also arrive within 8 s); reconnect-leg setup deadline min(remaining grace, 15 s) from spawn, leg 0 has none. Resume negotiation: the keeper never answers new to resume:true; the local end treats new on a reconnect leg as session-gone, same as unknown; a HELLO whose v differs is refused with END{protocol-version}; replay from the peer's recv_offset. ReplayRing: bounded by caller-supplied capacity (8 MiB local, 16 MiB keeper) with push/ack-trim/replay_from/occupancy and overflow reported.\nowns: SessionMsg; owns: SessionEndpoint; owns: ReplayRing\nowns: END reason vocabulary (keeper-unavailable, server-connect-failed, protocol-version, token-in-use, server-eof, ring-overflow) and its documented required local reactions; owns: last-inbound-time accessor on SessionEndpoint (feeds LinkStatus.last_contact_ms)\nconsumes: mosh constants and MoshConfig\nconsumes: mosh module tree\nblocked-by mosh-dqw.1: consumes mosh module tree\nFiles: src/mosh/session.rs, src/mosh/ring.rs\nAcceptance:\n- [ ] Flow-control tests: DATA over 64 KiB rejected as leg error; acks advance only on delivery (received-but-queued bytes not acked); sender stops reading at WINDOW while a leg is up and keeps reading to the ring cap while down; replay after resume respects the window; control messages never queue behind more than one chunk; the silence clock starts at HELLO and resets on any byte, partial messages included; setup deadline min(remaining grace, 15 s); resume:true never yields new; new on a reconnect leg surfaces session-gone.\n- [ ] Unit tests: loss at every offset of a scripted transcript then resume delivers exactly-once in order both directions; duplicate and overlapping DATA discarded; gap rejected as leg error; double reconnect; END both directions; unknown/ended welcome surfaces resume-refused; ack cadence (64 KiB / 200 ms / heartbeat); 8 s silence verdict from injected clock.\n- [ ] Idle test (R17): two endpoints exchanging only heartbeats for \u003e8 s of injected time never reach the silence verdict; heartbeats are timer-driven, not piggybacked on data.\n- [ ] Heartbeat interval, silence timeout, MAX_DATA_CHUNK and WINDOW are compile-time constants (a change to any bumps the session-protocol version, capability string and flag together); ring caps are supplied by each end at construction; grace is carried in HELLO.grace_ms (R18).\n- [ ] Ring tests: wraparound, ack-trim, replay boundaries, occupancy, overflow reported never silent (overflow only reachable while no leg is up).\n- [ ] No sockets, threads or system clock used in these files.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:30Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:45Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.4",
+        "depends_on_id": "mosh-dqw.1",
+        "type": "blocks",
+        "created_at": "2026-10-24T05:37:41Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-dqw.4",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:30Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.3",
+    "title": "Fork release hygiene: update manifest override and diff budget",
+    "description": "Fork release hygiene (R14, R15): build-time update-manifest URL overrides and the diff-budget audit script.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Upstream touch list update.rs row; diff budget script paragraph; §Decision points 'Release blocker: self-update').\nsrc/update.rs l.25-26: STABLE_UPDATE_MANIFEST_URL / PREVIEW_UPDATE_MANIFEST_URL take option_env!(\"HERDR_STABLE_UPDATE_MANIFEST_URL\") / option_env!(\"HERDR_PREVIEW_UPDATE_MANIFEST_URL\") overrides at build time, defaulting to today's herdr.dev URLs; one statement per const, tagged. New scripts/mosh-diff-budget.sh: prints git diff origin/master --stat excluding fork paths (src/mosh, tests/mosh_*, scripts/mosh-*, HERDR_MOSH_VISION.md, docs/superpowers), prints git grep -n 'mosh-fork', exits 1 if more than 20 changed lines fall outside fork paths or if any changed upstream line lacks a mosh-fork tag on its hunk.\nFiles: src/update.rs (2 lines), scripts/mosh-diff-budget.sh\nAcceptance:\n- [ ] cargo build passes without the env vars and the expanded defaults equal today's URLs (verified by inspection of a plain build (an empty override value must also fall back to the default); no test module is added to upstream src/update.rs); a build with HERDR_STABLE_UPDATE_MANIFEST_URL=https://example.invalid/latest.json embeds that URL (checked with `strings` on the binary).\n- [ ] scripts/mosh-diff-budget.sh is executable, shellcheck-clean, and on this branch passes; it fails on a synthetic untagged upstream edit (documented manual check).\n- [ ] Exactly 2 upstream lines changed in update.rs, tagged.",
+    "notes": "sp:demoted-by-session: promotion reviewer PROMOTE (size: two unrelated deliverables) overruled to LEAF — the update.rs change is 2 lines and the script is small; splitting falls below the decomposition floor (each half smaller than its own ceremony).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:29Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T05:45:23Z",
+    "labels": [
+      "sp:demoted-by-session",
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.3",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:29Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 1,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.2",
+    "title": "Outage banner: LinkStatus, OutageState and client hooks",
+    "description": "Outage banner (R6): the x-mosh.link.v1 kind and LinkStatus payload, per-endpoint OutageState, and the client observe/paint hooks.\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Outage banner (D5), §Key abstractions LinkStatus/OutageState).\nsrc/mosh/outage.rs mounted from src/client/mod.rs as `#[path = \"../mosh/outage.rs\"] pub(crate) mod mosh_outage; // mosh-fork hook`. LINK_KIND = \"x-mosh.link.v1\" (pub(crate); fork code refers to crate::client::mosh_outage::LINK_KIND). LinkStatus serde enum tagged by \"state\": Resuming{last_contact_ms}, Linked — the single definition of the x-mosh.link.v1 payload. OutageState: process-global per-endpoint map; observe(endpoint_id, kind, data)-\u003ebool returns true only for kind x-mosh.link.v1; paint(frame, active_endpoint, label) — hook passes self.endpoint_label(\u0026self.active_endpoint_id) (client/shell/endpoints.rs:462) — draws one inverse-video top-row banner '⚠ \u003clabel\u003e unreachable — last contact \u003cN\u003es ago, resuming…' truncated to width while the active endpoint is resuming; clears on Linked and after 2 s with no status (which also covers endpoint removal/bridge teardown; no removal hook). Hook 1 at the top of the EndpointControl arm in client/mod.rs (~l.2093): a single if-statement that requests a repaint the way the arm's other UI-affecting branches do, then continue. Hook 2 in client/shell/composition.rs compose(), after the endpoint-status block and before compose_graphics (~l.719).\nowns: LinkStatus and LINK_KIND (x-mosh.link.v1); owns: OutageState\nFiles: src/mosh/outage.rs, src/client/mod.rs (2 hook lines), src/client/shell/composition.rs (1 hook line)\nAcceptance:\n- [ ] Exactly 3 upstream lines changed, each tagged // mosh-fork hook.\n- [ ] Unit tests: LinkStatus JSON round-trip with the exact field names; observe returns false for other kinds; state transitions resuming→linked clears; 2 s stale gap clears; paint writes the banner only for the active endpoint and truncates to width.\n- [ ] A frame with kind x-mosh.link.v1 never reaches decode_endpoint_control from the arm (consumed by the hook); other kinds unaffected; existing client tests pass.",
+    "notes": "sp:demoted-by-session: promotion reviewer PROMOTE (uncertainty: banner label source, removal clear) overruled to LEAF — both resolved in spec commit 4be22e31 (paint gets endpoint_label; 2 s stale clear covers removal).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:25Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T05:45:48Z",
+    "labels": [
+      "sp:demoted-by-session",
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.2",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:25Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw.1",
+    "title": "Seam contract: mosh module scaffold and leg interface",
+    "description": "Inert compilable scaffold: mount line, mosh constants/MoshConfig (kill switch, grace), Leg/LegDialer/LegError, start_ui_bridge plain path with both UI call sites swapped (run_remote for --remote; connect_saved_ssh, the saved-machine supervisor connect path), and the keeper rendezvous definitions in mosh::remote (private 0700 dir with owner checks, socket path, live and spawn locks).\nSpec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (§Components, §Upstream touch list rows 1-3, §Key abstractions Leg/LegDialer/start_ui_bridge).\nCompilable scaffold that every other mosh bead fills in. Adds the single mount line in src/remote/attach.rs; creates src/mosh/mod.rs (constants STATUS_CAPABILITY=\"x-mosh-resume-bridge-v1\", flags --x-mosh-session-v1/--x-mosh-keeper-v1; env config read once: HERDR_MOSH_RESUME=0 kill switch, HERDR_MOSH_GRACE seconds default 60 clamped 5..=3600) and declares every submodule (session, ring, link_frames, ssh_leg, local_bridge, remote/{mod,attacher,keeper}) as compilable stub files; defines in ssh_leg.rs the transport-neutral Leg struct (duplex stream + teardown handle + structured end report: ExitStatus, captured stderr on reconnect legs, whether WELCOME was reached, any pre-WELCOME END reason; for ssh it owns the ssh child directly, no socketpair, no bridge_child), the LegDialer trait and LegError {Retryable, Fatal, Unsupported}; defines start_ui_bridge(ssh, remote_herdr, local_socket, session, options, noninteractive, stop) -\u003e io::Result\u003cSshStdioBridge\u003e that for now delegates to SshStdioBridge::start unchanged (inert by default; the non-Unix-local #[cfg(not(unix))] gate also lands in the plain branch), and swaps the two UI call sites (attach.rs:90 in run_remote, saved.rs:35 in connect_saved_ssh) to call it. Also defines, in src/mosh/remote/mod.rs, the single keeper rendezvous contract shared by attacher and keeper (spec §Keeper 'Rendezvous'): the private directory \u003cstd::env::temp_dir()\u003e/herdr-mosh-\u003ceuid\u003e (falling back to /tmp/herdr-mosh-\u003ceuid\u003e when the socket path would not fit sun_path, via fits_unix_socket_path), created with crate::platform::create_remote_private_dir (0700, AlreadyExists accepted) and validated before every use with symlink_metadata (a directory, not a symlink, owned by the current euid, mode exactly 0700; fork re-implementation of the private unix_common.rs check); the keeper socket \u003cdir\u003e/k-\u003ch\u003e.sock (mode 0600 when bound) where h = first 24 hex digits of SHA-256 (sha2, already a dependency) over (euid, session name, session-protocol version, build id, resolved client_socket_path()); and the sibling lock paths \u003cdir\u003e/k-\u003ch\u003e.live (keeper holds exclusive flock for its lifetime) and \u003cdir\u003e/k-\u003ch\u003e.spawn, with small helpers to take them (the attacher owns the peer-uid check itself, mosh-dqw.10). Rendezvous rule: the attacher is a pure byte pipe once connected (its only own message is END{\"keeper-unavailable\"} on bring-up failure); the session protocol starts with HELLO end to end. Stub entry points keeper::run(args) and attacher::run(args) with fixed signatures (filled by mosh-dqw.7 and mosh-dqw.10). STATUS_CAPABILITY is advertised as one entry of upstream's existing endpoint_capabilities array in `status client --json`. Creates a placeholder remote::dispatch returning None (the abstraction itself is owned by mosh-dqw.10).\nowns: mosh module tree; owns: Leg; owns: LegDialer; owns: start_ui_bridge (sole owner; mosh-dqw.8 fills its resume branch); owns: keeper rendezvous protocol (private dir and owner checks, socket path, live lock, spawn lock, pure-pipe rule; lives in mosh::remote); owns: keeper and attacher entry-point signatures; owns: mosh constants and MoshConfig\nowns: STATUS_CAPABILITY string and its placement (one entry of upstream endpoint_capabilities in status client --json); owns: --x-mosh-session-v1 / --x-mosh-keeper-v1 flag constants; owns: MoshConfig field scope (every field is local-only: the remote attacher/keeper never read grace, kill switch or thresholds from their own environment; grace reaches the keeper only via HELLO.grace_ms)\nFiles: src/remote/attach.rs (2 hook lines), src/remote/saved.rs (1), src/mosh/mod.rs, src/mosh/{session,ring,link_frames,ssh_leg,local_bridge}.rs, src/mosh/remote/{mod,attacher,keeper}.rs\nAcceptance:\n- [ ] cargo build and the full existing test suite pass; behaviour is byte-identical to upstream (start_ui_bridge always takes the plain path).\n- [ ] Exactly 3 upstream lines changed (mount + 2 swaps), each ending in // mosh-fork hook.\n- [ ] Leg, LegDialer, LegError and start_ui_bridge carry responsibility comments per the spec's Key abstractions entries.\n- [ ] Rendezvous unit tests: a foreign-owned, symlinked or wrong-mode private dir is rejected by the validation helper; the socket/lock names are stable for equal inputs and differ when client_socket_path() (or session, build id, version) differs; the path fits sun_path or falls back to /tmp.\n- [ ] Unit test: MoshConfig grace parsing clamps (unset→60, 1→5, 99999→3600, garbage→60) and kill switch.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:37:24Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:29:41Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-dqw.1",
+        "depends_on_id": "mosh-dqw",
+        "type": "parent-child",
+        "created_at": "2026-10-24T05:37:24Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 5,
+    "comment_count": 0,
+    "parent": "mosh-dqw"
+  },
+  {
+    "id": "mosh-dqw",
+    "title": "Mosh Phase 1: resumable remote session",
+    "description": "Mosh Phase 1: link-level resumable remote session (local bridge + remote keeper over SSH) with outage banner. Spec: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md (worktree-relative). Fork plan: HERDR_MOSH_VISION.md.\n\n## Global Constraints\n- All new code under src/mosh/ (plus src/mosh/outage.rs mounted from client/mod.rs); the tree is mounted via one `#[path = \"../mosh/mod.rs\"] pub(super) mod mosh; // mosh-fork hook` line in src/remote/attach.rs.\n- Every edit to an upstream file is a one-statement hook ending in `// mosh-fork hook`; the complete allowed upstream touch list is the spec's \"Upstream touch list\" table (~11 lines). Never edit headless.rs, client_transport.rs, handshake.rs, wire.rs, app/mod.rs, main.rs, upstream test modules.\n- No ClientMessage/ServerMessage variant, PROTOCOL_VERSION, ENDPOINT_PROTOCOL_GENERATION, EndpointClientHello or bincode surface-struct changes. New semantics ride on EndpointControl kinds prefixed `x-mosh`.\n- No new Cargo dependencies; never touch Cargo.toml/Cargo.lock.\n- Call upstream internals (start_command, bridge_child, posix_remote_output_command, RemoteExecutable::session_args, remote_binary_candidates, remote_client_status, forward_remote_bridge_stdio) — never copy them.\n- Tests live only in fork files: #[cfg(test)] modules under src/mosh/, tests/mosh_*.rs (binary-only crate; drive the herdr binary with fake ssh on PATH, pattern tests/remote_attach.rs:69-107).\n- Conventional-commit messages; docs/* is upstream-gitignored (git add -f for run artifacts only).\n\u003c!-- key-abstractions digest: begin --\u003e\n- SessionMsg: owns the session message codec; new message kinds are a variant plus a match arm; callers never hand-pack type/len bytes.\n- SessionEndpoint: owns offsets, dedup, acks, flow control (window and ring-cap reading rule), link timers and resume negotiation for one session end; protocol rule changes go here; bridge and keeper never do offset arithmetic themselves.\n- ReplayRing: owns offset-keyed replay storage; capacity supplied by the owner; never decides overflow policy.\n- FrameSplitter: owns herdr length-prefix framing and injected-frame encoding; nothing else parses frame lengths.\n- Leg: owns one live transport connection and its teardown; never interprets bytes.\n- LegDialer: owns how the next leg is made, back-off and failure classification; a new transport is a new impl registered in `start_ui_bridge`; callers never build ssh commands.\n- LocalBridge: owns the user-facing socket, per-connection pump, injection, deadline and end triggers; new outage behaviour goes here; never touches ssh arguments.\n- start_ui_bridge: the single choice of plain vs resume and of dialer kind; callers never branch on mosh support.\n- Keeper: owns parked server connections, token table and Per-`HELLO` state table, grace and idle exit; new leg sources are acceptors feeding its one leg handler; never parses frames.\n- Attacher: owns the rendezvous checks and locating/spawning the keeper; pumps via existing `forward_remote_bridge_stdio`; never interprets session bytes and originates only `END{\"keeper-unavailable\"}`.\n- remote::dispatch: owns `--x-mosh-*` flag routing; a new flag is a match arm.\n- LinkStatus: the one definition of the `x-mosh.link.v1` payload; new states are variants; never redefined bridge-side.\n- OutageState: owns per-endpoint banner state and transitions; new display rules go in `observe`/`paint`; never detects outages.\n\u003c!-- key-abstractions digest: end --\u003e",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-24T05:36:11Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-24T06:24:20Z",
+    "labels": [
+      "sp:mosh-dqw"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
