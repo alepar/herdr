@@ -363,8 +363,8 @@ impl SshLegDialer {
         stop: &AtomicBool,
     ) -> Result<Leg, LegError> {
         let capture = kind == LegKind::Reconnect || self.noninteractive;
-        let (mut leg, mut reader) = spawn_leg(command, capture)
-            .map_err(|err| LegError::Fatal(io::Error::new(err.kind(), format!("could not start ssh: {err}"))))?;
+        let (mut leg, mut reader) =
+            spawn_leg(command, capture).map_err(|err| classify_spawn_error(kind, err))?;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let result = attach::discard_remote_output_preamble(&mut reader);
@@ -417,7 +417,28 @@ impl LegDialer for SshLegDialer {
     }
 
     fn backoff(&self, attempt: u32) -> Duration {
-        Duration::from_secs(1 << attempt.min(3))
+        reconnect_backoff(attempt)
+    }
+}
+
+/// Reconnect back-off: 1, 2, 4, 8, 8... seconds.
+pub(super) fn reconnect_backoff(attempt: u32) -> Duration {
+    Duration::from_secs(1 << attempt.min(3))
+}
+
+/// A leg whose ssh child could not be spawned at all (spec §Legs "Failure classification").
+/// Leg 0 keeps `Fatal`. A reconnect leg retries within the give-up deadline unless the errno
+/// says the binary can never start.
+pub(super) fn classify_spawn_error(kind: LegKind, err: io::Error) -> LegError {
+    let permanent = matches!(
+        err.raw_os_error(),
+        Some(libc::ENOENT | libc::EACCES | libc::ENOEXEC)
+    );
+    let err = io::Error::new(err.kind(), format!("could not start ssh: {err}"));
+    if kind == LegKind::Reconnect && !permanent {
+        LegError::Retryable(err)
+    } else {
+        LegError::Fatal(err)
     }
 }
 
@@ -882,6 +903,58 @@ mod tests {
         let expected = attach::ssh_bridge_exit_error(end.exit_status.unwrap(), b"Permission denied (publickey).\n");
         assert_eq!(err.to_string(), expected.to_string());
         assert_eq!(err.kind(), expected.kind());
+    }
+
+    #[test]
+    fn spawn_error_classification() {
+        let os = |errno: i32| io::Error::from_raw_os_error(errno);
+        for errno in [libc::EAGAIN, libc::EMFILE, libc::ENFILE, libc::ENOMEM] {
+            assert_eq!(class(classify_spawn_error(LegKind::Reconnect, os(errno))), Class::Retryable, "errno {errno}");
+        }
+        for errno in [libc::ENOENT, libc::EACCES, libc::ENOEXEC] {
+            assert_eq!(class(classify_spawn_error(LegKind::Reconnect, os(errno))), Class::Fatal, "errno {errno}");
+        }
+        for errno in [
+            libc::EAGAIN,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::ENOENT,
+            libc::EACCES,
+            libc::ENOEXEC,
+        ] {
+            assert_eq!(class(classify_spawn_error(LegKind::Initial, os(errno))), Class::Fatal, "leg 0 errno {errno}");
+        }
+        assert_eq!(
+            class(classify_spawn_error(LegKind::Reconnect, io::Error::other("x"))),
+            Class::Retryable
+        );
+    }
+
+    #[test]
+    fn dial_command_unspawnable_command_both_leg_kinds() {
+        use std::os::unix::process::CommandExt;
+        let stop = AtomicBool::new(false);
+        let d = dialer(None, false);
+        let timed = |command: Command, kind: LegKind| {
+            let started = Instant::now();
+            let result = d.dial_command(command, kind, None, &stop);
+            assert!(started.elapsed() < Duration::from_secs(1), "dial_command must not wait");
+            class(result.err().expect("spawn must fail"))
+        };
+        let missing = || Command::new("/nonexistent/herdr-test-ssh");
+        assert_eq!(timed(missing(), LegKind::Reconnect), Class::Fatal);
+        assert_eq!(timed(missing(), LegKind::Initial), Class::Fatal);
+        let failing = |errno: i32| {
+            let mut c = sh("exit 0");
+            // SAFETY: the closure only constructs an io::Error; it calls nothing that is
+            // unsafe between fork and exec.
+            unsafe { c.pre_exec(move || Err(io::Error::from_raw_os_error(errno))) };
+            c
+        };
+        assert_eq!(timed(failing(libc::EAGAIN), LegKind::Reconnect), Class::Retryable);
+        assert_eq!(timed(failing(libc::EAGAIN), LegKind::Initial), Class::Fatal);
+        assert_eq!(timed(failing(libc::EACCES), LegKind::Reconnect), Class::Fatal);
     }
 
     #[test]

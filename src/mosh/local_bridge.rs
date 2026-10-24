@@ -1647,6 +1647,11 @@ mod tests {
         /// While set, every dial fails `Retryable` without consuming a script.
         blocked: Arc<AtomicBool>,
         dials: Arc<Mutex<Vec<(LegKind, bool)>>>,
+        /// While set, every dial records its time and fails as a transient spawn error.
+        spawn_fail: Arc<AtomicBool>,
+        dial_times: Arc<Mutex<Vec<(LegKind, Instant)>>>,
+        /// While set, `backoff` is the real reconnect schedule instead of 10 ms.
+        real_backoff: Arc<AtomicBool>,
     }
 
     impl MemDialer {
@@ -1678,6 +1683,13 @@ mod tests {
             if self.blocked.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(5));
                 return Err(LegError::Retryable(io::Error::other("dialer blocked")));
+            }
+            if self.spawn_fail.load(Ordering::SeqCst) {
+                self.dial_times.lock().unwrap().push((kind, Instant::now()));
+                return Err(super::super::ssh_leg::classify_spawn_error(
+                    kind,
+                    io::Error::from_raw_os_error(libc::EAGAIN),
+                ));
             }
             let script = self.scripts.lock().unwrap().pop_front();
             self.dials.lock().unwrap().push((kind, setup_deadline.is_some()));
@@ -1712,7 +1724,10 @@ mod tests {
             super::super::ssh_leg::classify_leg(kind, end)
         }
 
-        fn backoff(&self, _attempt: u32) -> Duration {
+        fn backoff(&self, attempt: u32) -> Duration {
+            if self.real_backoff.load(Ordering::SeqCst) {
+                return super::super::ssh_leg::reconnect_backoff(attempt);
+            }
             Duration::from_millis(10)
         }
     }
@@ -1958,6 +1973,31 @@ mod tests {
             frames.iter().all(|(at, _)| at.duration_since(started) < Duration::from_millis(1100)),
             "no injection after the deadline: {frames:?}"
         );
+    }
+
+    #[test]
+    fn transient_spawn_failures_back_off_until_give_up() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, client) = established(&dialer, &keeper, secs(4), KLeg::new(Answer::New));
+        dialer.spawn_fail.store(true, Ordering::SeqCst);
+        dialer.real_backoff.store(true, Ordering::SeqCst);
+        keeper.kill_leg();
+        let lost = client.next_seen(WAIT).0; // the first Resuming frame marks the link loss
+        client.until_closed(secs(10));
+        let closed = lost.elapsed();
+        assert!(
+            closed >= Duration::from_millis(3800) && closed <= Duration::from_millis(5500),
+            "closed {closed:?} after link loss"
+        );
+        let times: Vec<Instant> = dialer.dial_times.lock().unwrap().iter().map(|(_, at)| *at).collect();
+        assert_eq!(times.len(), 2, "dials at +1 s and +3 s only: {times:?}");
+        let first = times[0].duration_since(lost);
+        let second = times[1].duration_since(lost);
+        assert!(first >= Duration::from_millis(900), "first retry after {first:?}");
+        assert!(second >= Duration::from_millis(2900), "second retry after {second:?}");
+        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(1900));
+        thread::sleep(secs(1));
+        assert_eq!(dialer.dial_times.lock().unwrap().len(), 2, "no dial after the give-up: no hot loop");
     }
 
     #[test]
