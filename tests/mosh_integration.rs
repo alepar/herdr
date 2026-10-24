@@ -143,3 +143,75 @@ fn saved_machine_and_remote_session_share_one_keeper_with_two_tokens() {
     assert_eq!(remote.keeper_pids().len(), 1);
     assert_eq!(remote.keeper_event_count("server_connect"), 2);
 }
+
+/// Cross-endpoint closing order (design Post-Implementation Note, code redesign cycle 1):
+/// when the client goes away with bytes still queued behind a slow leg, the bridge writes
+/// END{"client-gone"} after those bytes, the keeper drains them to the server before it shuts
+/// the server stream, and the session then ends promptly (`client-gone`, or `server-eof` when the
+/// server's hang-up on the Detach wins the race), never by `grace`.
+#[test]
+fn client_gone_with_queued_bytes_reaches_the_server_then_ends() {
+    let remote = Remote::start();
+    // Slow leg, set before the client exists, so the burst below queues in the bridge.
+    remote.set_knob(knob::THROTTLE, "");
+    let mut client = remote.spawn_remote_client(&ClientOptions::grace(60));
+    client.wait_attached(&remote, READY);
+    assert!(
+        remote.wait_leg_count(&client.id, 1, READY),
+        "{}",
+        fail_context(&remote, &client)
+    );
+
+    // One burst, no wait between: a marked command, then detach.
+    client.type_mark("final");
+    client.type_keys("\x02q");
+
+    assert!(
+        mosh_harness::wait_for(READY, || remote.marks().contains(&"MKfinal".to_owned())),
+        "the server never received the queued bytes: marks {:?}: {}",
+        remote.marks(),
+        fail_context(&remote, &client)
+    );
+    assert!(
+        client.wait_exit(READY),
+        "client still running: {}",
+        fail_context(&remote, &client)
+    );
+    assert!(
+        remote.wait_keeper_event("session_end", 1, READY),
+        "keeper never ended the session: {}",
+        fail_context(&remote, &client)
+    );
+
+    let events = remote.keeper_events();
+    assert_eq!(
+        remote.keeper_event_count("session_end"),
+        1,
+        "{}",
+        fail_context(&remote, &client)
+    );
+    let end_index = events
+        .iter()
+        .position(|line| line["event"] == "session_end")
+        .unwrap();
+    // The server hangs up on the client's Detach, so the keeper may see server EOF a moment
+    // before END{"client-gone"} arrives: both are the prompt close. Only grace is a failure.
+    let reason = events[end_index]["reason"].as_str().unwrap_or_default();
+    assert!(
+        matches!(reason, "client-gone" | "server-eof"),
+        "session ended with {reason:?}, expected client-gone (or server-eof from the Detach): {}",
+        fail_context(&remote, &client)
+    );
+    let ended = events[end_index]["ms"].as_u64().unwrap();
+    let before = events[..end_index]
+        .iter()
+        .rev()
+        .find_map(|line| line["ms"].as_u64())
+        .expect("a keeper event precedes session_end");
+    assert!(
+        ended.saturating_sub(before) <= 2_000,
+        "session_end came {} ms after the previous keeper event: {}",
+        ended.saturating_sub(before),
+        fail_context(&remote, &client)
+    );
+}
