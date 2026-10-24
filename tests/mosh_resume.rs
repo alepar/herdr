@@ -123,8 +123,12 @@ fn stopped_leg_is_detected_and_resumed() {
         fail_context(&remote, &client)
     );
     assert!(
-        stopped.elapsed() >= Duration::from_secs(7),
-        "dead-leg detection fired after {:?}, before the 8 s silence bound",
+        // The bridge measures silence from its last inbound byte (session.rs
+        // SILENCE_TIMEOUT = 8 s), not from the SIGSTOP. That byte is at most one
+        // keeper HEARTBEAT_INTERVAL (2 s) older than the stop, so the earliest
+        // legitimate verdict is 8 s - 2 s after it; 500 ms is scheduling slack.
+        stopped.elapsed() >= Duration::from_secs(8) - Duration::from_secs(2) - Duration::from_millis(500),
+        "dead-leg detection fired after {:?}, before the silence bound (8 s from last inbound, minus one 2 s heartbeat)",
         stopped.elapsed()
     );
     assert!(
