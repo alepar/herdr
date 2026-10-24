@@ -43,3 +43,12 @@ C42 · amend-design-1 · GAP · cross-version interop · applied — already in 
 C43 · amend-design-1 · GAP · R14/R15/R18 combined-branch checks · applied — added to mosh-dqw.11 acceptance
 C44 · amend-design-1 · GAP · R18 MoshConfig field scope · applied — .1 marks every MoshConfig field local-only; .7 acceptance tests HELLO grace wins over remote env
 G1 · graph · GRAPH-EDGE · all 12 candidates · kept — graph-shape shows no single-edge removal reduces depth (5→5 for every candidate); judge not dispatched
+C45 · amend-code-1 · GAP · R20 canonical · rejected — R20 is in coverage-round-2-requirements.md; absent only from the reused prompt's requirements block
+C46 · amend-code-1 · GAP · post-redesign combined-branch verification · rejected — phase-6 sweep re-runs the full nextest suite (all tests/mosh_*) on the final tree; diff-budget and override-build checks run by the orchestrator in phase 6
+C47 · amend-code-1 · UNOWNED-SEAM · cross-endpoint closing sequence · applied — owned by mosh-dqw.24 (spec Post-Implementation Note), consumed by .25; .19 tests and a cross-endpoint ordering test added to acceptance
+C48 · amend-code-1 · GAP · .24/.25 Covers traceability · applied — dissolved keys listed in bead text
+C49 · amend-code-1 · GAP · .26 permanent vs transient spawn errors / bounded retries · applied — errno classification and bounded-backoff acceptance on .26
+C50 · amend-code-1 · UNOWNED-SEAM · LegError classification table · applied — owns line on .26
+C51 · amend-code-1 · GAP · .27 keeper side · rejected — .27 body covers both callers (bridge and keeper Err arms)
+C52 · amend-code-1 · UNOWNED-SEAM · idle-timeout opt-in argv · rejected — resolved by .21 (shared idle_opt_in source, parity test)
+C53 · amend-code-1 · ORPHAN · .23 / .28 · rejected — .23 closed (spec accuracy for the review gate); .28 covers sites disjoint from .22 (the punch-listed C4 members)
