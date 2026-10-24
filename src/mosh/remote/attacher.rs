@@ -225,10 +225,19 @@ mod tests {
         fn new() -> Env {
             static COUNTER: AtomicU32 = AtomicU32::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let base = std::env::temp_dir().join(format!("att-{}-{n}", std::process::id()));
+            // Fixed short base: a long TMPDIR would push the socket path past
+            // sun_path and make `rendezvous_paths` fall back to the host's shared
+            // /tmp/herdr-mosh-<euid>, which these tests must never touch.
+            let base = std::path::PathBuf::from("/tmp")
+                .join(format!("att-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
             let rdv = rendezvous_paths(&base, geteuid(), "t");
+            assert!(
+                rdv.dir.starts_with(&base),
+                "test rendezvous escaped its base: {}",
+                rdv.dir.display()
+            );
             Env { base, rdv }
         }
 

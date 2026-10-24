@@ -1347,6 +1347,8 @@ mod tests {
         final_end: Option<&'static str>,
         upstream: Vec<u8>,
         upstream_at_end: Option<usize>,
+        /// Messages the bridge sent after HELLO but before WELCOME was written.
+        pre_welcome_msgs: usize,
         hellos: Vec<Hello>,
         ends: Vec<String>,
         last_rx: Option<Instant>,
@@ -1369,6 +1371,9 @@ mod tests {
         }
         fn upstream(&self) -> Vec<u8> {
             self.st().upstream.clone()
+        }
+        fn pre_welcome_msgs(&self) -> usize {
+            self.st().pre_welcome_msgs
         }
         fn hellos(&self) -> Vec<Hello> {
             self.st().hellos.clone()
@@ -1395,10 +1400,12 @@ mod tests {
             s.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
             let mut buf = vec![0u8; 64 * 1024];
             let mut decoder = Decoder::default();
+            let mut raw = Vec::new();
             let hello = loop {
                 match s.read(&mut buf) {
                     Ok(0) => return,
                     Ok(n) => {
+                        raw.extend_from_slice(&buf[..n]);
                         decoder.push(&buf[..n]);
                         if let Ok(Some(SessionMsg::Hello(hello))) = decoder.next() {
                             break hello;
@@ -1435,7 +1442,30 @@ mod tests {
                 Answer::New => WelcomeStatus::New,
                 Answer::Resumed => WelcomeStatus::Resumed,
             };
-            thread::sleep(script.welcome_delay);
+            // Keep reading while the WELCOME is delayed: a client byte sent
+            // before WELCOME must be observable, not left in the socket buffer.
+            let hello_len = 5 + u32::from_le_bytes(raw[1..5].try_into().unwrap()) as usize;
+            let mut early = raw.split_off(hello_len);
+            let delay_end = Instant::now() + script.welcome_delay;
+            while Instant::now() < delay_end {
+                match s.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(n) => early.extend_from_slice(&buf[..n]),
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => return,
+                }
+            }
+            let mut early_decoder = Decoder::default();
+            early_decoder.push(&early);
+            let mut early_msgs = 0;
+            while let Ok(Some(_)) = early_decoder.next() {
+                early_msgs += 1;
+            }
+            self.st().pre_welcome_msgs += early_msgs;
             let welcome = {
                 let mut st = self.st();
                 let ep = st.endpoint.get_or_insert_with(|| {
@@ -1461,7 +1491,14 @@ mod tests {
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 }
-                let read = s.read(&mut buf);
+                // Bytes read before WELCOME are fed once, as if they had just arrived.
+                let carried = std::mem::take(&mut early);
+                let read = if carried.is_empty() {
+                    s.read(&mut buf)
+                } else {
+                    buf[..carried.len()].copy_from_slice(&carried);
+                    Ok(carried.len())
+                };
                 let mut eof = false;
                 let mut out = Vec::new();
                 {
@@ -2032,11 +2069,10 @@ mod tests {
         dialer.keeper(&keeper, KLeg::new(Answer::New).delay(secs(1)));
         let harness = Harness::start(&dialer, secs(30));
         let mut client = harness.connect();
+        wait_until("hello", WAIT, || keeper.hellos().len() == 1);
         client.write(b"0123456789");
-        thread::sleep(Duration::from_millis(600));
-        assert_eq!(keeper.hellos().len(), 1);
-        assert!(keeper.upstream().is_empty(), "no client byte before WELCOME");
         wait_until("bytes after WELCOME", WAIT, || keeper.upstream() == b"0123456789");
+        assert_eq!(keeper.pre_welcome_msgs(), 0, "no client byte before WELCOME");
         thread::sleep(Duration::from_millis(300));
         assert_eq!(keeper.upstream(), b"0123456789", "exactly once");
     }

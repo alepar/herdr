@@ -138,7 +138,9 @@ pub struct Remote {
 impl Remote {
     pub fn start() -> Remote {
         let n = BASE_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("hm{}-{n}", std::process::id()));
+        // Short fixed base: a long runner TMPDIR would push the keeper socket path past
+        // sun_path and make every keeper share the host's /tmp/herdr-mosh-<euid>.
+        let base = PathBuf::from("/tmp").join(format!("hm{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         for dir in [
             "bin",
@@ -159,6 +161,19 @@ impl Remote {
             "onboarding = false\n",
         )
         .unwrap();
+        // Same sun_path limit as upstream's `fits_sun_path`; if this trips, keepers would
+        // silently share the host's /tmp/herdr-mosh-<euid>.
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        let sock = base
+            .join("remote/tmp")
+            .join(format!("herdr-mosh-{euid}"))
+            .join("k-000000000000000000000000.sock");
+        assert!(
+            sock.as_os_str().len() <= 103,
+            "keeper socket path would not fit sun_path: {}",
+            sock.display()
+        );
         let mut remote = Remote {
             api: base.join("remote/runtime/herdr.sock"),
             base,
