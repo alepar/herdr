@@ -12,6 +12,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {
         {
             true
         }
+        [o, ..] if o.starts_with("--x-mosh-") => false, // mosh-fork hook
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -22,6 +23,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {
     ensure_remote_server_running()?;
     #[cfg(unix)]
     let _ssh_agent = super::ssh_agent::Registration::start();
+    #[rustfmt::skip] let () = if let Some(result) = super::attach::mosh::remote::dispatch(args) { return result; }; // mosh-fork hook
 
     let socket_path = crate::server::socket_paths::client_socket_path();
     let stream = crate::ipc::connect_local_stream(&socket_path).map_err(|err| {

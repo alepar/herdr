@@ -456,3 +456,7 @@ Behavior the redesign-cycle-1 amendment (flow control, rendezvous, leg-0 fallbac
 ## Post-Implementation Notes
 
 > *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+## Post-Implementation Note (2026-10-24, mosh-dqw.10)
+
+The status.rs capability hook is two lines, not one: rustfmt always splits a `#[cfg(unix)]` attribute off a `vec!` element, so the attribute and the `"x-mosh-resume-bridge-v1"` entry are separate lines, both tagged `// mosh-fork hook`. The upstream touch list is therefore 12 lines, not 11.
