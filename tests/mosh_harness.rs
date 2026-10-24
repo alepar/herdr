@@ -9,6 +9,7 @@
 #[path = "support/terminal_screen.rs"]
 mod terminal_screen;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -133,6 +134,8 @@ pub struct Remote {
     pub pane: String,
     server: Option<Spawned>,
     next_client: AtomicU32,
+    /// Every keeper pid ever observed, so teardown does not depend on a final scan.
+    seen_keepers: Mutex<BTreeSet<libc::pid_t>>,
 }
 
 impl Remote {
@@ -161,19 +164,6 @@ impl Remote {
             "onboarding = false\n",
         )
         .unwrap();
-        // Same sun_path limit as upstream's `fits_sun_path`; if this trips, keepers would
-        // silently share the host's /tmp/herdr-mosh-<euid>.
-        // SAFETY: geteuid has no preconditions.
-        let euid = unsafe { libc::geteuid() };
-        let sock = base
-            .join("remote/tmp")
-            .join(format!("herdr-mosh-{euid}"))
-            .join("k-000000000000000000000000.sock");
-        assert!(
-            sock.as_os_str().len() <= 103,
-            "keeper socket path would not fit sun_path: {}",
-            sock.display()
-        );
         let mut remote = Remote {
             api: base.join("remote/runtime/herdr.sock"),
             base,
@@ -181,7 +171,10 @@ impl Remote {
             pane: String::new(),
             server: None,
             next_client: AtomicU32::new(1),
+            seen_keepers: Mutex::new(BTreeSet::new()),
         };
+        // Panics when the rendezvous dir would not be the one the keeper uses.
+        let _ = remote.rendezvous_dir();
         remote.write_wrappers();
         remote.start_server();
         let created = remote.request(json!({
@@ -206,6 +199,39 @@ impl Remote {
     /// The remote tmp dir (`TMPDIR` of everything the fake ssh starts): keeper rendezvous root.
     pub fn remote_tmp(&self) -> PathBuf {
         self.remote_dir("tmp")
+    }
+
+    /// The keeper rendezvous directory for this remote's environment, mirroring
+    /// `rendezvous::resolve`: `<TMPDIR>/herdr-mosh-<euid>` when a keeper socket in it fits
+    /// `sun_path` (103 bytes). Otherwise the keeper would use the shared
+    /// `/tmp/herdr-mosh-<euid>` and a test would be looking at the wrong directory, so panic.
+    pub fn rendezvous_dir(&self) -> PathBuf {
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        let dir = self.remote_tmp().join(format!("herdr-mosh-{euid}"));
+        let sock = dir.join("k-000000000000000000000000.sock");
+        assert!(
+            sock.as_os_str().len() <= 103,
+            "keeper socket path would not fit sun_path: {}",
+            sock.display()
+        );
+        dir
+    }
+
+    /// The keeper's socket as observed on disk: the single `k-*.sock` in the rendezvous dir.
+    pub fn keeper_socket(&self) -> Option<PathBuf> {
+        let mut socks: Vec<PathBuf> = fs::read_dir(self.rendezvous_dir())
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("k-") && n.ends_with(".sock"))
+            })
+            .collect();
+        assert!(socks.len() <= 1, "several keeper sockets: {socks:?}");
+        socks.pop()
     }
 
     /// Lines `MKtag` appended to `marks` in the pane's directory by commands typed through
@@ -314,7 +340,9 @@ case "$*" in
     fi ;;
   *--x-mosh-session-v1*)
     if [ -e "$K/downgrade" ]; then echo 'unsupported remote client bridge option' >&2; exit 2; fi
-    if [ -e "$K/spawn-fail" ]; then ulimit -S -u 1; fi ;;
+    if [ -e "$K/spawn-fail" ]; then
+      if ulimit -S -u 1 2>/dev/null || ulimit -S -p 1 2>/dev/null; then : > "$K/spawn-fail.applied"; fi
+    fi ;;
 esac
 exec "$REAL" "$@"
 "#,
@@ -487,8 +515,18 @@ exec "$REAL" "$@"
     // ---- processes -------------------------------------------------------------------
 
     /// Keeper daemons belonging to this remote (command line has the keeper flag and the
-    /// environment names this base directory).
+    /// environment names this base directory). Every pid returned is remembered for teardown.
     pub fn keeper_pids(&self) -> Vec<libc::pid_t> {
+        let pids = self.scan_keepers();
+        self.seen_keepers
+            .lock()
+            .unwrap()
+            .extend(pids.iter().copied());
+        pids
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_keepers(&self) -> Vec<libc::pid_t> {
         // Trailing slash: `hm1-1` must not match the environment of `hm1-10`.
         let needle = format!("{}/", self.base.display());
         let mut pids = Vec::new();
@@ -520,7 +558,37 @@ exec "$REAL" "$@"
         pids
     }
 
+    /// `ps` lines (`pid command`, environment appended by `-E` on macOS) of this remote's
+    /// keepers. Unverified on a Linux host.
+    #[cfg(not(target_os = "linux"))]
+    fn keeper_ps_lines(&self) -> Vec<(libc::pid_t, String)> {
+        let needle = format!("{}/", self.base.display());
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-A", "-ww", "-E", "-o", "pid=,command="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| line.contains("--x-mosh-keeper-v1") && line.contains(&needle))
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let pid = line.split_whitespace().next()?.parse().ok()?;
+                Some((pid, line.to_owned()))
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn scan_keepers(&self) -> Vec<libc::pid_t> {
+        let mut pids: Vec<_> = self.keeper_ps_lines().into_iter().map(|(p, _)| p).collect();
+        pids.sort_unstable();
+        pids
+    }
+
     /// `pid ppid state cmdline` of each keeper, for assertion messages.
+    #[cfg(target_os = "linux")]
     pub fn keeper_details(&self) -> Vec<String> {
         self.keeper_pids()
             .into_iter()
@@ -538,6 +606,16 @@ exec "$REAL" "$@"
                 )
             })
             .collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn keeper_details(&self) -> Vec<String> {
+        let lines = self.keeper_ps_lines();
+        self.seen_keepers
+            .lock()
+            .unwrap()
+            .extend(lines.iter().map(|(p, _)| *p));
+        lines.into_iter().map(|(_, line)| line).collect()
     }
 
     pub fn server_pid(&self) -> Option<u32> {
@@ -677,13 +755,17 @@ impl Drop for Remote {
         wait_until(Duration::from_secs(5), Duration::from_millis(50), || {
             UnixStream::connect(&self.api).is_err()
         });
-        for pid in self.keeper_pids() {
-            // SAFETY: pid verified by command line and environment to be this remote's keeper.
+        let mut doomed = self.keeper_pids();
+        doomed.extend(self.seen_keepers.lock().unwrap().iter().copied());
+        for pid in doomed {
+            // SAFETY: pid was verified by command line and environment to be this remote's
+            // keeper; killing one that already exited is harmless within a short test.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         if let Some(mut server) = self.server.take() {
             server.kill_group();
         }
+        debug_assert!(self.rendezvous_dir().starts_with(&self.base));
         for _ in 0..3 {
             if fs::remove_dir_all(&self.base).is_ok() {
                 break;

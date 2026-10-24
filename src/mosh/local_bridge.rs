@@ -2042,7 +2042,12 @@ mod tests {
     #[test]
     fn outage_overflow_ends_session() {
         let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
-        let (_harness, client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        let trace = fresh_dir();
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        keeper.push_down(frame("first"));
+        let harness = Harness::start_with(&dialer, secs(30), unused_plain(), Some(trace.clone()), None);
+        let client = harness.connect();
+        client.expect_data("first");
         dialer.block(true);
         keeper.kill_leg();
         client.next_seen(WAIT);
@@ -2050,14 +2055,21 @@ mod tests {
         thread::spawn(move || {
             let _ = writer.write_all(&vec![7u8; 9 * 1024 * 1024]);
         });
-        let frames = client.until_closed(secs(20));
-        assert!(frames.iter().all(|(_, s)| is_resuming(s)), "{frames:?}");
-        // A leg that comes up afterwards is told why, best effort.
+        // Unblock the dialer on the observable overflow, not after a drain, so the
+        // OVERFLOW_END_LINGER cannot expire before a leg is there to carry the END.
+        wait_until("ring-overflow traced", WAIT, || {
+            std::fs::read_to_string(trace.join("local.jsonl"))
+                .is_ok_and(|t| t.contains(r#""reason":"ring-overflow""#))
+        });
+        // A leg that comes up now is told why, best effort.
         dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
         dialer.block(false);
+        let frames = client.until_closed(secs(20));
+        assert!(frames.iter().all(|(_, s)| is_resuming(s)), "{frames:?}");
         wait_until("END ring-overflow", WAIT, || {
             keeper.ends() == [end_reason::RING_OVERFLOW]
         });
+        let _ = std::fs::remove_dir_all(trace);
     }
 
     #[test]
