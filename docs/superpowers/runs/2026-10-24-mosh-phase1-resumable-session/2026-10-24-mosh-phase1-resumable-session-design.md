@@ -347,7 +347,7 @@ These are in-process tests that can reach private `attach` items through the `#[
 - Owns: listener; token table (per token: server `LocalStream`, a `SessionEndpoint` with a 16 MiB ring, current leg, grace deadline); leg stealing; `previous_token` eviction; drain policy (backpressure while the leg is up, drain into the ring while down); server EOF then `END{"server-eof"}`; idle exit after 30 s.
 - Hides: the parked server connection from both peers.
 - Must not: parse herdr frames beyond `FrameSplitter`'s boundary. Its leg handler takes a plain duplex stream so a Phase 3 UDP acceptor can feed the same handler.
-- Lifecycle: spawned by the attacher; bind race picks the winner. The table is shared by each session's server-drain thread and the leg threads behind one lock; releasing a session closes its server stream.
+- Lifecycle: spawned by the attacher; concurrent spawns are serialised by the keeper lock file (spec §Keeper "Socket path and lock"). The table is shared by each session's server-drain thread and the leg threads behind one lock; releasing a session closes its server stream.
 - Errors: answers `unknown`/`ended`; ends a session on ring overflow or grace expiry; drops the leg on leg protocol error.
 
 **Attacher** — new function (`remote/attacher.rs`), a dumb pump.
