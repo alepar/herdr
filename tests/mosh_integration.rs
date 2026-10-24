@@ -145,12 +145,14 @@ fn saved_machine_and_remote_session_share_one_keeper_with_two_tokens() {
 }
 
 /// Cross-endpoint closing order (design Post-Implementation Note, code redesign cycle 1):
-/// when the client goes away with bytes still queued behind a slow leg, the bridge writes
-/// END{"client-gone"} after those bytes, the keeper drains them to the server before it shuts
-/// the server stream, and the session then ends promptly (`client-gone`, or `server-eof` when the
-/// server's hang-up on the Detach wins the race), never by `grace`.
+/// when the client goes away with bytes still queued behind a slow leg, the session always ends
+/// promptly (`client-gone`, or `server-eof` when the server's hang-up on the Detach wins), never
+/// by `grace`. When the bridge closes on the client-EOF path the queued bytes reach the server
+/// (END follows the ring bytes, and the keeper drains `to_server` before it shuts the server
+/// stream). When the in-process stop wins instead, the spec abandons unsent ring bytes (design
+/// "Local bridge behaviour", "Session-end triggers"), and only END{"client-gone"} is guaranteed.
 #[test]
-fn client_gone_with_queued_bytes_reaches_the_server_then_ends() {
+fn client_gone_with_queued_bytes_ends_the_session_promptly() {
     let remote = Remote::start();
     // Slow leg, set before the client exists, so the burst below queues in the bridge.
     remote.set_knob(knob::THROTTLE, "");
@@ -167,12 +169,6 @@ fn client_gone_with_queued_bytes_reaches_the_server_then_ends() {
     client.type_keys("\x02q");
 
     assert!(
-        mosh_harness::wait_for(READY, || remote.marks().contains(&"MKfinal".to_owned())),
-        "the server never received the queued bytes: marks {:?}: {}",
-        remote.marks(),
-        fail_context(&remote, &client)
-    );
-    assert!(
         client.wait_exit(READY),
         "client still running: {}",
         fail_context(&remote, &client)
@@ -182,6 +178,17 @@ fn client_gone_with_queued_bytes_reaches_the_server_then_ends() {
         "keeper never ended the session: {}",
         fail_context(&remote, &client)
     );
+    assert!(
+        client.wait_event("session_end", 1, READY),
+        "local bridge never ended the session: {}",
+        fail_context(&remote, &client)
+    );
+    let local_reason = client
+        .events()
+        .iter()
+        .find(|line| line["event"] == "session_end")
+        .and_then(|line| line["reason"].as_str().map(str::to_owned))
+        .unwrap_or_default();
 
     let events = remote.keeper_events();
     assert_eq!(
@@ -202,6 +209,19 @@ fn client_gone_with_queued_bytes_reaches_the_server_then_ends() {
         "session ended with {reason:?}, expected client-gone (or server-eof from the Detach): {}",
         fail_context(&remote, &client)
     );
+    // When the in-process stop won (local reason "stopped"), unsent ring bytes are abandoned by
+    // design and the server may hang up on the Detach before END{client-gone} arrives, so the
+    // prompt end checked above is the only guarantee. Otherwise the bridge closed on the
+    // client-EOF path (or server-eof implies the server saw the Detach after the mark) and the
+    // queued bytes must have been delivered.
+    if local_reason != "stopped" {
+        assert!(
+            mosh_harness::wait_for(READY, || remote.marks().contains(&"MKfinal".to_owned())),
+            "the server never received the queued bytes (local {local_reason:?}, keeper {reason:?}): marks {:?}: {}",
+            remote.marks(),
+            fail_context(&remote, &client)
+        );
+    }
     let ended = events[end_index]["ms"].as_u64().unwrap();
     let before = events[..end_index]
         .iter()
