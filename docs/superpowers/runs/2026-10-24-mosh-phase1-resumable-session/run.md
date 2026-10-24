@@ -14,3 +14,4 @@ base: mosh
 
 approvals:
 - top-split · auto · mosh-dqw.1 LEAF, mosh-dqw.2 LEAF, mosh-dqw.3 LEAF, mosh-dqw.4 LEAF, mosh-dqw.5 LEAF, mosh-dqw.6 LEAF, mosh-dqw.7 LEAF, mosh-dqw.8 LEAF, mosh-dqw.9 LEAF, mosh-dqw.10 LEAF
+- coverage-round-1 · canonical R-list: R1..R15 in coverage-round-1-requirements.md (+R16-R18 from r-new) · requirements: 15 · mapped: 14 · unmapped: 3 (R2, R10, R11) · auto flag-sweep mosh-dqw.2/.3/.8 → kept; auto GAP R2,R3,R9,R10,R11,R12 → applied (summary lines; scope already in bead bodies); auto UNOWNED-SEAM keeper rendezvous → owner mosh-dqw.1 (+spec lock fix); auto UNOWNED-SEAM argv flags/capability/MoshConfig → consumes lines; auto UNOWNED-SEAM link-frame format → owner mosh-dqw.2, edge mosh-dqw.5<-mosh-dqw.2; auto rejected OutageState, Leg-keeper, .8 breadth

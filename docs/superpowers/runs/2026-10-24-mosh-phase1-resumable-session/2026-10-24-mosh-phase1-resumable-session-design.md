@@ -58,7 +58,7 @@ leg: ssh child (src/mosh/ssh_leg.rs) ──► sshd ──► `herdr [--session 
 
 | Unit (new file) | Owns | Does not own |
 |---|---|---|
-| `src/mosh/mod.rs` | Public fork API: `start_ui_bridge`, `pub(in crate::remote)`. Constants: `STATUS_CAPABILITY = "x-mosh-resume-bridge-v1"`, the flags `--x-mosh-session-v1` / `--x-mosh-keeper-v1`, `LINK_KIND = "x-mosh.link.v1"`. Env knobs: `HERDR_MOSH_RESUME=0` kill switch; `HERDR_MOSH_GRACE` (seconds, default 60, clamped 5..=3600) | Any I/O |
+| `src/mosh/mod.rs` | Public fork API: `start_ui_bridge`, `pub(in crate::remote)`. Constants: `STATUS_CAPABILITY = "x-mosh-resume-bridge-v1"`, the flags `--x-mosh-session-v1` / `--x-mosh-keeper-v1` (`LINK_KIND` lives in `src/mosh/outage.rs`; fork code refers to `crate::client::mosh_outage::LINK_KIND`). Env knobs: `HERDR_MOSH_RESUME=0` kill switch; `HERDR_MOSH_GRACE` (seconds, default 60, clamped 5..=3600) | Any I/O |
 | `src/mosh/session.rs` | The session wire protocol (below), the per-direction offset and ack state machine, and hello/welcome negotiation. Pure: it operates on buffers, no sockets | Leg lifecycle, rings' storage policy |
 | `src/mosh/ring.rs` | A bounded replay ring keyed by absolute byte offset: `push`, `ack(offset)`, `replay_from(offset)`. Overflow is reported, never silently dropped | What to do on overflow (the caller decides) |
 | `src/mosh/link_frames.rs` | Splitting the herdr frame stream into whole frames (u32-LE length prefix, `wire.rs:1647-1715` framing; frames over `MAX_GRAPHICS_FRAME_SIZE` are a protocol error that ends the session); encoding injected `x-mosh.link.v1` frames with the existing `crate::protocol` frame writer | Status semantics |
@@ -169,7 +169,15 @@ If a remote binary is downgraded after the probe, it rejects `--x-mosh-session-v
 
 ### Keeper (`remote/keeper.rs`)
 
-**Socket path and lock.** `mosh::keeper_socket_path(session)` (scaffold-owned) and its sibling lock file `<socket>.lock` are the single definition both the attacher and the keeper use. The attacher first tries to connect. On `ENOENT` or `ECONNREFUSED` it takes an exclusive `flock` on the lock file, retries the connect, and if that still fails it unlinks any stale socket file and spawns the keeper. It waits up to 5 s for the socket, still holding the lock, then connects. The keeper binds while holding the same lock (non-blocking: if another live keeper holds it, the new one exits). A crashed keeper's stale socket is therefore always recovered.
+**Rendezvous (socket path and locks).** `mosh::keeper_socket_path(session)` and two sibling lock files are the single definition both the attacher and the keeper use, owned by the scaffold:
+- `<socket>.live`: the keeper holds an exclusive `flock` on it for its whole lifetime. A second keeper that cannot take it non-blocking exits at once.
+- `<socket>.spawn`: an attacher holds it while it checks for and spawns a keeper.
+
+The attacher first tries to connect. On `ENOENT` or `ECONNREFUSED` it takes the spawn lock and retries the connect. If that fails, it tries a non-blocking `flock` on the live lock:
+- If it acquires the live lock, no keeper is alive. It unlinks any stale socket file, releases the live lock, spawns the keeper, waits up to 5 s for the socket and connects.
+- If it cannot acquire the live lock, a keeper is alive but not yet listening. It retries the connect for up to 5 s.
+
+The attacher then releases the spawn lock. A crashed keeper's stale socket is therefore always recovered, and two attachers never spawn two keepers.
 
 **Spawn.** The attacher spawns the keeper when no live keeper answers: `current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1`, via `detach_server_daemon_command` plus a plain `spawn` (not the launchd path; `launchd_spawn.rs:31-36`), with `env_remove("SSH_AUTH_SOCK")`. Concurrent attachers are serialised by the lock above.
 
@@ -189,7 +197,7 @@ If a remote binary is downgraded after the probe, it rejects `--x-mosh-session-v
 
 ### Outage banner (D5)
 
-**Mount.** `client/mod.rs` gains `#[path = "../mosh/outage.rs"] pub(crate) mod mosh_outage; // mosh-fork hook`, so `src/mosh/outage.rs` is the one source of `LinkStatus`. The bridge side encodes with `crate::client::mosh_outage::LinkStatus`; the crate-root `client` module is private, so its `pub(crate)` items are reachable crate-wide.
+**Mount.** `client/mod.rs` gains `#[path = "../mosh/outage.rs"] pub(crate) mod mosh_outage; // mosh-fork hook`, so `src/mosh/outage.rs` is the one source of `LinkStatus` and of `LINK_KIND = "x-mosh.link.v1"`. The client-side module must define the kind, because the remote-side `mosh` tree is `pub(in crate::remote)` and not visible to `client`. The bridge side encodes with `crate::client::mosh_outage::LinkStatus`; the crate-root `client` module is private, so its `pub(crate)` items are reachable crate-wide.
 
 **Hook 1, `client/mod.rs` `EndpointControl` arm** (top of the arm, l.~2093). A single `if crate::client::mosh_outage::observe(&endpoint_id, &kind, &data) { <request repaint as the arm's other UI-affecting branches do>; continue; } // mosh-fork hook`. It returns `true` only for `LINK_KIND`, which keeps it out of `decode_endpoint_control`.
 

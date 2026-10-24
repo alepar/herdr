@@ -13,3 +13,6 @@ R12 capability-less remote, kill switch, or Windows remote behaves byte-identica
 R13 reconnect legs bypass the ControlMaster and run BatchMode; fatal ssh failures stop retrying
 R14 upstream diff limited to the touch list (~11 tagged hook lines), no Cargo/wire changes, diff-budget script passes
 R15 fork builds can override update manifest URLs so auto-update does not replace a fork build
+R16 the remote keeper is started on demand on first attach, reachable by later attaches, and a stale keeper socket is recovered
+R17 an idle but healthy link is not declared dead (heartbeats keep quiet legs alive)
+R18 grace and stall thresholds come from a single configuration source both ends read
