@@ -29,3 +29,16 @@ C28 · r2 · UNOWNED-SEAM · link-frame injection encoding · applied — consum
 C29 · r2 · UNOWNED-SEAM · mosh module tree for .2/.3 · rejected — .2's outage.rs is mounted from client/mod.rs, .3 has no src/mosh code; no exchange with .1's tree
 C30 · r2 · UNOWNED-SEAM · MoshConfig test override · applied — HERDR_MOSH_GRACE=5 (clamp min) in spec; .9 consumes MoshConfig
 C31 · r2 · ORPHAN · mosh-dqw.3 · applied — root goal gains the self-update outcome it serves (non-interactive: reviewer's add-goal-element fix)
+C32 · amend-design-1 · UNOWNED-SEAM · capability string ownership · applied — mosh-dqw.1 owns string+placement; mosh-dqw.10 owns only the emitting hook (no .6→.10 edge needed: .6 consumes .1)
+C33 · amend-design-1 · UNOWNED-SEAM · leg argv flags · applied — mosh-dqw.1 owns flag constants explicitly (.6/.10 already consume mosh constants)
+C34 · amend-design-1 · UNOWNED-SEAM · END reason vocabulary / HELLO fields · applied — mosh-dqw.4 owns END reasons and reactions; .7/.8 consume SessionMsg
+C35 · amend-design-1 · UNOWNED-SEAM · pure-pipe rule · applied — consumes lines on .7/.10
+C36 · amend-design-1 · GAP · R15 release wiring · rejected — publishing a fork manifest / CI release config is operational follow-on beyond merge (goal says a fork build *can* point self-update; .3 delivers that); build-with-override check added to .11
+C37 · amend-design-1 · GAP · ring overflow during outage · applied — e2e overflow case in mosh-dqw.9 (spec §Ring caps point 4 already defines END → outcome b)
+C38 · amend-design-1 · GAP · R6 last-contact source · applied — last-inbound-time accessor owned by .4, consumed by .8
+C39 · amend-design-1 · GAP/SEAM · hook tag/budget per leaf · rejected — ledger C24; tag rule is a Global Constraint, the hook count is unchanged at 11 by the amendment, the sweep (.11) and the code roast audit the combined branch; per-leaf edges onto .3 would serialise the tree for no gain
+C40 · amend-design-1 · GAP · fork code outside src/mosh · rejected — evidence does not hold: outage.rs is src/mosh/outage.rs (mounted from client/mod.rs by a tagged hook); .3's update.rs change is a tagged one-statement hook
+C41 · amend-design-1 · GAP · R2 health mechanism · rejected — spec §Local bridge "Health margin" names client/endpoint/health.rs (in the client process; any inbound message counts), which injected frames satisfy; .9 pins it
+C42 · amend-design-1 · GAP · cross-version interop · applied — already in spec rule 8 + Per-HELLO `v` mismatch → END{protocol-version} → leg-0 plain fallback; R20 appended, .9 case added
+C43 · amend-design-1 · GAP · R14/R15/R18 combined-branch checks · applied — added to mosh-dqw.11 acceptance
+C44 · amend-design-1 · GAP · R18 MoshConfig field scope · applied — .1 marks every MoshConfig field local-only; .7 acceptance tests HELLO grace wins over remote env

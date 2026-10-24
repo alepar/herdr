@@ -17,3 +17,4 @@ R16 the remote keeper is started on demand on first attach, reachable by later a
 R17 an idle but healthy link is not declared dead (heartbeats keep quiet legs alive)
 R18 grace and stall thresholds come from a single configuration source both ends read
 R19 the remote keeper exits on its own once it holds no sessions (no resident daemon left behind)
+R20 local and remote fork builds with different session-protocol versions fall back to the plain bridge instead of misbehaving
