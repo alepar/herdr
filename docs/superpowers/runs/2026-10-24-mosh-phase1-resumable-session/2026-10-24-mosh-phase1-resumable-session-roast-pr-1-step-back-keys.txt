@@ -1,0 +1,24 @@
+r1 [Should-fix] src/mosh/mod.rs:153
+r1 [Should-fix] src/mosh/session.rs:507
+r1 [Should-fix] src/mosh/local_bridge.rs:986
+r1 [Nit] src/mosh/local_bridge.rs:1096
+r1 [Nit] src/mosh/local_bridge.rs:1065
+r1 [Nit] src/mosh/local_bridge.rs:1084; src/mosh/local_bridge.rs:1086
+r1 [Nit] src/mosh/remote/keeper.rs:568
+r1 [Nit] src/mosh/remote/keeper.rs:198
+r1 [Should-fix] src/mosh/remote/keeper.rs:1202; src/mosh/remote/keeper.rs:1195
+r1 [Nit] src/mosh/local_bridge.rs:1899
+r1 [Should-fix] src/mosh/remote/attacher.rs:430
+r1 [Should-fix] tests/mosh_fallback.rs:156
+r1 [Should-fix] tests/mosh_harness.rs:479
+r1 [Should-fix] src/mosh/session.rs:1581
+r1 [Should-fix] src/mosh/ssh_leg.rs:649
+r1 [Should-fix] tests/mosh_harness.rs:276
+r1 [Should-fix] src/mosh/local_bridge.rs:2036
+r1 [Nit] tests/mosh_resume.rs:118
+r1 [Must-fix] src/mosh/mod.rs start_ui_bridge — saved-machine resume path drops --idle-timeout-v1 (tests/client_mode.rs federated test)
+r1 [Must-fix] task-11-report.md:49 — end-of-run regression comparison must use run-start baseline dec51b74, not 992f6a45
+r1 [Must-fix] src/mosh/session.rs:494-574 — on_leg_bytes advances recv_offset then drops Deliver events on a later protocol error
+r1 [Must-fix] src/mosh/local_bridge.rs:970-988 — leg_dead never re-queues a consumed session-final END
+r1 [Must-fix] src/mosh/remote/keeper.rs:1195 — server_eof_forwards_remaining_bytes_then_end flakes (final ACK not flushed)
+r1 [Must-fix] design spec Post-Implementation Notes — undocumented divergences (keeper exact-16-MiB backpressure, replayed_down null, reconnect-leg spawn failure Fatal, graceful quit final-ACK race)

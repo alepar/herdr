@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-24-mosh-phase1-resumable-session
 
 flags: planOneShot=true skipPlanRoast=false skipCodeRoast=false autonomous=true
-phase: roast-code
+phase: fix-loop
 codeMechanism: Workflow
 runTag: mosh-phase1-resumable-session-20261024T052906
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -12,6 +12,8 @@ epic: mosh-dqw
 roastDesignRound: 2
 roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-design-2.md
 roastCodeRound: 1
+roast-code: 2026-10-24-mosh-phase1-resumable-session-roast-pr-1.md
+findingsLedger: findings-ledger.md
 findingsLedgerDesign: findings-ledger-design.md
 redesignCycles-design: 1
 redesign-design-1: round 1 · triggers shared-cause, defect-type · amended §Architecture, §Components and responsibilities, §Session wire protocol, §Ring caps and drain policy, §Local bridge behaviour, §Legs, §Discovery and fallback, §Keeper, §Decision points, §Error handling summary, §Testing, §Acceptance criteria, §Key abstractions · lastGood 0a065435 · designRoast - · state applied
