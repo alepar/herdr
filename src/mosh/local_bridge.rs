@@ -40,8 +40,6 @@ const STOP_END_FLUSH: Duration = Duration::from_millis(500);
 /// After a ring overflow the client is already closed; the keeper is told on the next leg, but
 /// only for this long.
 const OVERFLOW_END_LINGER: Duration = Duration::from_secs(5);
-/// Best-effort final ack after the keeper's server-eof, so it can drop its parked session.
-const FINAL_ACK_FLUSH: Duration = Duration::from_millis(200);
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
 
@@ -249,6 +247,7 @@ fn serve_connection(
         client_idle: false,
         end_deadline: None,
         end_flush: None,
+        stop_deadline: None,
         peek: Decoder::default(),
         peer_recv_offset: None,
         dial_thread: None,
@@ -314,6 +313,8 @@ struct LegIo {
     sent: u64,
     /// A message the writer queue had no room for.
     pending: Option<Vec<u8>>,
+    /// The leg reader thread has exited (the far end closed, or the child died).
+    reader_done: Arc<AtomicBool>,
 }
 
 struct ClientIo {
@@ -361,6 +362,8 @@ struct Conn<'a> {
     end_deadline: Option<Instant>,
     /// (leg writer message count that includes the final END, flush deadline)
     end_flush: Option<(u64, Instant)>,
+    /// The stop budget set by `on_stop`; teardown reuses what remains of it.
+    stop_deadline: Option<Instant>,
     /// Pre-WELCOME copy of the inbound bytes, only to learn WELCOME's `recv_offset` for tracing.
     peek: Decoder,
     peer_recv_offset: Option<u64>,
@@ -466,6 +469,8 @@ impl Conn<'_> {
         self.leg_gen += 1;
         let gen = self.leg_gen;
         let events = self.tx.clone();
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader_flag = Arc::clone(&reader_done);
         thread::spawn(move || {
             let mut buf = vec![0u8; MAX_DATA_CHUNK];
             loop {
@@ -489,6 +494,7 @@ impl Conn<'_> {
                     }
                 }
             }
+            reader_flag.store(true, Ordering::Release);
         });
         let (leg_tx, leg_rx) = mpsc::sync_channel::<Vec<u8>>(4);
         let flushed = Arc::new(AtomicU64::new(0));
@@ -519,6 +525,7 @@ impl Conn<'_> {
             flushed,
             sent: 1,
             pending: None,
+            reader_done,
         });
         self.stage = Stage::Welcome;
     }
@@ -528,6 +535,25 @@ impl Conn<'_> {
         let LegIo { leg, tx, .. } = self.leg.take()?;
         drop(tx);
         Some(leg.finish(kill))
+    }
+
+    /// Graceful leg close: the writer drains what is queued and drops ssh's stdin (EOF), then
+    /// we give the child until `deadline` to hang up before it is killed.
+    fn close_leg(&mut self, deadline: Instant) {
+        let Some(LegIo {
+            leg,
+            tx,
+            reader_done,
+            ..
+        }) = self.leg.take()
+        else {
+            return;
+        };
+        drop(tx);
+        while !reader_done.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        leg.finish(true);
     }
 
     /// The leg ended before `WELCOME` (explicit END, EOF, protocol error or the bound).
@@ -998,6 +1024,7 @@ impl Conn<'_> {
         let live = self.stage == Stage::Linked && self.endpoint.is_up();
         if live {
             let deadline = Instant::now() + STOP_END_FLUSH;
+            self.stop_deadline = Some(deadline);
             let end = self.endpoint.end_now(end_reason::CLIENT_GONE);
             if let Some(io) = &mut self.leg {
                 io.pending = None;
@@ -1048,7 +1075,9 @@ impl Conn<'_> {
                 };
             }
             Done::Stopped => {
-                self.close_client(false);
+                let deadline = self.stop_deadline.unwrap_or_else(Instant::now);
+                self.close_client(false, deadline);
+                self.close_leg(deadline);
                 Ok(())
             }
             Done::Close {
@@ -1058,10 +1087,14 @@ impl Conn<'_> {
             } => {
                 self.trace
                     .emit("session_end", serde_json::json!({ "reason": reason }));
-                self.close_client(true);
+                let deadline = Instant::now() + STOP_END_FLUSH;
+                // The final ACK goes first: a `--remote` client may exit as soon as its
+                // stream closes.
                 if final_ack {
-                    self.final_ack();
+                    self.final_ack(deadline);
                 }
+                self.close_client(true, deadline);
+                self.close_leg(deadline);
                 match error {
                     Some(err) => Err(err),
                     None => Ok(()),
@@ -1080,14 +1113,17 @@ impl Conn<'_> {
     }
 
     /// Close the client socket. Graceful: behind every queued frame, unless stopped meanwhile.
-    fn close_client(&mut self, graceful: bool) {
+    fn close_client(&mut self, graceful: bool, deadline: Instant) {
         let Some(client) = self.client.take() else {
             self.stream = None;
             return;
         };
         if graceful {
             let _ = client.out_tx.send(ClientOut::Close);
-            while !client.writer.is_finished() && !self.stop.load(Ordering::Acquire) {
+            while !client.writer.is_finished()
+                && !self.stop.load(Ordering::Acquire)
+                && Instant::now() < deadline
+            {
                 thread::sleep(Duration::from_millis(5));
             }
         }
@@ -1099,23 +1135,32 @@ impl Conn<'_> {
     }
 
     /// Tell the keeper everything delivered was written, so it can drop its server-eof session.
-    fn final_ack(&mut self) {
+    /// The ACK is unconditional; the session is over, so nothing can be replayed.
+    fn final_ack(&mut self, deadline: Instant) {
         if !self.endpoint.is_up() {
             return;
         }
-        let now = Instant::now();
-        self.endpoint.delivered(now, self.endpoint.recv_offset());
+        self.endpoint
+            .delivered(Instant::now(), self.endpoint.recv_offset());
+        let Some(ack) = self.endpoint.ack_now() else {
+            return;
+        };
         let Some(io) = &mut self.leg else { return };
-        let mut last = io.sent;
-        while let Some(message) = self.endpoint.poll_send(now) {
-            if io.tx.try_send(message).is_err() {
-                break;
+        let mut message = ack;
+        loop {
+            match io.tx.try_send(message) {
+                Ok(()) => {
+                    io.sent += 1;
+                    break;
+                }
+                Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                    message = back;
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => return,
             }
-            io.sent += 1;
-            last = io.sent;
         }
-        let deadline = Instant::now() + FINAL_ACK_FLUSH;
-        while io.flushed.load(Ordering::Acquire) < last && Instant::now() < deadline {
+        while io.flushed.load(Ordering::Acquire) < io.sent && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(2));
         }
     }
@@ -1326,6 +1371,9 @@ mod tests {
         welcome_delay: Duration,
         /// Write this many bytes on the leg, then cut it.
         kill_after: Option<usize>,
+        /// Decode the session-final END but do not record it, then cut the leg: a leg that
+        /// died after the bridge wrote the END.
+        swallow_end: bool,
     }
 
     impl KLeg {
@@ -1334,10 +1382,15 @@ mod tests {
                 answer,
                 welcome_delay: Duration::ZERO,
                 kill_after: None,
+                swallow_end: false,
             }
         }
         fn delay(mut self, delay: Duration) -> KLeg {
             self.welcome_delay = delay;
+            self
+        }
+        fn swallow_end(mut self) -> KLeg {
+            self.swallow_end = true;
             self
         }
         fn kill_after(mut self, bytes: usize) -> KLeg {
@@ -1523,6 +1576,7 @@ mod tests {
                             for event in events {
                                 match event {
                                     SessionEvent::Deliver(bytes) => st.upstream.extend(bytes),
+                                    SessionEvent::PeerEnd(_) if script.swallow_end => eof = true,
                                     SessionEvent::PeerEnd(reason) => {
                                         let len = st.upstream.len();
                                         st.upstream_at_end = Some(len);
@@ -2206,6 +2260,23 @@ mod tests {
         let took = harness.shutdown();
         assert!(took < Duration::from_millis(700), "{took:?}");
         wait_until("END", WAIT, || keeper.ends() == [end_reason::CLIENT_GONE]);
+    }
+
+    #[test]
+    fn final_end_lost_with_leg_is_resent_on_resume() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New).swallow_end());
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        let mut harness = Harness::start(&dialer, secs(30));
+        let mut client = harness.connect();
+        client.write(b"hello");
+        client.close();
+        wait_until("END resent on the resumed leg", WAIT, || {
+            keeper.ends() == [end_reason::CLIENT_GONE]
+        });
+        assert_eq!(keeper.hellos().len(), 2, "the END needed a second leg");
+        assert_eq!(keeper.upstream(), b"hello");
+        harness.shutdown();
     }
 
     #[test]

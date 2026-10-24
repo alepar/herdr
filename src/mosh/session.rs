@@ -367,7 +367,10 @@ pub(super) struct SessionEndpoint {
     ack_pending_since: Option<Instant>,
     phase: LinkPhase,
     decoder: Decoder,
+    /// Retained session state: re-sent on every leg until the session is removed.
     final_end: Option<String>,
+    /// The final END was emitted on the current leg.
+    final_end_sent: bool,
     established: bool,
     last_contact: Option<Instant>,
     grace_ms: u32,
@@ -387,6 +390,7 @@ impl SessionEndpoint {
             phase: LinkPhase::Down,
             decoder: Decoder::default(),
             final_end: None,
+            final_end_sent: false,
             established: false,
             last_contact: None,
             grace_ms: 0,
@@ -499,6 +503,7 @@ impl SessionEndpoint {
     }
 
     fn set_up(&mut self, now: Instant) {
+        self.final_end_sent = false;
         self.phase = LinkPhase::Up {
             last_inbound: now,
             last_heartbeat: now,
@@ -613,8 +618,10 @@ impl SessionEndpoint {
         }
     }
 
-    /// The leg is gone: rewind to the ring start, drop partial input. A queued session-final END is kept.
+    /// The leg is gone: rewind to the ring start, drop partial input. A session-final END, queued or already emitted,
+    /// is re-sent on the next leg.
     pub fn leg_down(&mut self) {
+        self.final_end_sent = false;
         self.phase = LinkPhase::Down;
         self.send_next = self.ring.start_offset();
         self.decoder = Decoder::default();
@@ -703,14 +710,26 @@ impl SessionEndpoint {
             }
             return None;
         }
-        self.final_end
-            .take()
-            .map(|reason| self.end_now(&reason))
+        if !self.final_end_sent {
+            if let Some(reason) = &self.final_end {
+                self.final_end_sent = true;
+                return Some(self.end_now(reason));
+            }
+        }
+        None
     }
 
-    /// A session-final END, sent after every ring byte has been sent.
+    /// An ACK for everything delivered, sent now regardless of the ack timer. `None` while no
+    /// leg is up.
+    pub fn ack_now(&mut self) -> Option<Vec<u8>> {
+        self.is_up().then(|| self.take_ack())
+    }
+
+    /// A session-final END, sent after every ring byte has been sent. The first reason wins.
     pub fn queue_final_end(&mut self, reason: &str) {
-        self.final_end = Some(reason.to_string());
+        if self.final_end.is_none() {
+            self.final_end = Some(reason.to_string());
+        }
     }
 
     pub fn poll_timers(&self, now: Instant) -> Option<LinkVerdict> {
@@ -1368,6 +1387,52 @@ mod tests {
         let msgs = drain(&mut p.local, now);
         assert_eq!(data_bytes(&msgs), 100 * 1024);
         assert!(matches!(msgs.last(), Some(SessionMsg::End(_))));
+    }
+
+    #[test]
+    fn final_end_taken_then_leg_down_is_resent_after_replay() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        push_chunks(&mut p.local, 100 * 1024);
+        p.local.queue_final_end(end_reason::CLIENT_GONE);
+        let now = p.now;
+        let first = drain(&mut p.local, now);
+        assert!(matches!(first.last(), Some(SessionMsg::End(_))));
+        p.leg_down();
+        p.connect();
+        let now = p.now;
+        let msgs = drain(&mut p.local, now);
+        assert_eq!(data_bytes(&msgs), 100 * 1024);
+        assert!(matches!(msgs.last(), Some(SessionMsg::End(e)) if e.reason == "client-gone"));
+    }
+
+    #[test]
+    fn final_end_emitted_once_per_leg() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        p.local.queue_final_end(end_reason::CLIENT_GONE);
+        // A later reason must not overwrite the first.
+        p.local.queue_final_end(end_reason::SERVER_EOF);
+        let now = p.now;
+        let msgs = drain(&mut p.local, now);
+        assert!(matches!(msgs.last(), Some(SessionMsg::End(e)) if e.reason == "client-gone"));
+        assert!(p.local.poll_send(now).is_none());
+        assert!(p.local.poll_send(now + secs(1)).is_none());
+    }
+
+    #[test]
+    fn ack_now_bypasses_ack_timer() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let now = p.now;
+        let data = SessionMsg::Data { offset: 0, bytes: vec![7; 100] }.encode();
+        p.local.on_leg_bytes(now, &data).unwrap();
+        let off = p.local.recv_offset();
+        p.local.delivered(now, off);
+        assert!(p.local.poll_send(now).is_none());
+        assert_eq!(p.local.ack_now(), Some(SessionMsg::Ack(100).encode()));
+        p.local.leg_down();
+        assert_eq!(p.local.ack_now(), None);
     }
 
     // ---- timers ----

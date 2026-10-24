@@ -149,10 +149,16 @@ impl Shared {
         if session.leg.as_ref().map(|leg| leg.id) != Some(id) {
             return;
         }
+        if session.eof && session.end_sent && session.endpoint.fully_acked() {
+            // The local end acked everything and hung up before the next timer pass.
+            self.remove_session(table, token, end_reason::SERVER_EOF);
+            return;
+        }
         if let Some(leg) = session.leg.take() {
             let _ = leg.stream.shutdown(Shutdown::Both);
         }
         session.endpoint.leg_down();
+        session.end_sent = false;
         session.grace_deadline = Some(Instant::now() + session.grace);
         self.trace("leg_down", token, json!({"reason": reason}));
         self.kick.notify_all();
@@ -258,6 +264,7 @@ fn run_timers(shared: &Shared, table: &mut Table, now: Instant) {
                 let _ = leg.stream.shutdown(Shutdown::Both);
             }
             session.endpoint.leg_down();
+            session.end_sent = false;
             session.grace_deadline = Some(now + session.grace);
             shared.trace("leg_down", token, json!({"reason": "silence"}));
             shared.kick.notify_all();
@@ -428,6 +435,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
                 shared.trace("leg_down", token, json!({"reason": "stolen"}));
             }
             session.endpoint.leg_down();
+            session.end_sent = false;
             session.grace = Duration::from_millis(u64::from(hello.grace_ms));
             session.grace_deadline = None;
             let replayed_down = session.endpoint.outbound_end().saturating_sub(hello.recv_offset);
@@ -443,7 +451,8 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
                 }
             };
             if session.eof {
-                // The END may have been lost with the previous leg.
+                // The endpoint retains the END and re-sends it on this leg; the queue is a no-op
+                // unless the session is new.
                 session.end_sent = false;
                 session.endpoint.queue_final_end(end_reason::SERVER_EOF);
             }
@@ -540,7 +549,7 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
 /// Writes whatever the endpoint wants sent on leg `id` until the leg is replaced or gone.
 fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
     loop {
-        let message = {
+        let (message, is_final) = {
             let mut table = shared.lock();
             loop {
                 let Some(session) = table.sessions.get_mut(&token) else {
@@ -551,10 +560,8 @@ fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
                 }
                 let now = Instant::now();
                 if let Some(message) = session.endpoint.poll_send(now) {
-                    if is_end(&message) {
-                        session.end_sent = true;
-                    }
-                    break message;
+                    let is_final = is_end(&message);
+                    break (message, is_final);
                 }
                 let wait = session
                     .endpoint
@@ -571,6 +578,15 @@ fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
         if stream.write_all(&message).is_err() {
             let _ = stream.shutdown(Shutdown::Both);
             return;
+        }
+        if is_final {
+            // Sent only once the write succeeded, and only if this is still the live leg.
+            let mut table = shared.lock();
+            if let Some(session) = table.sessions.get_mut(&token) {
+                if session.leg.as_ref().map(|leg| leg.id) == Some(id) {
+                    session.end_sent = true;
+                }
+            }
         }
     }
 }
@@ -987,7 +1003,15 @@ mod tests {
                                 }
                                 SessionEvent::Welcomed(status) => self.status = Some(status),
                                 SessionEvent::ResumeRefused => self.refused = true,
-                                SessionEvent::PeerEnd(reason) => self.ended = Some(reason),
+                                SessionEvent::PeerEnd(reason) => {
+                                    if reason == end_reason::SERVER_EOF {
+                                        // Mirror the product's final ACK on server-eof.
+                                        let _ = self.stream.write_all(
+                                            &self.endpoint.ack_now().unwrap_or_default(),
+                                        );
+                                    }
+                                    self.ended = Some(reason);
+                                }
                                 SessionEvent::Hello(_) => panic!("keeper sent HELLO"),
                             }
                         }
@@ -1205,8 +1229,13 @@ mod tests {
         conn.close_write();
         local.wait_end(end_reason::SERVER_EOF);
         assert_eq!(local.received, data);
-        // The keeper never saw frames: arbitrary bytes pass through untouched.
-        h.wait_trace("session_end", "", "");
+        // The keeper never saw frames: arbitrary bytes pass through untouched. Keep pumping so
+        // the local end's final ACK is read and written.
+        assert!(
+            local.wait(Duration::from_secs(5), |_| h.trace_has("session_end", "", "")),
+            "no session_end; trace {:?}",
+            h.trace()
+        );
     }
 
     #[test]
