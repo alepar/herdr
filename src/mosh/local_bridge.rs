@@ -247,6 +247,7 @@ fn serve_connection(
         down: None,
         frames_end: 0,
         client_closed: false,
+        client_eof_seen: false,
         client_idle: false,
         end_deadline: None,
         closing: None,
@@ -368,6 +369,15 @@ struct LegIo {
     pending: Option<Vec<u8>>,
     /// The leg reader thread has exited (the far end closed, or the child died).
     reader_done: Arc<AtomicBool>,
+    /// The leg writer thread has exited (a write failed, or its sender was dropped).
+    writer_done: Arc<AtomicBool>,
+}
+
+impl LegIo {
+    /// A thread that makes this leg's progress has exited, so waiting on it cannot succeed.
+    fn worker_exited(&self) -> bool {
+        self.reader_done.load(Ordering::Acquire) || self.writer_done.load(Ordering::Acquire)
+    }
 }
 
 struct ClientIo {
@@ -410,6 +420,8 @@ struct Conn<'a> {
     frames_end: u64,
     /// The client side is finished (EOF, error or overflow): nothing more is forwarded.
     client_closed: bool,
+    /// ClientEof arrived while Closing: the client will read nothing more.
+    client_eof_seen: bool,
     /// The client reader waits for a go token.
     client_idle: bool,
     end_deadline: Option<Instant>,
@@ -572,6 +584,8 @@ impl Conn<'_> {
         let (leg_tx, leg_rx) = mpsc::sync_channel::<Vec<u8>>(4);
         let flushed = Arc::new(AtomicU64::new(0));
         let writer_flushed = Arc::clone(&flushed);
+        let writer_done = Arc::new(AtomicBool::new(false));
+        let writer_flag = Arc::clone(&writer_done);
         thread::spawn(move || {
             for message in leg_rx {
                 if writer.write_all(&message).and_then(|()| writer.flush()).is_err() {
@@ -579,6 +593,7 @@ impl Conn<'_> {
                 }
                 writer_flushed.fetch_add(1, Ordering::Release);
             }
+            writer_flag.store(true, Ordering::Release);
         });
 
         let now = Instant::now();
@@ -599,6 +614,7 @@ impl Conn<'_> {
             sent: 1,
             pending: None,
             reader_done,
+            writer_done,
         });
         self.stage = Stage::Welcome;
     }
@@ -901,7 +917,11 @@ impl Conn<'_> {
     }
 
     fn on_client_eof(&mut self) {
-        if self.client_closed || self.closing.is_some() {
+        if self.client_closed {
+            return;
+        }
+        if self.closing.is_some() {
+            self.client_eof_seen = true;
             return;
         }
         self.endpoint.queue_final_end(end_reason::CLIENT_GONE);
@@ -1169,10 +1189,11 @@ impl Conn<'_> {
     /// Everything the client will ever get is written (or the client side is already closed).
     fn client_drained(&self) -> bool {
         self.client_closed
-            || self
-                .client
-                .as_ref()
-                .is_none_or(|client| client.written.load(Ordering::Acquire) >= self.frames_end)
+            || self.client_eof_seen
+            || self.client.as_ref().is_none_or(|client| {
+                client.writer.is_finished()
+                    || client.written.load(Ordering::Acquire) >= self.frames_end
+            })
     }
 
     /// Advance Closing. Each pass: a server-eof drain, the hand-off of the owed END/ACK, the
@@ -1184,7 +1205,7 @@ impl Conn<'_> {
             let dead = self
                 .leg
                 .as_ref()
-                .is_some_and(|io| io.reader_done.load(Ordering::Acquire))
+                .is_some_and(LegIo::worker_exited)
                 || self.endpoint.poll_timers(now) == Some(LinkVerdict::Silence);
             if dead && self.leg.is_some() {
                 self.reap_leg();
@@ -1240,7 +1261,8 @@ impl Conn<'_> {
         if !leg_done {
             match &self.leg {
                 None => leg_done = true,
-                Some(io) if io.reader_done.load(Ordering::Acquire) => {
+                Some(io) if io.worker_exited() => {
+                    let reader_gone = io.reader_done.load(Ordering::Acquire);
                     let flushed = closing
                         .leg_target
                         .is_some_and(|target| io.flushed.load(Ordering::Acquire) >= target);
@@ -1248,7 +1270,11 @@ impl Conn<'_> {
                         // The leg died before the END write completed: not the close edge.
                         // Resume; the endpoint re-sends the retained END on the next leg.
                         self.closing = None;
-                        self.leg_dead("eof-before-end-flushed");
+                        self.leg_dead(if reader_gone {
+                            "eof-before-end-flushed"
+                        } else {
+                            "write-failed"
+                        });
                         return;
                     }
                     leg_done = true;
@@ -1527,6 +1553,13 @@ mod tests {
             self.stream.write_all(bytes).unwrap();
         }
 
+        /// The client stops reading: the bridge's writer fails with EPIPE while its reader sees
+        /// no EOF.
+        fn stop_reading(&self) {
+            let LocalStream::UdSocket(stream) = &self.stream;
+            let _ = stream.inner().shutdown(std::net::Shutdown::Read);
+        }
+
         /// EOF toward the bridge (the collector thread holds a dup of the descriptor).
         fn close(self) {
             shutdown_client(&self.stream);
@@ -1595,6 +1628,9 @@ mod tests {
         /// The leg's writer fails the session-final END write and cuts the leg, so the END never
         /// counts as flushed: the leg always dies first.
         cut_on_end_write: bool,
+        /// The leg's writer fails the session-final END write but leaves the socket open, so the
+        /// leg reader never sees EOF.
+        fail_end_write: bool,
     }
 
     impl KLeg {
@@ -1604,6 +1640,7 @@ mod tests {
                 welcome_delay: Duration::ZERO,
                 kill_after: None,
                 cut_on_end_write: false,
+                fail_end_write: false,
             }
         }
         fn delay(mut self, delay: Duration) -> KLeg {
@@ -1612,6 +1649,10 @@ mod tests {
         }
         fn cut_on_end_write(mut self) -> KLeg {
             self.cut_on_end_write = true;
+            self
+        }
+        fn fail_end_write(mut self) -> KLeg {
+            self.fail_end_write = true;
             self
         }
         fn kill_after(mut self, bytes: usize) -> KLeg {
@@ -1891,16 +1932,19 @@ mod tests {
         }
     }
 
-    /// A leg writer that fails the session-final END write and cuts the leg: the END never counts
-    /// as flushed, so the leg always dies before the bridge could close on a flushed END.
+    /// A leg writer that fails the session-final END write, and cuts the leg when `cut` is set:
+    /// the END never counts as flushed, so the bridge cannot close on a flushed END.
     struct CutOnEnd {
         inner: UnixStream,
+        cut: bool,
     }
 
     impl Write for CutOnEnd {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             if is_end_message(buf) {
-                let _ = self.inner.shutdown(std::net::Shutdown::Both);
+                if self.cut {
+                    let _ = self.inner.shutdown(std::net::Shutdown::Both);
+                }
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
             self.inner.write(buf)
@@ -1990,9 +2034,10 @@ mod tests {
                     let (local, remote) = UnixStream::pair().unwrap();
                     keeper.spawn_leg(remote, script);
                     let reader = local.try_clone().unwrap();
-                    let writer: Box<dyn Write + Send> = if script.cut_on_end_write {
+                    let writer: Box<dyn Write + Send> = if script.cut_on_end_write || script.fail_end_write {
                         Box::new(CutOnEnd {
                             inner: local.try_clone().unwrap(),
+                            cut: script.cut_on_end_write,
                         })
                     } else {
                         Box::new(local.try_clone().unwrap())
@@ -2650,6 +2695,64 @@ mod tests {
         assert_eq!(keeper.hellos().len(), 2, "the END needed a second leg");
         assert_eq!(keeper.upstream(), b"hello");
         harness.shutdown();
+    }
+
+    #[test]
+    fn end_write_failure_with_open_leg_resends_end_on_resume() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New).fail_end_write());
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        let mut harness = Harness::start(&dialer, secs(30));
+        let mut client = harness.connect();
+        client.write(b"hello");
+        client.close();
+        wait_until("END resent on the resumed leg", WAIT, || {
+            keeper.ends() == [end_reason::CLIENT_GONE]
+        });
+        assert_eq!(keeper.hellos().len(), 2, "the END needed a second leg");
+        assert_eq!(keeper.upstream(), b"hello");
+        harness.shutdown();
+    }
+
+    #[test]
+    fn client_gone_mid_server_eof_drain_closes_within_stop_budget() {
+        let trace = fresh_dir();
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        for _ in 0..20 {
+            keeper.push_down(frame_with("big", 60_000));
+        }
+        keeper.push_down(shutdown_frame());
+        keeper.queue_end(end_reason::SERVER_EOF);
+        let harness =
+            Harness::start_with(&dialer, secs(30), unused_plain(), Some(trace.clone()), None);
+        let client = Client::connect_paused(&harness.path);
+        wait_until("the keeper wrote END{server-eof}", WAIT, || {
+            keeper.st().end_written
+        });
+        let gone_at = Instant::now();
+        client.stop_reading();
+        let log = trace.join("local.jsonl");
+        wait_until("session_end traced", Duration::from_secs(3), || {
+            std::fs::read_to_string(&log).is_ok_and(|l| l.contains("\"event\":\"session_end\""))
+        });
+        assert!(
+            gone_at.elapsed() < CLOSE_BUDGET + Duration::from_secs(1),
+            "closed {:?} after the client went away",
+            gone_at.elapsed()
+        );
+        let lines = std::fs::read_to_string(&log).unwrap();
+        let end_line = lines
+            .lines()
+            .find(|l| l.contains("\"event\":\"session_end\""))
+            .unwrap();
+        assert!(end_line.contains("server-eof"), "{end_line}");
+        assert!(
+            !keeper.st().acked_all,
+            "the bridge acked frames the client never wrote"
+        );
+        drop(client);
+        let _ = std::fs::remove_dir_all(trace);
     }
 
     #[test]
