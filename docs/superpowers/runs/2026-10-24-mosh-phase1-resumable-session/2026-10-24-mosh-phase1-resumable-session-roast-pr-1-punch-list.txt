@@ -1,0 +1,9 @@
+[Nit] src/mosh/local_bridge.rs:1096
+[Nit] src/mosh/local_bridge.rs:1065
+[Nit] src/mosh/local_bridge.rs:1084; src/mosh/local_bridge.rs:1086
+[Nit] src/mosh/remote/keeper.rs:568
+[Nit] src/mosh/remote/keeper.rs:198
+[Nit] src/mosh/local_bridge.rs:1899
+[Should-fix] tests/mosh_fallback.rs:156
+[Should-fix] tests/mosh_harness.rs:479
+[Should-fix] tests/mosh_harness.rs:276
