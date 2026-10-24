@@ -159,11 +159,19 @@ They are detected from `reported_failure()` plus the ssh exit status and stderr.
 3. If the selected binary lacks it, walk `remote_binary_candidates` for one that has both the capability and `supports_endpoint_requirement` (`attach.rs:1519-1540`, `1588-1593`). If none qualifies, use the plain bridge. For `--remote`, print one hint line naming `HERDR_REMOTE_BINARY`.
 4. Return an `SshStdioBridge` struct literal that owns the local-bridge thread, its `should_stop` and a `failure_tx`, so `reported_failure()` and `Drop` keep their semantics (`attach.rs:2996-3002`, `3101-3120`).
 
-If a remote binary is downgraded after the probe, it rejects `--x-mosh-session-v1` with "unsupported remote client bridge option". The leg then falls back to the plain bridge once for that session.
+If a remote binary is downgraded after the probe, it rejects `--x-mosh-session-v1` with "unsupported remote client bridge option" (`LegError::Unsupported`):
+- **On leg 0**, before any byte has reached the client, that connection is served by upstream's plain `bridge_connection` instead.
+- **On a reconnect leg**, the client has already handshaken through the keeper, and splicing in a fresh server connection would desync it. The session therefore ends (outcome (b)).
+
+**Leg-0 failures.** A leg-0 failure of any class, before a session exists, keeps today's semantics: no retry. The failure goes to `failure_tx` and the client socket is closed, as when today's single ssh child fails. Retry and the give-up deadline apply only after the first successful `WELCOME new`.
+
+**Fatal classification on leg 0 for `--remote`** uses only `reported_failure()` and the exit status, because stderr is inherited by the terminal. Reconnect legs pipe stderr and classify from it too.
 
 ### Keeper (`remote/keeper.rs`)
 
-**Spawn.** The attacher spawns the keeper when its socket is absent: `current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1`, via `detach_server_daemon_command` plus a plain `spawn` (not the launchd path; `launchd_spawn.rs:31-36`), with `env_remove("SSH_AUTH_SOCK")`. A spawn race between two attachers is resolved by bind failure: the loser connects to the winner.
+**Socket path and lock.** `mosh::keeper_socket_path(session)` (scaffold-owned) and its sibling lock file `<socket>.lock` are the single definition both the attacher and the keeper use. The attacher first tries to connect. On `ENOENT` or `ECONNREFUSED` it takes an exclusive `flock` on the lock file, retries the connect, and if that still fails it unlinks any stale socket file and spawns the keeper. It waits up to 5 s for the socket, still holding the lock, then connects. The keeper binds while holding the same lock (non-blocking: if another live keeper holds it, the new one exits). A crashed keeper's stale socket is therefore always recovered.
+
+**Spawn.** The attacher spawns the keeper when no live keeper answers: `current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1`, via `detach_server_daemon_command` plus a plain `spawn` (not the launchd path; `launchd_spawn.rs:31-36`), with `env_remove("SSH_AUTH_SOCK")`. Concurrent attachers are serialised by the lock above.
 
 **Socket.** `crate::platform::remote_bridge_endpoint_path(...)` with a short hashed name over (uid, session, session-protocol version, build id), mode 0600. Version skew therefore never pairs incompatible peers.
 
@@ -186,9 +194,9 @@ If a remote binary is downgraded after the probe, it rejects `--x-mosh-session-v
 **Hook 1, `client/mod.rs` `EndpointControl` arm** (top of the arm, l.~2093). A single `if crate::client::mosh_outage::observe(&endpoint_id, &kind, &data) { <request repaint as the arm's other UI-affecting branches do>; continue; } // mosh-fork hook`. It returns `true` only for `LINK_KIND`, which keeps it out of `decode_endpoint_control`.
 
 **Hook 2, `client/shell/composition.rs`** (in `compose`, after the endpoint-status block and before `compose_graphics`, l.~719). `crate::client::mosh_outage::paint(&mut frame, &self.active_endpoint_id); // mosh-fork hook`.
-- It paints a single-row banner `⚠ <remote> unreachable — last contact <N>s ago, resuming…` on the top row of the frame, inverse video, truncated to width.
+- The hook passes the display name: `crate::client::mosh_outage::paint(&mut frame, &self.active_endpoint_id, self.endpoint_label(&self.active_endpoint_id))`, which is still one statement, using the existing `endpoint_label` (`client/shell/endpoints.rs:462`). It paints a single-row banner `⚠ <label> unreachable — last contact <N>s ago, resuming…` on the top row of the frame, inverse video, truncated to width.
 - Painting happens only while the state for the active endpoint is `resuming`.
-- `linked` clears the state. Endpoint removal or a 2 s gap with no status while `resuming` also clears it, so a lost `linked` frame never strands the banner.
+- `linked` clears the state. A 2 s gap with no status while `resuming` also clears it. That covers both a lost `linked` frame and endpoint removal or bridge teardown (injections stop), so no removal hook is needed.
 
 ### Upstream touch list (the complete diff outside fork files)
 
@@ -258,7 +266,9 @@ Protocol errors on a leg end the leg, not the session. A torn or oversized herdr
 
 These are in-process tests that can reach private `attach` items through the `#[path]` mount.
 
-**End-to-end tests** (`tests/mosh_resume.rs`, `tests/mosh_multi_client.rs`). They drive the `herdr` binary with a fake `ssh` on `PATH` (pattern: `tests/remote_attach.rs:69-107`), where the fake ssh runs the remote command locally.
+**End-to-end tests** (`tests/mosh_resume.rs`, `tests/mosh_multi_client.rs`). They drive the `herdr` binary with a fake `ssh` on `PATH` (pattern: `tests/remote_attach.rs:69-107`; saved machines as in `tests/machine_setup.rs`), where the fake ssh runs the remote command locally.
+
+**Observability.** With `HERDR_MOSH_TRACE=<dir>` set, the local bridge and the keeper append one JSON line per session event to `<dir>/local.jsonl` and `<dir>/keeper.jsonl`. Events: `leg_up`, `leg_down{reason}`, `welcome{status}`, `resume{replayed_up, replayed_down}`, `server_connect`, `session_end{reason}`, `inject{state}`. With the variable unset, nothing is written. "No snapshot or full surface after resume" is asserted structurally: the trace shows `welcome resumed` and exactly one `server_connect` for the token, so the server never saw a new client connection and sent no reconnect snapshot. Tests also observe pane content through the existing `tests/support` screen helpers.
 
 ## Acceptance criteria
 
@@ -271,7 +281,7 @@ These are in-process tests that can reach private `attach` items through the `#[
 - [ ] Client exit ends its keeper session within 2 s when the leg is alive. A full reconnect from the same bridge evicts the previous token (the keeper holds at most one session per bridge slot after reconnect).
 - [ ] A live handoff during a session delivers `ServerShutdown` to the client (not `ConnectionLost`), and today's reconnect runs.
 - [ ] A request buffered past `ENDPOINT_COMMAND_TIMEOUT` during an outage executes exactly once on resume (late execution, D6). A test pins this.
-- [ ] Against a remote binary without `x-mosh-resume-bridge-v1`, with `HERDR_MOSH_RESUME=0`, or against a Windows remote, behaviour is byte-identical to upstream (the plain `SshStdioBridge`). The existing `tests/remote_attach.rs` suite passes unchanged.
+- [ ] (Windows remote covered by an in-process `start_ui_bridge` platform-gate unit test.) Against a remote binary without `x-mosh-resume-bridge-v1`, with `HERDR_MOSH_RESUME=0`, or against a Windows remote, behaviour is byte-identical to upstream (the plain `SshStdioBridge`). The existing `tests/remote_attach.rs` suite passes unchanged.
 - [ ] Reconnect legs never use the ControlMaster and always run BatchMode. Auth and host-key failures stop retrying immediately and fall to today's path.
 - [ ] `git diff origin/master` outside `src/mosh/`, `tests/mosh_*`, `scripts/mosh-*`, `HERDR_MOSH_VISION.md` and `docs/superpowers/` touches only the files in the upstream touch list, with about 11 lines, each tagged `// mosh-fork hook`. `scripts/mosh-diff-budget.sh` passes. `Cargo.toml` and `Cargo.lock` are unchanged.
 - [ ] Builds with `HERDR_STABLE_UPDATE_MANIFEST_URL`/`HERDR_PREVIEW_UPDATE_MANIFEST_URL` set use those manifest URLs; builds without them are unchanged.
