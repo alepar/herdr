@@ -1,0 +1,47 @@
+owners:
+- [Blocking] Keeper > Socket (`remote_bridge_endpoint_path(...)`, hashed name over (uid, session, protocol version, build id), mode 0600) + Rendezvous + Session rule 7 → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Should-fix] Session wire protocol: HELLO payload `{v, token, recv_offset, grace_ms, build_id, previous_token?}`; Rule 5; Keeper 'Per HELLO' → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Should-fix] Legs > Reconnect legs: "With managed config: a clone of ManagedSshOptions with control_path: None (attach.rs:725-731, 1421-1440)"; acceptance "Reconnect legs never use the ControlMaster" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Legs (`ssh_leg.rs`)
+- [Should-fix] Keeper > Spawn: "via detach_server_daemon_command plus a plain spawn ... with env_remove(\"SSH_AUTH_SOCK\")" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Should-fix] Keeper > Socket (hash over uid, session, version, build id) and Per HELLO ("connects to client_socket_path()") → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Should-fix] §Legs "They are detected from reported_failure() plus the ssh exit status and stderr"; Key abstractions → Leg ("driven by upstream bridge_child") → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Legs (`ssh_leg.rs`)
+- [Should-fix] Main challenges 5 "Fail safe. Any failure the session cannot absorb falls back to today's behaviour"; Discovery "Leg-0 failures ... no retry ... client socket is closed" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+- [Nit] Keeper > Idle exit ("The keeper exits 30 s after its table becomes empty") with Discovery > Leg-0 failures ("no retry") → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Nit] Keeper > Configuration across hosts: "identical on both ends because the build id is part of the keeper socket name"; HELLO `build_id` → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Nit] Local bridge behaviour > Ghost eviction: "Each local bridge instance (one per run_remote or saved profile) remembers its last session token"; acceptance "A full reconnect from the same bridge evicts the previous token" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Local bridge behaviour
+- [Nit] Local bridge > Injection ("every 1 s while resuming") and Dead-link timing (2 s / 8 s); acceptance "A saved-machine outage longer than 10 s ... does not trigger the endpoint health timeout" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Local bridge behaviour
+- [Nit] Discovery "On a reconnect leg ... The session therefore ends (outcome (b))" vs Key abstractions "falls back to upstream's plain bridge_connection mid-session, once → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+- [Nit] Rule 6 (Liveness); §Legs "One leg at a time. Back-off 1, 2, 4, 8, 8…"; Leg-0 failures → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Session wire protocol (`session.rs`)
+- [Nit] §Discovery and fallback: "On leg 0, before any byte has reached the client, that connection is served by upstream's plain bridge_connection instead" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+- [Nit] §Discovery and fallback (Unsupported detected by "unsupported remote client bridge option") vs "Fatal classification on leg 0 for --remote uses only reported_failure() and the exit status" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+- [Nit] Keeper > Per HELLO: "A fresh token creates a session, connects to client_socket_path() and answers new."; WELCOME status enum → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Nit] Keeper 'Server EOF' and acceptance "A live handoff during a session delivers ServerShutdown to the client" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- [Nit] Out of scope: "Windows local clients may still resume against Unix remotes through crate::ipc" vs Rule 7 ("128 bits read from /dev/urandom"), Leg socketpair, acceptance "Cargo.toml and Cargo.lock are unchanged" → owner: docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+amended:
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Architecture
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Components and responsibilities
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Session wire protocol (`session.rs`)
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Ring caps and drain policy
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Local bridge behaviour
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Legs (`ssh_leg.rs`)
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Discovery and fallback
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Keeper (`remote/keeper.rs`)
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Decision points, by section
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Error handling summary
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Testing
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Acceptance criteria
+- docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md §Key abstractions
+work: none
+supersedes: none
+unchanged:
+- The Goal, the non-goals and the D1 link-level byte session through a keeper are unchanged.
+- The upstream footprint stays the 11 hook lines in the Upstream touch list: no new hook, no Cargo.toml/Cargo.lock change, and no herdr wire-enum, protocol-version or hello-field change.
+- The plain SshStdioBridge stays byte-identical for no capability, HERDR_MOSH_RESUME=0 and Windows remotes; tests/remote_attach.rs passes unchanged.
+- Leg 0 keeps today's ssh options (interactive with inherited stderr for --remote, noninteractive for saved machines), and ssh-level leg-0 failures are reported through failure_tx as today.
+- Grace stays 60 s by default (client-chosen, clamped 5..=3600, carried in HELLO). Heartbeat stays 2 s, silence 8 s and back-off 1, 2, 4, 8, 8… s, one leg at a time; reconnect legs stay BatchMode.
+- Delivery stays exactly once via absolute byte offsets, overlap dedup and replay from the peer's recv_offset.
+- Ring caps stay 8 MiB local and 16 MiB keeper, and overflow during an outage still ends the session (outcome (b)).
+- Whole-frame hold-back, the x-mosh.link.v1 injection rules and LinkStatus payloads, the three banner hooks and OutageState behaviour are unchanged.
+- The keeper stays one detached process per (user, session, build), spawned via detach_server_daemon_command plus a plain spawn without SSH_AUTH_SOCK, with .live/.spawn flock serialisation and a 30 s idle exit.
+- Leg stealing, previous_token ghost eviction, END{"server-eof"} after the remaining bytes (ServerShutdown, then today's reconnect) and D6 late execution are unchanged.
+- start_ui_bridge still returns an SshStdioBridge struct literal, with its fields, reported_failure() and Drop unchanged.

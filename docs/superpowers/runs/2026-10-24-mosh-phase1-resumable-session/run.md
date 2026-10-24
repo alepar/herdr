@@ -13,7 +13,7 @@ roastDesignRound: 1
 roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md
 findingsLedgerDesign: findings-ledger-design.md
 redesignCycles-design: 1
-redesign-design-1: round 1 · triggers shared-cause, defect-type · amended - · lastGood 0a065435 · designRoast - · state started
+redesign-design-1: round 1 · triggers shared-cause, defect-type · amended - · lastGood 0a065435 · designRoast - · state amend-checked
 stepBackDesign-round-1: redesign — applied: ring caps as flow control (ACK on receipt, unbounded DATA) → one symmetric fixed-window flow-control rule in session.rs (dissolves 4)
 branch: super-auto/mosh-phase1-resumable-session
 base: mosh
