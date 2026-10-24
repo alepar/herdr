@@ -4,7 +4,7 @@
 use super::super as attach;
 use attach::{ManagedSshOptions, RemoteClientStatusJson, RemoteHerdr, RemoteSsh};
 use std::io::{self, BufReader};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -53,6 +53,7 @@ pub(super) struct Leg {
 }
 
 impl Leg {
+    #[cfg(test)]
     pub(super) fn new(
         reader: Box<dyn io::Read + Send>,
         writer: Box<dyn io::Write + Send>,
@@ -68,7 +69,8 @@ impl Leg {
     }
 
     /// Wrap a spawned child whose stdin/stdout are the leg's byte stream.
-    pub(super) fn from_child(mut child: Child) -> io::Result<Leg> {
+    #[cfg(test)]
+    pub(super) fn from_child(mut child: std::process::Child) -> io::Result<Leg> {
         let stdin = child
             .stdin
             .take()
@@ -469,7 +471,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::process::ExitStatusExt;
 
-    fn spawn(script: &str) -> Child {
+    fn spawn(script: &str) -> std::process::Child {
         Command::new("sh")
             .args(["-c", script])
             .stdin(Stdio::piped())

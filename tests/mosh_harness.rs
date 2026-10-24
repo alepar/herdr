@@ -233,6 +233,7 @@ impl Remote {
                 r#"#!/bin/sh
 export HOME={home} XDG_CONFIG_HOME={config} XDG_RUNTIME_DIR={runtime} XDG_STATE_HOME={runtime}/state HERDR_SOCKET_PATH={api} TMPDIR={tmp} HERDR_MOSH_TRACE={trace} SHELL=/bin/sh
 unset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION HERDR_MOSH_GRACE HERDR_MOSH_RESUME HERDR_ENV
+if [ -n "$FAKE_SSH_REMOTE_GRACE" ]; then export HERDR_MOSH_GRACE="$FAKE_SSH_REMOTE_GRACE"; fi
 K={knobs}
 take() {{
   f="$K/$1"; [ -e "$f" ] || return 1

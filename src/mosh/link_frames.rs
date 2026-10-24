@@ -56,10 +56,12 @@ impl FrameSplitter {
     }
 
     /// Bytes of the trailing partial frame (0 at a boundary); bounded by one max frame.
+    #[cfg(test)]
     pub fn held_back(&self) -> usize {
         self.buf.len()
     }
 
+    #[cfg(test)]
     pub fn at_boundary(&self) -> bool {
         self.buf.is_empty()
     }

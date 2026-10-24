@@ -402,12 +402,9 @@ impl SessionEndpoint {
         matches!(self.phase, LinkPhase::Up { .. })
     }
 
+    #[cfg(test)]
     pub fn established(&self) -> bool {
         self.established
-    }
-
-    pub fn phase(&self) -> LinkPhase {
-        self.phase
     }
 
     /// Local end: HELLO for the next leg. `resume` is false until the first `Welcomed(New)`,
@@ -458,6 +455,7 @@ impl SessionEndpoint {
     }
 
     /// Encode a pre-WELCOME END (a refusal); state is unchanged.
+    #[cfg(test)]
     pub fn refuse(&self, reason: &str) -> Vec<u8> {
         self.end_now(reason)
     }
