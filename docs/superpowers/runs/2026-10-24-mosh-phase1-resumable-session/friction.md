@@ -8,3 +8,4 @@
 - [phase 2] design roast converged at round 2 with 8 sub-Blocking findings; all 8 applied inline as spec+bead amendments (punch list "file or decline": chosen to fix at design time, not re-roasted)
 - [phase 3 prep] zig 0.16.0 was missing (vendored libghostty-vt build dep); installed official release to ~/.local/opt (sha256 verified) and symlinked ~/.local/bin/zig. bun missing → just check's maintenance-test unavailable; sweep = cargo nextest + clippy -D warnings + fmt --check
 - [phase 3 prep] .superpowers/ (super-code workspace) excluded via .git/info/exclude, not .gitignore (fork minimal-diff)
+- [phase 3 prep] run-start baseline: 4116 run, 4102 passed, 14 failed (pre-run: agent/api_ping/cross_area/live_handoff agent-status tests; evidence/run-start-baseline.txt). Not this run's fix scope.
