@@ -11,6 +11,7 @@ spec: 2026-10-24-mosh-phase1-resumable-session-design.md
 epic: mosh-dqw
 roastDesignRound: 2
 roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-design-2.md
+roastCodeRound: 1
 findingsLedgerDesign: findings-ledger-design.md
 redesignCycles-design: 1
 redesign-design-1: round 1 · triggers shared-cause, defect-type · amended §Architecture, §Components and responsibilities, §Session wire protocol, §Ring caps and drain policy, §Local bridge behaviour, §Legs, §Discovery and fallback, §Keeper, §Decision points, §Error handling summary, §Testing, §Acceptance criteria, §Key abstractions · lastGood 0a065435 · designRoast - · state applied
