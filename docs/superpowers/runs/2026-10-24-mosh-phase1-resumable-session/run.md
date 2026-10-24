@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-24-mosh-phase1-resumable-session
 
 flags: planOneShot=true skipPlanRoast=false skipCodeRoast=false autonomous=true
-phase: roast-design
+phase: code
 codeMechanism: Workflow
 runTag: mosh-phase1-resumable-session-20261024T052906
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -22,6 +22,8 @@ stepBackDesign-round-2: local — round 2 converged ([converged], 0 Blocking); p
 graph-pass: depth 5→5 · width 2.2→2.2 · applied 0 · parked 0
 
 approvals:
+- root-acceptance · {"version":1,"owner":"super-auto","sourceTree":"a64174f62f9c8ebc1b8a9c1c68feeed09a3d7f56","requirements":[{"id":"final-review","kind":"review","owner":"super-auto","source":"skill"},{"id":"code-roast","kind":"review","owner":"super-auto","source":"user","quote":"/super-auto Phase 1, fully autonomous, both roasts are on"},{"id":"sweep","kind":"measurement","owner":"super-auto","source":"skill","command":"cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check","configuration":"linux x86_64, zig 0.16.0, quiet host","requiredLive":true},{"id":"finish","kind":"human","owner":"human","source":"skill"}],"evidence":[],"reviews":[],"decisions":[],"recovery":{"obligations":[],"gaps":[]},"checkEvidence":{"records":[],"requiredLiveChecks":[],"gaps":[]},"runFailures":[]}
+- review-collection · {"invocationId":"inv-c723b6b8-ffc9-416e-96bd-5c1052097e03","workspace":"/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase1-resumable-session/.superpowers/sdd/mosh-dqw-plan","reviewPath":"/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase1-resumable-session/.superpowers/sdd/mosh-dqw-plan/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.md","review":"pending","required":[],"settled":false}
 - top-split · auto · mosh-dqw.1 LEAF, mosh-dqw.2 LEAF, mosh-dqw.3 LEAF, mosh-dqw.4 LEAF, mosh-dqw.5 LEAF, mosh-dqw.6 LEAF, mosh-dqw.7 LEAF, mosh-dqw.8 LEAF, mosh-dqw.9 LEAF, mosh-dqw.10 LEAF
 - coverage-round-1 · canonical R-list: R1..R15 in coverage-round-1-requirements.md (+R16-R18 from r-new) · requirements: 15 · mapped: 14 · unmapped: 3 (R2, R10, R11) · auto flag-sweep mosh-dqw.2/.3/.8 → kept; auto GAP R2,R3,R9,R10,R11,R12 → applied (summary lines; scope already in bead bodies); auto UNOWNED-SEAM keeper rendezvous → owner mosh-dqw.1 (+spec lock fix); auto UNOWNED-SEAM argv flags/capability/MoshConfig → consumes lines; auto UNOWNED-SEAM link-frame format → owner mosh-dqw.2, edge mosh-dqw.5<-mosh-dqw.2; auto rejected OutageState, Leg-keeper, .8 breadth
 - coverage-round-2 · requirements: 18 · mapped: 18 · unmapped: 0 · divergence: findings 17 → 14, novel 79%, widening: no · auto GAP R18,R11,R17,R16,keeper-lifetime(R19),R2 → applied; auto UNOWNED-SEAM keeper entry point, attacher preamble, capability format, injection encoding consumer, MoshConfig test override → applied; auto rejected touch-list seam, mosh-tree seam; auto ORPHAN mosh-dqw.3 → root goal element added
