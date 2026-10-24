@@ -6,6 +6,7 @@
 #![allow(dead_code)] // scaffold: items are filled and wired by mosh-dqw.4..8, 10
 
 mod link_frames;
+#[cfg(unix)]
 mod local_bridge;
 pub(in crate::remote) mod remote;
 mod ring;
@@ -29,6 +30,8 @@ pub(in crate::remote) const KEEPER_FLAG: &str = "--x-mosh-keeper-v1";
 
 const MOSH_RESUME_ENV: &str = "HERDR_MOSH_RESUME";
 const MOSH_GRACE_ENV: &str = "HERDR_MOSH_GRACE";
+#[cfg(unix)]
+const MOSH_TRACE_ENV: &str = "HERDR_MOSH_TRACE";
 const DEFAULT_GRACE_SECS: u64 = 60;
 const MIN_GRACE_SECS: u64 = 5;
 const MAX_GRACE_SECS: u64 = 3600;
@@ -74,8 +77,6 @@ pub(super) fn get() -> MoshConfig {
 /// `ssh_leg`), choosing the `LegDialer`, and returning the `SshStdioBridge`.
 /// Must not: be called from anywhere except the two swap points (`run_remote` and
 /// `connect_saved_ssh`); callers never branch on mosh support.
-///
-/// Scaffold: every call currently takes the plain path (mosh-dqw.8 fills the resume branch).
 pub(in crate::remote) fn start_ui_bridge(
     ssh: &RemoteSsh,
     target: String,
@@ -86,7 +87,8 @@ pub(in crate::remote) fn start_ui_bridge(
     noninteractive: bool,
     should_stop: Arc<AtomicBool>,
 ) -> io::Result<SshStdioBridge> {
-    // The resume branch (mosh-dqw.8) is `#[cfg(unix)]` only; non-Unix local always goes plain.
+    // The resume branch is `#[cfg(unix)]` only; non-Unix local always goes plain. This gate is
+    // compiled out off Unix and is covered by inspection only (not cross-compiled in tests).
     #[cfg(not(unix))]
     {
         let _ = ssh;
@@ -102,17 +104,87 @@ pub(in crate::remote) fn start_ui_bridge(
     }
     #[cfg(unix)]
     {
-        let _ = ssh;
-        SshStdioBridge::start(
-            target,
-            remote_herdr,
-            local_socket,
-            session_name,
+        let config = get();
+        if !platform_gate(config, remote_herdr.platform.is_windows()) {
+            return SshStdioBridge::start(
+                target,
+                remote_herdr,
+                local_socket,
+                session_name,
+                ssh_options,
+                noninteractive,
+                should_stop,
+            );
+        }
+        let candidate = match ssh_leg::select_resume_candidate(ssh, &remote_herdr) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => {
+                if !noninteractive {
+                    eprintln!(
+                        "herdr: remote herdr lacks {STATUS_CAPABILITY}; using the plain bridge (set HERDR_REMOTE_BINARY to a resume-capable build)"
+                    );
+                }
+                return SshStdioBridge::start(
+                    target,
+                    remote_herdr,
+                    local_socket,
+                    session_name,
+                    ssh_options,
+                    noninteractive,
+                    should_stop,
+                );
+            }
+            Err(err) => {
+                tracing::debug!(%err, "mosh capability probe failed; plain bridge");
+                return SshStdioBridge::start(
+                    target,
+                    remote_herdr,
+                    local_socket,
+                    session_name,
+                    ssh_options,
+                    noninteractive,
+                    should_stop,
+                );
+            }
+        };
+        // Exactly `SshStdioBridge::start`'s command, from the ORIGINAL (not re-selected) binary.
+        let plain_command = if noninteractive && remote_herdr.bridge_idle_timeout {
+            remote_herdr
+                .executable
+                .bridge_command_with_idle_timeout(&session_name, true)
+        } else {
+            remote_herdr.executable.bridge_command(&session_name)
+        };
+        let dialer = ssh_leg::SshLegDialer::new(
+            target.clone(),
+            &candidate,
+            &session_name,
             ssh_options,
             noninteractive,
+        );
+        local_bridge::start(
+            local_bridge::BridgeParams {
+                local_socket,
+                grace: config.grace,
+                noninteractive,
+                plain: local_bridge::PlainFallback::Ssh {
+                    target,
+                    remote_command: plain_command,
+                    ssh_options: ssh_options.cloned(),
+                    noninteractive,
+                },
+                trace_dir: std::env::var_os(MOSH_TRACE_ENV).map(PathBuf::from),
+            },
+            Box::new(dialer),
             should_stop,
         )
     }
+}
+
+/// `true` means try the resume path; `false` (kill switch or a Windows remote) takes the plain
+/// upstream bridge.
+fn platform_gate(config: MoshConfig, remote_is_windows: bool) -> bool {
+    config.resume_enabled && !remote_is_windows
 }
 
 #[cfg(test)]
@@ -131,6 +203,16 @@ mod tests {
         assert_eq!(grace(Some("abc")), Duration::from_secs(60));
         assert_eq!(grace(Some("")), Duration::from_secs(60));
         assert_eq!(grace(Some("120")), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn platform_gate_takes_resume_only_for_enabled_posix_remotes() {
+        let enabled = MoshConfig::parse(None, None);
+        let killed = MoshConfig::parse(Some("0"), None);
+        assert!(platform_gate(enabled, false));
+        assert!(!platform_gate(killed, false));
+        assert!(!platform_gate(enabled, true));
+        assert!(!platform_gate(killed, true));
     }
 
     #[test]
