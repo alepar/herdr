@@ -1,0 +1,62 @@
+   Compiling ghostty-vt v0.0.0 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase1-resumable-session/crates/ghostty-vt)
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+   Compiling herdr v0.9.5 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase1-resumable-session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.36s
+────────────
+ Nextest run ID 723cf8be-e4e0-442f-b6a9-910aea716f7d with nextest profile: default
+    Starting 4360 tests across 25 binaries (17 tests skipped)
+        FAIL [   1.019s] ( 136/4360) herdr::api_ping events_subscribe_streams_workspace_tab_and_agent_events
+        FAIL [   1.092s] ( 141/4360) herdr::api_ping metadata_status_subscription_filter_and_ttl_expiry_are_observable
+        FAIL [   0.923s] ( 161/4360) herdr::cli cases::agents::agent_commands_work
+        FAIL [   0.947s] ( 167/4360) herdr::cli cases::agents::agent_start_command_works
+        FAIL [   0.934s] ( 170/4360) herdr::cli cases::agents::agent_start_waits_for_a_new_pane_shell_to_finish_initializing
+        FAIL [   3.517s] ( 275/4360) herdr::api_ping official_release_waits_for_confirmed_process_exit
+        FAIL [   3.540s] ( 277/4360) herdr::api_ping pane_clear_agent_authority_restores_fallback_state
+        FAIL [   3.555s] ( 278/4360) herdr::api_ping pane_report_agent_updates_effective_state
+        FAIL [   4.345s] ( 316/4360) herdr::api_ping events_subscribe_streams_output_and_agent_status_events
+        FAIL [   4.367s] ( 322/4360) herdr::cli cases::agent_options::agent_wait_accepts_repeated_until_and_exits_when_one_status_matches
+        FAIL [   4.289s] ( 349/4360) herdr::cli cases::agents::agent_start_stops_retrying_when_the_pane_shell_stays_busy
+        FAIL [   5.658s] ( 373/4360) herdr::cross_area cross_area_agent_process_survives_detach_and_reattach
+        FAIL [   6.216s] ( 398/4360) herdr::live_handoff live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session
+        FAIL [  10.911s] ( 666/4360) herdr::cli cases::agent_wait::agent_wait_exits_when_done_status_matches
+        FAIL [  12.506s] (1741/4360) herdr::api_ping pane_info_and_subscriptions_expose_done_agent_status
+────────────
+     Summary [ 104.109s] 4360 tests run: 4345 passed (2 slow), 15 failed, 17 skipped
+        FAIL [   1.019s] ( 136/4360) herdr::api_ping events_subscribe_streams_workspace_tab_and_agent_events
+        FAIL [   1.092s] ( 141/4360) herdr::api_ping metadata_status_subscription_filter_and_ttl_expiry_are_observable
+        FAIL [   0.923s] ( 161/4360) herdr::cli cases::agents::agent_commands_work
+        FAIL [   0.947s] ( 167/4360) herdr::cli cases::agents::agent_start_command_works
+        FAIL [   0.934s] ( 170/4360) herdr::cli cases::agents::agent_start_waits_for_a_new_pane_shell_to_finish_initializing
+        FAIL [   3.517s] ( 275/4360) herdr::api_ping official_release_waits_for_confirmed_process_exit
+        FAIL [   3.540s] ( 277/4360) herdr::api_ping pane_clear_agent_authority_restores_fallback_state
+        FAIL [   3.555s] ( 278/4360) herdr::api_ping pane_report_agent_updates_effective_state
+        FAIL [   4.345s] ( 316/4360) herdr::api_ping events_subscribe_streams_output_and_agent_status_events
+        FAIL [   4.367s] ( 322/4360) herdr::cli cases::agent_options::agent_wait_accepts_repeated_until_and_exits_when_one_status_matches
+        FAIL [   4.289s] ( 349/4360) herdr::cli cases::agents::agent_start_stops_retrying_when_the_pane_shell_stays_busy
+        FAIL [   5.658s] ( 373/4360) herdr::cross_area cross_area_agent_process_survives_detach_and_reattach
+        FAIL [   6.216s] ( 398/4360) herdr::live_handoff live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session
+        FAIL [  10.911s] ( 666/4360) herdr::cli cases::agent_wait::agent_wait_exits_when_done_status_matches
+        FAIL [  12.506s] (1741/4360) herdr::api_ping pane_info_and_subscriptions_expose_done_agent_status
+error: test run failed
+nextest-exit=100
+   Compiling herdr v0.9.5 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase1-resumable-session)
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.64s
+clippy-exit=0
+fmt-exit=0
+docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:40:- finding-source · {"version":1,"source":"inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/cluster-5","artifact":"reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-5.md","kind":"final-review","verdict":"ready","occurrences":[{"section":"Untested scope","position":1,"key":"src/update.rs manifest override has no automated test (the bead forbids an upstream test module); checked only by manual `strings` inspection (task 3 and this review).","text":"src/update.rs manifest override has no automated test (the bead forbids an upstream test module); checked only by manual `strings` inspection (task 3 and this review)."},{"section":"Untested scope","position":2,"key":"scripts/mosh-diff-budget.sh has no automated test; the untagged-hunk and over-budget failures are manual synthetic checks only, and the deletion-only-hunk rejection is not exercised at all.","text":"scripts/mosh-diff-budget.sh has no automated test; the untagged-hunk and over-budget failures are manual synthetic checks only, and the deletion-only-hunk rejection is not exercised at all."},{"section":"Untested scope","position":3,"key":"src/remote/host.rs `--x-mosh-*` routing of an unknown flag through the real binary (`herdr remote-client-bridge --x-mosh-bogus-v9`) is covered only by the in-process `dispatch` unit test; the session-flag path is exercised end to end by the tests/mosh_* suites.","text":"src/remote/host.rs `--x-mosh-*` routing of an unknown flag through the real binary (`herdr remote-client-bridge --x-mosh-bogus-v9`) is covered only by the in-process `dispatch` unit test; the session-flag path is exercised end to end by the tests/mosh_* suites."},{"section":"Untested scope","position":4,"key":"The non-Unix side of the hooks (status.rs `#[cfg(unix)]` element, dispatch's non-Unix error arm) is not compiled in CI here (only x86_64-unknown-linux-gnu is installed).","text":"The non-Unix side of the hooks (status.rs `#[cfg(unix)]` element, dispatch's non-Unix error arm) is not compiled in CI here (only x86_64-unknown-linux-gnu is installed)."},{"section":"Untested scope","position":5,"key":"composition.rs banner paint over graphics placements and under a visible cursor on row 0 is not tested.","text":"composition.rs banner paint over graphics placements and under a visible cursor on row 0 is not tested."},{"section":"Deferred OK","position":1,"key":"src/remote/attach.rs:47-48 remote-install manifest URLs ignore the fork override, so remotes get upstream binaries and silently fall back to the plain bridge; outside the spec's touch list, needs a follow-up bead (2 more tagged upstream lines).","text":"src/remote/attach.rs:47-48 remote-install manifest URLs ignore the fork override, so remotes get upstream binaries and silently fall back to the plain bridge; outside the spec's touch list, needs a follow-up bead (2 more tagged upstream lines)."},{"section":"Deferred OK","position":2,"key":"scripts/mosh-diff-budget.sh counts inserted lines only; deletions are not budgeted (deferred minor from mosh-dqw.3).","text":"scripts/mosh-diff-budget.sh counts inserted lines only; deletions are not budgeted (deferred minor from mosh-dqw.3)."},{"section":"Deferred OK","position":3,"key":"scripts/mosh-diff-budget.sh misparses an added line starting with `++ ` as a file header (fail-safe false positive).","text":"scripts/mosh-diff-budget.sh misparses an added line starting with `++ ` as a file header (fail-safe false positive)."},{"section":"Deferred OK","position":4,"key":"scripts/mosh-diff-budget.sh does not audit untracked files despite its \"uncommitted edits are audited\" header.","text":"scripts/mosh-diff-budget.sh does not audit untracked files despite its \"uncommitted edits are audited\" header."},{"section":"Deferred OK","position":5,"key":"scripts/mosh-diff-budget.sh `git grep -n mosh-fork` is not restricted to upstream paths and lists 39 fork-file lines beside the 12 hook lines.","text":"scripts/mosh-diff-budget.sh `git grep -n mosh-fork` is not restricted to upstream paths and lists 39 fork-file lines beside the 12 hook lines."},{"section":"Deferred OK","position":6,"key":"src/client/shell/composition.rs banner row is not added to `occlusion`, and the cursor is not cleared while resuming (cosmetic).","text":"src/client/shell/composition.rs banner row is not added to `occlusion`, and the cursor is not cleared while resuming (cosmetic)."},{"section":"Deferred OK","position":7,"key":"src/remote/host.rs unknown `--x-mosh-*` flag is rejected only after `ensure_remote_server_running()` (deferred minor from mosh-dqw.10).","text":"src/remote/host.rs unknown `--x-mosh-*` flag is rejected only after `ensure_remote_server_running()` (deferred minor from mosh-dqw.10)."},{"section":"Deferred OK","position":8,"key":"src/update.rs and the hook lines use `#[rustfmt::skip]` to keep one statement per line (deferred minor from mosh-dqw.3; intentional for merge surface).","text":"src/update.rs and the hook lines use `#[rustfmt::skip]` to keep one statement per line (deferred minor from mosh-dqw.3; intentional for merge surface)."},{"section":"Deferred OK","position":9,"key":"src/mosh/outage.rs 2 s stale clear only takes effect on the next repaint (deferred minor from mosh-dqw.2).","text":"src/mosh/outage.rs 2 s stale clear only takes effect on the next repaint (deferred minor from mosh-dqw.2)."}]}
+src/cli/status.rs:302:            #[cfg(unix)] // mosh-fork hook
+src/cli/status.rs:303:            "x-mosh-resume-bridge-v1", // mosh-fork hook
+src/client/mod.rs:33:#[rustfmt::skip] #[path = "../mosh/outage.rs"] pub(crate) mod mosh_outage; // mosh-fork hook
+src/client/mod.rs:2095:                        #[rustfmt::skip] let () = if crate::client::mosh_outage::observe(&endpoint_id, &kind, &data) { if let Some(frame) = state.shell.as_mut().and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1)) { state.present_frame(frame); } continue; }; // mosh-fork hook
+src/client/shell/composition.rs:723:        #[rustfmt::skip] let () = crate::client::mosh_outage::paint(&mut frame, &self.active_endpoint_id, self.endpoint_label(&self.active_endpoint_id)); // mosh-fork hook
+src/mosh/remote/mod.rs:110:        let hook = format!("\"{}\", // mosh-fork hook", super::super::STATUS_CAPABILITY);
+src/remote/attach.rs:30:#[rustfmt::skip] #[path = "../mosh/mod.rs"] pub(super) mod mosh; // mosh-fork hook
+src/remote/attach.rs:91:    #[rustfmt::skip] let _bridge = mosh::start_ui_bridge(&remote_ssh, // mosh-fork hook
+src/remote/host.rs:15:        [o, ..] | [_, o] if o.starts_with("--x-mosh-") => false, // mosh-fork hook
+src/remote/host.rs:26:    #[rustfmt::skip] let () = if let Some(result) = super::attach::mosh::remote::dispatch(args) { return result; }; // mosh-fork hook
+src/remote/saved.rs:35:    #[rustfmt::skip] let bridge = super::attach::mosh::start_ui_bridge(&ssh, // mosh-fork hook
+src/update.rs:25:#[rustfmt::skip] const STABLE_UPDATE_MANIFEST_URL: &str = match option_env!("HERDR_STABLE_UPDATE_MANIFEST_URL") { Some(url) if !url.is_empty() => url, _ => "https://herdr.dev/latest.json" }; // mosh-fork hook
+src/update.rs:26:#[rustfmt::skip] const PREVIEW_UPDATE_MANIFEST_URL: &str = match option_env!("HERDR_PREVIEW_UPDATE_MANIFEST_URL") { Some(url) if !url.is_empty() => url, _ => "https://herdr.dev/preview.json" }; // mosh-fork hook
+mosh-diff-budget: 12 inserted upstream lines (budget 20), 0 untagged hunks
+budget-exit=0
