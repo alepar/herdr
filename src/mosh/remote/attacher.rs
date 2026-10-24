@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 const KEEPER_WAIT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// `args` is the slice `remote::dispatch` receives (the `remote-client-bridge` arguments).
-pub(super) fn run(args: &[String]) -> io::Result<()> {
-    debug_assert_eq!(args, [crate::remote::attach::mosh::SESSION_FLAG]);
+/// `idle_timeout`: the caller opted into upstream's 60 s idle watchdog (`--idle-timeout-v1`).
+/// Session heartbeats keep a live leg busy; a dead leg's attacher is reaped like a plain bridge.
+pub(super) fn run(idle_timeout: bool) -> io::Result<()> {
     let session = crate::session::active_name();
     let rdv = resolve(
         session
@@ -30,7 +30,7 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
             use interprocess::os::unix::uds_local_socket::Stream as UdStream;
             crate::platform::forward_remote_bridge_stdio(
                 crate::ipc::LocalStream::UdSocket(UdStream::from(stream)),
-                false,
+                idle_timeout,
             )
         }
         Err(err) => {

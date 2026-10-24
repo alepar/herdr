@@ -12,7 +12,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {
         {
             true
         }
-        [o, ..] if o.starts_with("--x-mosh-") => false, // mosh-fork hook
+        [o, ..] | [_, o] if o.starts_with("--x-mosh-") => false, // mosh-fork hook
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

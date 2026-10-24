@@ -306,10 +306,15 @@ impl SshLegDialer {
         session_name: &str,
         options: Option<&ManagedSshOptions>,
         noninteractive: bool,
+        idle_timeout: bool,
     ) -> Self {
         let args = attach::RemoteExecutable::session_args(
             session_name,
-            &["remote-client-bridge", super::SESSION_FLAG],
+            if idle_timeout {
+                &["remote-client-bridge", "--idle-timeout-v1", super::SESSION_FLAG]
+            } else {
+                &["remote-client-bridge", super::SESSION_FLAG]
+            },
         );
         let remote_command = attach::posix_remote_output_command(&format!(
             "exec {}",
@@ -569,6 +574,7 @@ mod tests {
             "work",
             options,
             noninteractive,
+            false,
         )
     }
 
@@ -646,17 +652,43 @@ mod tests {
         let tail = "--session work remote-client-bridge --x-mosh-session-v1";
         assert!(remote.contains(tail), "{remote}");
         assert!(remote.contains("exec "), "{remote}");
-        assert!(!remote.contains("idle-timeout"), "{remote}");
         let default = SshLegDialer::new(
             "h".into(),
             &RemoteHerdr::for_platform(linux()),
             crate::session::DEFAULT_SESSION_NAME,
             None,
             false,
+            false,
         )
         .remote_command;
         assert!(!default.contains("--session"), "{default}");
         assert!(default.contains("herdr\" remote-client-bridge --x-mosh-session-v1"));
+    }
+
+    #[test]
+    fn resume_command_idle_flag_matches_plain_command() {
+        let shared = "remote-client-bridge --idle-timeout-v1";
+        for (noninteractive, advertised) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut herdr = RemoteHerdr::for_platform(linux());
+            herdr.bridge_idle_timeout = advertised;
+            let plain = super::super::plain_bridge_command(&herdr, "work", noninteractive);
+            let resume = SshLegDialer::new(
+                "user@host".into(),
+                &herdr,
+                "work",
+                None,
+                noninteractive,
+                super::super::idle_opt_in(&herdr, noninteractive),
+            )
+            .remote_command;
+            let case = format!("({noninteractive}, {advertised})");
+            assert_eq!(
+                plain.contains(shared),
+                resume.contains(&format!("{shared} --x-mosh-session-v1")),
+                "{case}: {plain} vs {resume}"
+            );
+            assert_eq!(resume.contains("--idle-timeout-v1"), noninteractive && advertised, "{case}");
+        }
     }
 
     // ---- leg ownership and dial ------------------------------------------------------------
