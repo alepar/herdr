@@ -16,10 +16,54 @@ mod keeper;
 use std::io;
 
 /// Routes the `--x-mosh-*` flags of `remote-client-bridge`. `None` means "not a mosh flag".
-/// mosh-dqw.10 owns the routing; a new flag is a match arm.
+/// A new flag is a match arm. Every other `--x-mosh-*` flag (and every flag on non-Unix) is
+/// an error with upstream's message, never a plain pump.
 pub(in crate::remote) fn dispatch(args: &[String]) -> Option<io::Result<()>> {
-    let _ = args;
-    None
+    match args {
+        #[cfg(unix)]
+        [flag] if flag == super::SESSION_FLAG => Some(attacher::run(args)),
+        #[cfg(unix)]
+        [flag] if flag == super::KEEPER_FLAG => Some(keeper::run(args)),
+        [flag, ..] if flag.starts_with("--x-mosh-") => Some(Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported remote client bridge option",
+        ))),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn non_mosh_args_are_not_routed() {
+        assert!(dispatch(&[]).is_none());
+        assert!(dispatch(&args(&["--idle-timeout-v1"])).is_none());
+    }
+
+    #[test]
+    fn unknown_or_malformed_mosh_flags_are_errors() {
+        for list in [
+            &["--x-mosh-bogus-v9"][..],
+            &[super::super::SESSION_FLAG, "extra"][..],
+            &[super::super::KEEPER_FLAG, "extra"][..],
+        ] {
+            let result = dispatch(&args(list)).expect("mosh flag must be routed");
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{list:?}");
+        }
+    }
+
+    #[test]
+    fn status_hook_advertises_capability() {
+        let status = include_str!("../../cli/status.rs");
+        let hook = format!("\"{}\", // mosh-fork hook", super::super::STATUS_CAPABILITY);
+        assert!(status.contains(&hook), "status.rs lacks {hook}");
+    }
 }
 
 /// Keeper rendezvous contract (unix only: uses `flock`, owner and mode checks).

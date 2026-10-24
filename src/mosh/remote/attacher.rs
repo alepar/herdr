@@ -1,14 +1,517 @@
 //! Locates or spawns the keeper, verifies the keeper's peer uid, pumps stdio and the keeper
 //! socket, and reports its own bring-up failure as a session `END`. Beyond that one `END` it
-//! is a dumb pump. Filled by mosh-dqw.10.
+//! is a dumb pump.
 
-use std::io;
+use super::rendezvous::{
+    ensure_private_dir, lock, resolve, try_lock, validate_private_dir_for, KeeperRendezvous,
+};
+use crate::remote::attach::mosh::session::{end_reason, End, SessionMsg};
+use std::io::{self, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const KEEPER_WAIT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// `args` is the slice `remote::dispatch` receives (the `remote-client-bridge` arguments).
 pub(super) fn run(args: &[String]) -> io::Result<()> {
-    let _ = args;
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "mosh attacher not implemented",
-    ))
+    debug_assert_eq!(args, [crate::remote::attach::mosh::SESSION_FLAG]);
+    let session = crate::session::active_name();
+    let rdv = resolve(
+        session
+            .as_deref()
+            .unwrap_or(crate::session::DEFAULT_SESSION_NAME),
+    );
+    let mut spawn = || keeper_command(&std::env::current_exe()?, session.as_deref()).spawn().map(drop);
+    match bring_up(&rdv, geteuid(), &mut spawn) {
+        Ok(stream) => {
+            use interprocess::os::unix::uds_local_socket::Stream as UdStream;
+            crate::platform::forward_remote_bridge_stdio(
+                crate::ipc::LocalStream::UdSocket(UdStream::from(stream)),
+                false,
+            )
+        }
+        Err(err) => {
+            let _ = report_unavailable(&mut io::stdout().lock());
+            Err(io::Error::new(
+                err.kind(),
+                format!("mosh keeper unavailable: {err}"),
+            ))
+        }
+    }
+}
+
+fn geteuid() -> u32 {
+    // SAFETY: geteuid takes no pointers and has no preconditions.
+    unsafe { libc::geteuid() }
+}
+
+/// The only message the attacher originates.
+fn report_unavailable(out: &mut dyn Write) -> io::Result<()> {
+    let end = SessionMsg::End(End {
+        reason: end_reason::KEEPER_UNAVAILABLE.into(),
+    });
+    out.write_all(&end.encode())?;
+    out.flush()
+}
+
+fn bring_up(
+    rdv: &KeeperRendezvous,
+    expected_uid: u32,
+    spawn: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<UnixStream> {
+    bring_up_with(rdv, expected_uid, spawn, KEEPER_WAIT)
+}
+
+fn bring_up_with(
+    rdv: &KeeperRendezvous,
+    expected_uid: u32,
+    spawn: &mut dyn FnMut() -> io::Result<()>,
+    wait: Duration,
+) -> io::Result<UnixStream> {
+    ensure_private_dir(&rdv.dir)?;
+    validate_private_dir_for(&rdv.dir, expected_uid)?;
+    if let Some(stream) = connect_checked(rdv, expected_uid)? {
+        return Ok(stream);
+    }
+    // Held until return: serialises keeper spawning across attachers.
+    let _spawn_guard = lock(&rdv.spawn_lock)?;
+    if let Some(stream) = connect_checked(rdv, expected_uid)? {
+        return Ok(stream);
+    }
+    let live = match try_lock(&rdv.live_lock)? {
+        Some(live) => live,
+        None => {
+            // A keeper is alive but not listening yet.
+            if let Some(stream) = poll_connect(rdv, expected_uid, wait)? {
+                return Ok(stream);
+            }
+            try_lock(&rdv.live_lock)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "keeper holds its lock but never listened",
+                )
+            })?
+        }
+    };
+    // No keeper alive: clear the stale socket, hand the lock over and spawn.
+    match std::fs::remove_file(&rdv.socket) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    drop(live);
+    spawn()?;
+    poll_connect(rdv, expected_uid, wait)?.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::TimedOut, "keeper did not start listening")
+    })
+}
+
+fn poll_connect(
+    rdv: &KeeperRendezvous,
+    expected_uid: u32,
+    wait: Duration,
+) -> io::Result<Option<UnixStream>> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if let Some(stream) = connect_checked(rdv, expected_uid)? {
+            return Ok(Some(stream));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// `Ok(None)` when nothing is listening. A stream is returned only after its peer's uid
+/// matches `expected_uid`.
+fn connect_checked(rdv: &KeeperRendezvous, expected_uid: u32) -> io::Result<Option<UnixStream>> {
+    let stream = match UnixStream::connect(&rdv.socket) {
+        Ok(stream) => stream,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(err) => return Err(err),
+    };
+    let uid = peer_uid(&stream)?;
+    if uid != expected_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("keeper socket is owned by uid {uid}, expected {expected_uid}"),
+        ));
+    }
+    Ok(Some(stream))
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::fd::AsRawFd as _;
+
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid for the call; the fd is owned by `stream`.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if result == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::fd::AsRawFd as _;
+
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: both out-pointers are valid for the call; the fd is owned by `stream`.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0 {
+        Ok(uid)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Mirrors `build_server_daemon_command`: no stdio (so the keeper holds none of the sshd
+/// channel fds and its output can never reach the leg), no agent socket, own session.
+fn keeper_command(exe: &Path, session: Option<&str>) -> Command {
+    let mut command = Command::new(exe);
+    if let Some(session) = session {
+        command.args(["--session", session]);
+    }
+    command
+        .args(["remote-client-bridge", crate::remote::attach::mosh::KEEPER_FLAG])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_remove("SSH_AUTH_SOCK");
+    crate::platform::detach_server_daemon_command(&mut command);
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::rendezvous::{rendezvous_paths, RendezvousLock};
+    use super::*;
+    use std::io::Read;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const SHORT: Duration = Duration::from_millis(800);
+
+    struct Env {
+        base: std::path::PathBuf,
+        rdv: KeeperRendezvous,
+    }
+
+    impl Env {
+        fn new() -> Env {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!("att-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let rdv = rendezvous_paths(&base, geteuid(), "t");
+            Env { base, rdv }
+        }
+
+        fn prepare_dir(&self) {
+            ensure_private_dir(&self.rdv.dir).unwrap();
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// Holds the live lock and accepts connections, like a keeper would.
+    struct FakeKeeper {
+        stop: Arc<AtomicBool>,
+        accepted: Arc<Mutex<Vec<UnixStream>>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+        _live: Arc<RendezvousLock>,
+    }
+
+    impl FakeKeeper {
+        fn start(rdv: &KeeperRendezvous) -> FakeKeeper {
+            let live = Arc::new(try_lock(&rdv.live_lock).unwrap().expect("live lock free"));
+            Self::listen(rdv, live)
+        }
+
+        fn listen(rdv: &KeeperRendezvous, live: Arc<RendezvousLock>) -> FakeKeeper {
+            let listener = UnixListener::bind(&rdv.socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let accepted = Arc::new(Mutex::new(Vec::new()));
+            let handle = {
+                let (stop, accepted) = (stop.clone(), accepted.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((stream, _)) => accepted.lock().unwrap().push(stream),
+                            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                        }
+                    }
+                })
+            };
+            FakeKeeper {
+                stop,
+                accepted,
+                handle: Some(handle),
+                _live: live,
+            }
+        }
+
+        fn accepted_count(&self) -> usize {
+            self.accepted.lock().unwrap().len()
+        }
+    }
+
+    impl Drop for FakeKeeper {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn wait_accepted(keeper: &FakeKeeper, count: usize) {
+        for _ in 0..200 {
+            if keeper.accepted_count() >= count {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("keeper accepted {} of {count}", keeper.accepted_count());
+    }
+
+    #[test]
+    fn stale_socket_recovered() {
+        let env = Env::new();
+        env.prepare_dir();
+        drop(UnixListener::bind(&env.rdv.socket).unwrap());
+        assert!(env.rdv.socket.exists());
+        let spawns = AtomicU32::new(0);
+        let keeper = Mutex::new(None);
+        let mut spawn = || {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            // The stale socket was unlinked before the spawn.
+            assert!(!env.rdv.socket.exists());
+            *keeper.lock().unwrap() = Some(FakeKeeper::start(&env.rdv));
+            Ok(())
+        };
+        bring_up(&env.rdv, geteuid(), &mut spawn).unwrap();
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        wait_accepted(keeper.lock().unwrap().as_ref().unwrap(), 1);
+    }
+
+    #[test]
+    fn live_keeper_connected_without_spawning() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::start(&env.rdv);
+        let mut spawn = || panic!("must not spawn");
+        bring_up(&env.rdv, geteuid(), &mut spawn).unwrap();
+        wait_accepted(&keeper, 1);
+    }
+
+    #[test]
+    fn concurrent_attachers_spawn_one_keeper() {
+        let env = Env::new();
+        env.prepare_dir();
+        let spawns = AtomicU32::new(0);
+        let keeper = Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    let mut spawn = || {
+                        spawns.fetch_add(1, Ordering::SeqCst);
+                        // Slow start, so the second attacher really waits on the spawn lock.
+                        std::thread::sleep(Duration::from_millis(200));
+                        *keeper.lock().unwrap() = Some(FakeKeeper::start(&env.rdv));
+                        Ok(())
+                    };
+                    bring_up(&env.rdv, geteuid(), &mut spawn).unwrap();
+                });
+            }
+        });
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        wait_accepted(keeper.lock().unwrap().as_ref().unwrap(), 2);
+    }
+
+    #[test]
+    fn live_lock_held_not_listening_connects_when_keeper_binds() {
+        let env = Env::new();
+        env.prepare_dir();
+        let live = Arc::new(try_lock(&env.rdv.live_lock).unwrap().unwrap());
+        let keeper = Mutex::new(None);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                *keeper.lock().unwrap() = Some(FakeKeeper::listen(&env.rdv, live));
+            });
+            let mut spawn = || panic!("must not spawn");
+            bring_up(&env.rdv, geteuid(), &mut spawn).unwrap();
+        });
+        wait_accepted(keeper.lock().unwrap().as_ref().unwrap(), 1);
+    }
+
+    #[test]
+    fn live_lock_released_without_listening_relocks_and_spawns() {
+        let env = Env::new();
+        env.prepare_dir();
+        let live = try_lock(&env.rdv.live_lock).unwrap().unwrap();
+        let spawns = AtomicU32::new(0);
+        let keeper = Mutex::new(None);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(live);
+            });
+            let mut spawn = || {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                *keeper.lock().unwrap() = Some(FakeKeeper::start(&env.rdv));
+                Ok(())
+            };
+            bring_up_with(&env.rdv, geteuid(), &mut spawn, SHORT).unwrap();
+        });
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn live_lock_held_forever_times_out_without_spawning() {
+        let env = Env::new();
+        env.prepare_dir();
+        let _live = try_lock(&env.rdv.live_lock).unwrap().unwrap();
+        let mut spawn = || panic!("must not spawn");
+        let err = bring_up_with(&env.rdv, geteuid(), &mut spawn, Duration::from_millis(200))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    fn assert_reports_unavailable(result: io::Result<UnixStream>) {
+        assert!(result.is_err());
+        let mut out = Vec::new();
+        report_unavailable(&mut out).unwrap();
+        let expected = SessionMsg::End(End {
+            reason: "keeper-unavailable".into(),
+        })
+        .encode();
+        assert_eq!(out, expected);
+        assert!(String::from_utf8_lossy(&out).contains("\"keeper-unavailable\""));
+    }
+
+    #[test]
+    fn bad_private_dir_is_rejected_before_any_connect() {
+        let mut spawn = || panic!("must not spawn");
+
+        let mode = Env::new();
+        mode.prepare_dir();
+        std::fs::set_permissions(&mode.rdv.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let keeper = FakeKeeper::start(&mode.rdv);
+        let result = bring_up(&mode.rdv, geteuid(), &mut spawn);
+        assert_eq!(result.as_ref().err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        assert_reports_unavailable(result);
+        assert_eq!(keeper.accepted_count(), 0);
+
+        let linked = Env::new();
+        let target = linked.base.join("real");
+        ensure_private_dir(&target).unwrap();
+        symlink(&target, &linked.rdv.dir).unwrap();
+        let result = bring_up(&linked.rdv, geteuid(), &mut spawn);
+        assert_eq!(result.as_ref().err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        assert_reports_unavailable(result);
+
+        let foreign = Env::new();
+        foreign.prepare_dir();
+        let result = bring_up(&foreign.rdv, geteuid().wrapping_add(1), &mut spawn);
+        assert_eq!(result.as_ref().err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        assert_reports_unavailable(result);
+    }
+
+    #[test]
+    fn peer_uid_mismatch_is_rejected_without_forwarding() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::start(&env.rdv);
+        // The private dir is ours, so only the peer check can reject; skip the dir check by
+        // calling connect_checked directly with the wrong expectation.
+        let result = connect_checked(&env.rdv, geteuid().wrapping_add(1));
+        assert_eq!(result.as_ref().err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        assert_reports_unavailable(result.map(|s| s.unwrap()));
+        wait_accepted(&keeper, 1);
+        let mut stream = keeper.accepted.lock().unwrap().remove(0);
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buf = [0u8; 16];
+        // The attacher dropped the connection having written nothing: EOF, not data.
+        assert_eq!(stream.read(&mut buf).unwrap(), 0);
+
+        let mut spawn = || panic!("must not spawn");
+        let result = bring_up(&env.rdv, geteuid().wrapping_add(1), &mut spawn);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn peer_uid_matches_own_euid() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(peer_uid(&a).unwrap(), geteuid());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keeper_command_null_stdio_no_agent_setsid() {
+        let env = Env::new();
+        let cmd = keeper_command(Path::new("/x/herdr"), Some("s"));
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == "SSH_AUTH_SOCK" && v.is_none()));
+        let got: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            got,
+            ["--session", "s", "remote-client-bridge", "--x-mosh-keeper-v1"]
+        );
+        let bare = keeper_command(Path::new("/x/herdr"), None);
+        assert_eq!(
+            bare.get_args().collect::<Vec<_>>(),
+            ["remote-client-bridge", "--x-mosh-keeper-v1"]
+        );
+
+        let script = env.base.join("fake-keeper.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nreadlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2 > \"$0.out\"\nps -o sid= -p $$ >> \"$0.out\"\necho $$ >> \"$0.out\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = keeper_command(&script, None);
+        // Parent stdio is inherited unless the command nulls it; the test's own are not null.
+        let mut child = child.spawn().unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        let out = std::fs::read_to_string(env.base.join("fake-keeper.sh.out")).unwrap();
+        let lines: Vec<_> = out.lines().map(str::trim).collect();
+        assert_eq!(lines[..3], ["/dev/null", "/dev/null", "/dev/null"], "{out}");
+        assert_eq!(lines[3], pid.to_string(), "setsid: sid == pid: {out}");
+        assert_eq!(lines[4], pid.to_string());
+    }
 }
