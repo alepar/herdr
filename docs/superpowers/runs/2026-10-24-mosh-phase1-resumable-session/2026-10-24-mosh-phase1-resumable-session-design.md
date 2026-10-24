@@ -460,3 +460,19 @@ Behavior the redesign-cycle-1 amendment (flow control, rendezvous, leg-0 fallbac
 ## Post-Implementation Note (2026-10-24, mosh-dqw.10)
 
 The status.rs capability hook is two lines, not one: rustfmt always splits a `#[cfg(unix)]` attribute off a `vec!` element, so the attribute and the `"x-mosh-resume-bridge-v1"` entry are separate lines, both tagged `// mosh-fork hook`. The upstream touch list is therefore 12 lines, not 11.
+
+## Post-Implementation Note (2026-10-24, mosh-dqw.23): keeper back-pressures at exactly 16 MiB instead of overflowing
+
+§Ring caps point 4 says the keeper's ring overflows at its cap and the session ends. The keeper does not: `server_reader` in `src/mosh/remote/keeper.rs` reads the server only while `session.endpoint.may_read_source()` is true, which while the link is down is `occupancy < ring cap`. A full 16 MiB ring therefore stops reading the server (back-pressure) rather than ending the session, so the session lives, back-pressured, until grace expiry; it is bounded by grace, as the final review observed. The local side behaves as the spec says: `on_client` in `src/mosh/local_bridge.rs` keeps feeding the client reader while down, so the local upstream ring overflows and ends the session at 8 MiB. Back-pressure on the server side loses no data, so the divergence is accepted.
+
+## Post-Implementation Note (2026-10-24, mosh-dqw.23): resume.replayed_down is null in the local trace
+
+The local `resume` trace event carries `"replayed_down": null` (`src/mosh/local_bridge.rs`, the `resume` trace with `replayed_up` and `replayed_down`), always. The local end cannot observe how much the keeper replays downstream, only what it receives afterwards. The keeper's own `resume` trace event carries the real `replayed_down`, so the figure is available from the keeper side and nothing is lost.
+
+## Post-Implementation Note (2026-10-24, mosh-dqw.23): reconnect-leg ssh spawn failure is classified Fatal
+
+§Legs failure classification treats only auth and host-key failures at exit 255 on a reconnect leg as Fatal. `SshLegDialer::dial_command` in `src/mosh/ssh_leg.rs` instead maps any `spawn_leg(..)` error to `LegError::Fatal` on every leg kind. A transient spawn error on a reconnect leg (for example EAGAIN) therefore ends a resumable session instead of retrying. This is a known gap, deferred in the final review and left as is; it is not a decision to keep the behaviour.
+
+## Post-Implementation Note (2026-10-24, mosh-dqw.23): graceful --remote quit versus server hang-up final-ACK race
+
+The acceptance criterion "Client exit ends its keeper session within 2 s" can be missed when the server hangs up as the user quits `--remote`. `final_ack` in `src/mosh/local_bridge.rs` runs after `close_client(true)` and is gated by the 200 ms ack timer, so the keeper's server-eof session can stay parked until grace expiry. The fix is tracked in mosh-dqw.19 ("retain session-final END and flush final ACK across leg loss"), which had not landed when this note was written; once it does, this race is resolved by that task and this note should be read as history.
