@@ -720,6 +720,7 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
+        #[rustfmt::skip] let () = crate::client::mosh_outage::paint(&mut frame, &self.active_endpoint_id, self.endpoint_label(&self.active_endpoint_id)); // mosh-fork hook
         let graphics = self.compose_graphics(layout, &occlusion);
         Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }
