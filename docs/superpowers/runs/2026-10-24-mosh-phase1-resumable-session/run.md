@@ -13,7 +13,7 @@ roastDesignRound: 2
 roast-design: 2026-10-24-mosh-phase1-resumable-session-roast-design-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-design-2.md
 roastCodeRound: 2
 redesignCycles-code: 1
-redesign-code-1: round 2 · triggers shared-cause, defect-type · amended - · lastGood d49f3d93 · designRoast - · state amend-checked
+redesign-code-1: round 2 · triggers shared-cause, defect-type · amended §Legs, §Post-Implementation Note (2026-10-24, code redesign cycle 1) · lastGood d49f3d93 · designRoast - · state beads-filed
 stepBackCode-round-2: redesign — applied: scattered inline teardown (per-site deadlines, end_sent set/reset in many places) → one Closing drain-then-close phase per endpoint with a single deadline (dissolves 8)
 roast-code: 2026-10-24-mosh-phase1-resumable-session-roast-pr-1.md, 2026-10-24-mosh-phase1-resumable-session-roast-pr-2.md
 findingsLedger: findings-ledger.md
