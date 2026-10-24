@@ -15,3 +15,17 @@ C14 · r1 · UNOWNED-SEAM · MoshConfig constants · applied — consumes added 
 C15 · r1 · UNOWNED-SEAM · OutageState · rejected — internal to mosh-dqw.2's observe/paint; no other task exchanges it
 C16 · r1 · UNOWNED-SEAM · Leg on keeper side · rejected — Leg is local-only; keeper leg handler takes a plain duplex stream (spec §Key abstractions Keeper)
 C17 · r1 · GAP · mosh-dqw.8 breadth · rejected — ledger C1; R2/R3/R10 are inside .8's spec sections (verified in bead body); NEEDS-SPEC not honored (applies to subepics; .8/.10 are leaves)
+C18 · r2 · GAP · R18 · applied — spec §Keeper 'Configuration across hosts': grace via HELLO.grace_ms, thresholds compile-time; .4/.7 acceptance
+C19 · r2 · GAP · R11 · applied — D6 delivery mechanism named in mosh-dqw.8 acceptance (byte exactly-once + server continuity; no request-level code); .9 notes it
+C20 · r2 · GAP · R17 · applied — idle-link unit test in mosh-dqw.4, e2e idle case in .9
+C21 · r2 · GAP · R16 · applied — keeper spawn/reuse/stale/concurrent e2e cases in mosh-dqw.9
+C22 · r2 · GAP · keeper lifetime · applied — R19 appended; idle exit already in mosh-dqw.7, e2e case in .9; version skew via build id in socket name (mosh-dqw.1)
+C23 · r2 · GAP · R2 · applied — mosh-dqw.1 names connect_saved_ssh (saved-machine supervisor path) explicitly
+C24 · r2 · UNOWNED-SEAM · upstream touch list · rejected — tag convention is an epic Global Constraint; the script audits tags + budget outside fork paths, not a list
+C25 · r2 · UNOWNED-SEAM · keeper entry point · applied — mosh-dqw.1 owns keeper::run/attacher::run stub signatures; .7/.10 fill and consume
+C26 · r2 · UNOWNED-SEAM · attacher-keeper preamble · applied — pure-pipe rule in spec and mosh-dqw.1 rendezvous ownership
+C27 · r2 · UNOWNED-SEAM · capability advertisement format · applied — format = upstream endpoint_capabilities entry (mosh-dqw.1); consumes added to .6
+C28 · r2 · UNOWNED-SEAM · link-frame injection encoding · applied — consumes added to mosh-dqw.8
+C29 · r2 · UNOWNED-SEAM · mosh module tree for .2/.3 · rejected — .2's outage.rs is mounted from client/mod.rs, .3 has no src/mosh code; no exchange with .1's tree
+C30 · r2 · UNOWNED-SEAM · MoshConfig test override · applied — HERDR_MOSH_GRACE=5 (clamp min) in spec; .9 consumes MoshConfig
+C31 · r2 · ORPHAN · mosh-dqw.3 · applied — root goal gains the self-update outcome it serves (non-interactive: reviewer's add-goal-element fix)

@@ -16,3 +16,4 @@ R15 fork builds can override update manifest URLs so auto-update does not replac
 R16 the remote keeper is started on demand on first attach, reachable by later attaches, and a stale keeper socket is recovered
 R17 an idle but healthy link is not declared dead (heartbeats keep quiet legs alive)
 R18 grace and stall thresholds come from a single configuration source both ends read
+R19 the remote keeper exits on its own once it holds no sessions (no resident daemon left behind)

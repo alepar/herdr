@@ -1,0 +1,33 @@
+requirements:
+R1 → mosh-dqw.1, mosh-dqw.4, mosh-dqw.5, mosh-dqw.6, mosh-dqw.7, mosh-dqw.8, mosh-dqw.10, mosh-dqw.9
+R2 → mosh-dqw.8, mosh-dqw.6, mosh-dqw.9
+R3 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.6, mosh-dqw.9
+R4 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R5 → mosh-dqw.7, mosh-dqw.5, mosh-dqw.8, mosh-dqw.9
+R6 → mosh-dqw.2, mosh-dqw.5, mosh-dqw.8, mosh-dqw.9
+R7 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R8 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R9 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R10 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R11 → mosh-dqw.9
+R12 → mosh-dqw.1, mosh-dqw.6, mosh-dqw.8, mosh-dqw.10, mosh-dqw.9
+R13 → mosh-dqw.6, mosh-dqw.9
+R14 → mosh-dqw.3, mosh-dqw.1
+R15 → mosh-dqw.3
+R16 → mosh-dqw.1, mosh-dqw.10, mosh-dqw.7
+R17 → mosh-dqw.4
+R18 → mosh-dqw.1
+R-new: input typed while the link is down is buffered locally and delivered after resume → mosh-dqw.8
+R-new: grace expiry for a test run must be shortenable → (unmapped)
+
+GAP · R17 · no idle-link test
+GAP · R18 · cross-host config
+GAP · R11 · D6 delivering task unnamed (ledger C8)
+GAP · R16 · no e2e
+UNOWNED-SEAM · keeper entry point (dispatch → Keeper)
+UNOWNED-SEAM · attacher↔keeper socket preamble
+UNOWNED-SEAM · capability advertisement format (ledger C12)
+UNOWNED-SEAM · link-frame injection encoding consumer .8
+UNOWNED-SEAM · upstream touch list
+UNOWNED-SEAM · MoshConfig test override
+ORPHAN · mosh-dqw.3 · R15 not from goal

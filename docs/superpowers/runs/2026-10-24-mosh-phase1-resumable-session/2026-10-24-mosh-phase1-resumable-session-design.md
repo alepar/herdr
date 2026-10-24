@@ -4,7 +4,7 @@ Fork plan: `HERDR_MOSH_VISION.md` §4.1, §5 (Phase 1), §6. Detailed verified t
 
 ## Goal
 
-`herdr --remote <target>` and saved-machine connections keep the same TUI session through an ssh drop or a stalled link. Within a 60 s grace period they resume with no lost or duplicated input, and with no `ClientShellSnapshot` or full `PaneSurface` after resume. While the link is down, an outage banner shows how long ago the remote was last heard from. All of this lands in fork-owned code under `src/mosh/`, with about 11 hook lines in upstream files.
+`herdr --remote <target>` and saved-machine connections keep the same TUI session through an ssh drop or a stalled link. Within a 60 s grace period they resume with no lost or duplicated input, and with no `ClientShellSnapshot` or full `PaneSurface` after resume. While the link is down, an outage banner shows how long ago the remote was last heard from. All of this lands in fork-owned code under `src/mosh/`, with about 11 hook lines in upstream files, and a fork build can point self-update at its own manifest so that upstream auto-update never replaces it.
 
 ## Problem description
 
@@ -177,7 +177,9 @@ The attacher first tries to connect. On `ENOENT` or `ECONNREFUSED` it takes the 
 - If it acquires the live lock, no keeper is alive. It unlinks any stale socket file, releases the live lock, spawns the keeper, waits up to 5 s for the socket and connects.
 - If it cannot acquire the live lock, a keeper is alive but not yet listening. It retries the connect for up to 5 s.
 
-The attacher then releases the spawn lock. A crashed keeper's stale socket is therefore always recovered, and two attachers never spawn two keepers.
+The attacher then releases the spawn lock. A crashed keeper's stale socket is therefore always recovered, and two attachers never spawn two keepers. The attacher writes nothing of its own on the keeper socket. It is a pure byte pipe, and the session protocol (`HELLO` first) is spoken end to end by the local bridge and the keeper.
+
+**Configuration across hosts.** The grace period is chosen once, on the client (`HERDR_MOSH_GRACE`), and travels in `HELLO.grace_ms`. The keeper uses the received value and never reads its own environment for it. The heartbeat interval, the silence timeout and the ring caps are compile-time constants in `session.rs`/`ring.rs`, identical on both ends because the build id is part of the keeper socket name. End-to-end tests shorten the grace with `HERDR_MOSH_GRACE=5` (the clamp minimum).
 
 **Spawn.** The attacher spawns the keeper when no live keeper answers: `current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1`, via `detach_server_daemon_command` plus a plain `spawn` (not the launchd path; `launchd_spawn.rs:31-36`), with `env_remove("SSH_AUTH_SOCK")`. Concurrent attachers are serialised by the lock above.
 
