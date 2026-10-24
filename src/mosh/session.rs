@@ -77,6 +77,23 @@ impl fmt::Display for LegProtocolError {
 
 impl std::error::Error for LegProtocolError {}
 
+/// A leg-byte error plus the events decoded from the same buffer before it. `recv_offset`
+/// already counts every `Deliver` in `delivered`, so the caller must hand them on before
+/// dropping the leg or those bytes are lost for good (the peer will not resend them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LegBytesError {
+    pub error: LegProtocolError,
+    pub delivered: Vec<SessionEvent>,
+}
+
+impl fmt::Display for LegBytesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for LegBytesError {}
+
 fn leg_err<T>(msg: impl Into<String>) -> Result<T, LegProtocolError> {
     Err(LegProtocolError(msg.into()))
 }
@@ -495,7 +512,23 @@ impl SessionEndpoint {
         &mut self,
         now: Instant,
         bytes: &[u8],
-    ) -> Result<Vec<SessionEvent>, LegProtocolError> {
+    ) -> Result<Vec<SessionEvent>, LegBytesError> {
+        let mut events = Vec::new();
+        match self.decode_leg_bytes(now, bytes, &mut events) {
+            Ok(()) => Ok(events),
+            Err(error) => Err(LegBytesError {
+                error,
+                delivered: events,
+            }),
+        }
+    }
+
+    fn decode_leg_bytes(
+        &mut self,
+        now: Instant,
+        bytes: &[u8],
+        events: &mut Vec<SessionEvent>,
+    ) -> Result<(), LegProtocolError> {
         if !bytes.is_empty() {
             self.last_contact = Some(now);
             if let LinkPhase::Up { last_inbound, .. } = &mut self.phase {
@@ -503,7 +536,6 @@ impl SessionEndpoint {
             }
         }
         self.decoder.push(bytes);
-        let mut events = Vec::new();
         while let Some(msg) = self.decoder.next()? {
             match msg {
                 SessionMsg::Data { offset, bytes } => {
@@ -534,7 +566,7 @@ impl SessionEndpoint {
                         return leg_err("unexpected HELLO");
                     }
                     events.push(SessionEvent::Hello(h));
-                    return Ok(events);
+                    return Ok(());
                 }
                 SessionMsg::Welcome(w) => {
                     let LinkPhase::PreWelcome { .. } = self.phase else {
@@ -552,7 +584,7 @@ impl SessionEndpoint {
                         }
                         (WelcomeStatus::New, true) | (WelcomeStatus::Unknown, _) => {
                             events.push(SessionEvent::ResumeRefused);
-                            return Ok(events);
+                            return Ok(());
                         }
                         (WelcomeStatus::Resumed, true) => {
                             self.resume_from(w.recv_offset)?;
@@ -566,11 +598,11 @@ impl SessionEndpoint {
                 }
                 SessionMsg::End(e) => {
                     events.push(SessionEvent::PeerEnd(e.reason));
-                    return Ok(events);
+                    return Ok(());
                 }
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     fn require_up(&self, what: &str) -> Result<(), LegProtocolError> {
@@ -1575,6 +1607,38 @@ mod tests {
         let ev = p.keeper.on_leg_bytes(now, &d(2, "cdef")).unwrap();
         assert_eq!(ev, vec![SessionEvent::Deliver(b"ef".to_vec())]);
         assert_eq!(p.keeper.recv_offset(), 6);
+    }
+
+    fn data_then_bad_message_keeps_delivered_bytes(keeper_role: bool) {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let mut buf = SessionMsg::Data {
+            offset: 0,
+            bytes: b"good".to_vec(),
+        }
+        .encode();
+        // A gap DATA is a protocol error at either role.
+        buf.extend(
+            SessionMsg::Data {
+                offset: 99,
+                bytes: vec![1],
+            }
+            .encode(),
+        );
+        let ep = if keeper_role { &mut p.keeper } else { &mut p.local };
+        let err = ep.on_leg_bytes(p.now, &buf).unwrap_err();
+        assert_eq!(err.delivered, vec![SessionEvent::Deliver(b"good".to_vec())]);
+        assert_eq!(ep.recv_offset(), 4, "recv_offset matches the returned Deliver");
+    }
+
+    #[test]
+    fn valid_data_before_bad_message_is_returned_with_error_keeper() {
+        data_then_bad_message_keeps_delivered_bytes(true);
+    }
+
+    #[test]
+    fn valid_data_before_bad_message_is_returned_with_error_local() {
+        data_then_bad_message_keeps_delivered_bytes(false);
     }
 
     #[test]

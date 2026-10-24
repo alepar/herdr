@@ -577,15 +577,21 @@ impl Conn<'_> {
                 }
             }
         }
-        match self.endpoint.on_leg_bytes(now, bytes) {
-            Err(err) => self.leg_ended(&format!("protocol error: {err}")),
-            Ok(events) => {
-                for event in events {
-                    if self.done.is_some() || self.leg.is_none() {
-                        break;
-                    }
-                    self.on_session_event(event);
-                }
+        let (events, error) = match self.endpoint.on_leg_bytes(now, bytes) {
+            Ok(events) => (events, None),
+            Err(err) => (err.delivered, Some(err.error)),
+        };
+        // Bytes decoded before a protocol error are already counted in recv_offset and will
+        // not be resent: deliver them before the leg is dropped.
+        for event in events {
+            if self.done.is_some() || self.leg.is_none() {
+                break;
+            }
+            self.on_session_event(event);
+        }
+        if let Some(err) = error {
+            if self.done.is_none() && self.leg.is_some() {
+                self.leg_ended(&format!("protocol error: {err}"));
             }
         }
         if self.done.is_none() && self.stage == Stage::Linked {
