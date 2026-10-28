@@ -236,6 +236,7 @@ fn serve_connection(
         tx,
         rx,
         endpoint: SessionEndpoint::new(Role::Local, token, LOCAL_RING_CAP),
+        srtt_report: SrttReporter::default(),
         splitter: FrameSplitter::new(),
         stream: Some(stream),
         client: None,
@@ -287,6 +288,44 @@ enum Stage {
     Welcome,
     Linked,
     Backoff(Instant),
+}
+
+/// Re-inject a changed SRTT only when it moved by more than this fraction of the last reported
+/// value (1/5) or by more than `SRTT_REPORT_ABS`.
+const SRTT_REPORT_ABS: Duration = Duration::from_millis(20);
+
+/// The last SRTT reported to the client and the re-injection threshold.
+#[derive(Debug, Default)]
+struct SrttReporter {
+    last: Option<Duration>,
+}
+
+impl SrttReporter {
+    /// `Some(ms)` when `current` should be injected: the first known value, or a change of
+    /// more than 20 % or more than 20 ms from the last reported one. Unknown never injects.
+    fn update(&mut self, current: Option<Duration>) -> Option<u64> {
+        let current = current?;
+        let inject = match self.last {
+            None => true,
+            Some(last) => {
+                let delta = current.abs_diff(last);
+                delta * 5 > last || delta > SRTT_REPORT_ABS
+            }
+        };
+        inject.then(|| {
+            self.last = Some(current);
+            as_ms(current)
+        })
+    }
+
+    /// A `Linked` was injected for another reason carrying `reported`; remember it.
+    fn reported(&mut self, reported: Option<Duration>) {
+        self.last = reported;
+    }
+}
+
+fn as_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct Down {
@@ -406,6 +445,8 @@ struct Conn<'a> {
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
     endpoint: SessionEndpoint,
+    /// What the client was last told about the link's SRTT.
+    srtt_report: SrttReporter,
     splitter: FrameSplitter,
     /// The client stream until the client threads take it (and for the leg-0 fallback).
     stream: Option<LocalStream>,
@@ -808,7 +849,12 @@ impl Conn<'_> {
                 );
                 if let Some(down) = self.down.take() {
                     if down.resuming_injected && !self.client_closed {
-                        self.inject(LinkStatus::Linked);
+                        // The new leg has no samples yet: tell the client it is unknown.
+                        let srtt = self.srtt();
+                        self.inject(LinkStatus::Linked {
+                            srtt_ms: srtt.map(as_ms),
+                        });
+                        self.srtt_report.reported(srtt);
                     }
                 }
                 self.attempt = 0;
@@ -937,9 +983,14 @@ impl Conn<'_> {
     fn inject(&mut self, status: LinkStatus) {
         let state = match status {
             LinkStatus::Resuming { .. } => "resuming",
-            LinkStatus::Linked => "linked",
+            LinkStatus::Linked { .. } => "linked",
         };
-        self.trace.emit("inject", serde_json::json!({ "state": state }));
+        let srtt_ms = match status {
+            LinkStatus::Linked { srtt_ms } => srtt_ms,
+            LinkStatus::Resuming { .. } => None,
+        };
+        self.trace
+            .emit("inject", serde_json::json!({ "state": state, "srtt_ms": srtt_ms }));
         self.client_send(ClientOut::Injected(encode_link_frame(&status)));
     }
 
@@ -1044,6 +1095,21 @@ impl Conn<'_> {
         }
         self.update_delivered(now);
         self.pump_sends(now);
+        if self.client.is_some() && !self.client_closed {
+            if let Some(ms) = self.srtt_report.update(self.srtt()) {
+                self.inject(LinkStatus::Linked { srtt_ms: Some(ms) });
+            }
+        }
+    }
+
+    /// Current SRTT of this connection's link, or unknown: the leg's own RTT probe when it
+    /// has one (QUIC), else the session's EWMA. The only SRTT source for bridge code.
+    // Read by tick_linked now; 3b's RenderReorder is the second caller.
+    fn srtt(&self) -> Option<Duration> {
+        self.leg
+            .as_ref()
+            .and_then(|io| io.leg.rtt())
+            .or_else(|| self.endpoint.srtt())
     }
 
     /// The ack rule: held-back partial bytes count as delivered, queued bytes do not.
@@ -2184,6 +2250,116 @@ mod tests {
 
     // ---- tests -------------------------------------------------------------------------------
 
+    // ---- SRTT reporting ------------------------------------------------------------------------
+
+    fn dur(n: u64) -> Option<Duration> {
+        Some(Duration::from_millis(n))
+    }
+
+    #[test]
+    fn srtt_reporter_first_sample_injects() {
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(dur(80)), Some(80));
+        assert_eq!(r.update(dur(80)), None);
+    }
+
+    #[test]
+    fn srtt_reporter_ignores_small_changes() {
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(dur(100)), Some(100));
+        assert_eq!(r.update(dur(115)), None);
+        assert_eq!(r.update(dur(85)), None);
+        assert_eq!(r.update(dur(121)), Some(121));
+        // Measured against the last reported value, not the last seen one.
+        assert_eq!(r.update(dur(130)), None);
+        // More than 20 % of a small value, though under 20 ms.
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(dur(40)), Some(40));
+        assert_eq!(r.update(dur(48)), None, "exactly 20 % is not more than 20 %");
+        assert_eq!(r.update(dur(49)), Some(49));
+    }
+
+    #[test]
+    fn srtt_reporter_ms_threshold() {
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(dur(400)), Some(400));
+        assert_eq!(r.update(dur(419)), None);
+        assert_eq!(r.update(dur(421)), Some(421));
+        assert_eq!(r.update(dur(400)), Some(400));
+        assert_eq!(r.update(dur(380)), None, "exactly 20 ms is not more than 20 ms");
+    }
+
+    #[test]
+    fn srtt_reporter_unknown_never_injects() {
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(None), None);
+        assert_eq!(r.update(dur(50)), Some(50));
+        assert_eq!(r.update(None), None);
+    }
+
+    #[test]
+    fn srtt_reporter_resets_after_linked() {
+        let mut r = SrttReporter::default();
+        assert_eq!(r.update(dur(100)), Some(100));
+        r.reported(None);
+        assert_eq!(r.update(dur(100)), Some(100));
+        r.reported(dur(300));
+        assert_eq!(r.update(dur(305)), None);
+    }
+
+    /// Heartbeat/ACK samples on a synthetic clock reach the reporter through `srtt()`.
+    #[test]
+    fn heartbeat_samples_drive_the_reporter_on_a_fake_clock() {
+        let token: Token = "000102030405060708090a0b0c0d0e0f".parse().unwrap();
+        let mut local = SessionEndpoint::new(Role::Local, token, 1 << 20);
+        let mut keeper = SessionEndpoint::new(Role::Keeper, token, 1 << 20);
+        let t0 = Instant::now();
+        let hello = local.hello(t0, 60_000, None);
+        let events = keeper.on_leg_bytes(t0, &hello).unwrap();
+        let [SessionEvent::Hello(h)] = &events[..] else { panic!("{events:?}") };
+        let welcome = keeper.welcome(t0, WelcomeStatus::New, h.recv_offset).unwrap();
+        keeper.on_leg_bytes(t0, &[]).unwrap();
+        local.on_leg_bytes(t0, &welcome).unwrap();
+        let mut reporter = SrttReporter::default();
+        assert_eq!(reporter.update(local.srtt()), None);
+        let mut round = |at: Instant, rtt: Duration| {
+            assert!(local.poll_send(at).is_some_and(|m| m == SessionMsg::Heartbeat.encode()));
+            keeper.on_leg_bytes(at + rtt / 2, &SessionMsg::Heartbeat.encode()).unwrap();
+            let ack = keeper.poll_send(at + rtt / 2).unwrap();
+            local.on_leg_bytes(at + rtt, &ack).unwrap();
+            reporter.update(local.srtt())
+        };
+        let mut at = t0 + secs(2);
+        assert_eq!(round(at, Duration::from_millis(100)), Some(100));
+        at += secs(2);
+        assert_eq!(round(at, Duration::from_millis(110)), None, "srtt 101 ms");
+        // A sustained jump to 400 ms moves the EWMA past the threshold within a few samples.
+        let mut injected = Vec::new();
+        for _ in 0..12 {
+            at += secs(2);
+            injected.extend(round(at, Duration::from_millis(400)));
+        }
+        assert!(injected.len() >= 2 && injected.windows(2).all(|w| w[0] < w[1]), "{injected:?}");
+    }
+
+    #[test]
+    fn linked_session_reports_srtt_once_heartbeats_are_answered() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        // The bridge's first heartbeat goes out 2 s after the leg comes up; the fake keeper's
+        // session endpoint answers it with an ACK.
+        loop {
+            let (_, got) = client.next_seen(WAIT);
+            if matches!(got, Seen::Link(LinkStatus::Linked { srtt_ms: Some(_) })) {
+                break;
+            }
+            assert!(
+                !matches!(got, Seen::Link(LinkStatus::Resuming { .. })),
+                "unexpected outage: {got:?}"
+            );
+        }
+    }
+
     #[test]
     fn leg_killed_mid_frame_client_sees_whole_frames() {
         let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
@@ -2237,7 +2413,7 @@ mod tests {
         dialer.block(false);
         loop {
             let (_, got) = client.next_seen(WAIT);
-            if got == Seen::Link(LinkStatus::Linked) {
+            if matches!(got, Seen::Link(LinkStatus::Linked { .. })) {
                 break;
             }
             assert!(is_resuming(&got), "{got:?}");
