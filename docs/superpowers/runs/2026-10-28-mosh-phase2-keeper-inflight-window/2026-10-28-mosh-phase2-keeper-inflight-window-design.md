@@ -36,7 +36,9 @@ fork's existing fake-ssh harness.
 The window is a sender-side, delay-based controller (Vegas/LEDBAT family) in a new fork module,
 fed only by DATA send times and ACK arrival. The receiver and the session protocol are unchanged:
 `WINDOW` stays as the hard cap, so a new sender talking to a Phase 1 receiver still works, and
-`SESSION_PROTOCOL_VERSION` does not change. The window floor is two ack quanta (128 KiB). Link
+`SESSION_PROTOCOL_VERSION` does not change. The window floor is two ack quanta (128 KiB). The
+1.5 s goal is claimed for link rates `R >= 256 KiB/s`; below that the floor alone is about 0.5 s
+or more of queue and the goal is not claimed (§5). Link
 emulation is a delay-and-rate relay the fake `ssh` inserts when a harness knob is set, written in
 Perl like the harness's existing throttle. D3 is applied as written: the server-side backlog is
 measured and recorded; server pacing is not built in this run. If the measurement shows the
@@ -48,15 +50,23 @@ RTT signal inside the server and upstream edits beyond the hook budget.
 ### 1. Window controller: delay-based, sender-side (chosen)
 
 **Recommended:** a new `InflightWindow` type in `src/mosh/window.rs`, owned by each
-`SessionEndpoint`. It records the first-transmission instant of each DATA chunk's end offset (a
-bounded deque, at most `WINDOW / MAX_DATA_CHUNK` entries) and takes an RTT sample on each ACK that
-advances the acked offset by at least `ACK_EVERY_BYTES`. Such an ACK was triggered by byte count,
-not by the 200 ms timer, so the sample is not inflated by the receiver's ack delay. The sample is
-`now - first_send(byte at ack-1)`. Replayed chunks are never sampled (Karn's rule): the deque is
-cleared when a leg goes up or down. State: `base_rtt`, the minimum sample on the current leg;
-`epoch_min`, the minimum sample in the current epoch; `window`. Once per epoch (an epoch ends
-when an ACK covers the first byte sent after the epoch began, about one RTT):
+`SessionEndpoint`. Its bookkeeping is in bytes and offsets, not per chunk. The send record maps
+offsets to first-transmission instants, coalesced to at most one record per `ACK_EVERY_BYTES`
+boundary of offset: a fresh send whose end offset falls in the same 64 KiB quantum as the newest
+record updates nothing (the record keeps the earlier instant, so a sample never under-reads), and
+one that crosses a boundary adds a record. The record is therefore bounded by bytes in flight
+(at most `CAP / ACK_EVERY_BYTES` + 1 entries) whatever the chunk sizes; at the bound records are
+coalesced, never dropped. It takes an RTT sample on each ACK that advances the acked offset by at
+least `ACK_EVERY_BYTES`. Such an ACK was triggered by byte count, not by the 200 ms timer, so the
+sample is not inflated by the receiver's ack delay. The sample is `now - first_send(byte at
+ack-1)`, read from the record covering that byte. Timer-only ACKs (advance below
+`ACK_EVERY_BYTES`) are not sampled. Replayed chunks are never sampled (Karn's rule): the record
+is cleared when a leg goes up or down. State: `base_rtt`, the minimum sample on the current leg;
+`epoch_min`, the minimum sample in the current epoch (none until one arrives); `window`; and the
+epoch boundary, a byte offset (the send offset when the epoch began), not a record entry. Once
+per epoch (an epoch ends when an ACK covers the boundary offset, about one RTT):
 
+- if the epoch has no qualifying sample: hold the window (no grow, no shrink);
 - queueing delay `q = epoch_min - base_rtt`;
 - if `q > TARGET_QUEUE_DELAY` (50 ms): `window = max(FLOOR, window * 3 / 4)`;
 - otherwise, if the sender was window-limited during the epoch (it had bytes to send and no
@@ -68,9 +78,21 @@ Constants: `FLOOR = 2 * ACK_EVERY_BYTES` (128 KiB), `INITIAL = 256 KiB`, `CAP = 
 `TARGET_QUEUE_DELAY = 50 ms`. A new leg resets the controller to `INITIAL` with no samples,
 because a reconnect may be a different path.
 
+Sampling rate: a sample needs 64 KiB acked within one 200 ms ack timer, so below about
+320 KiB/s, or with traffic in sub-64 KiB bursts, the controller may sample rarely and then
+holds. Under the acceptance profile's sustained flood the keeper reads full 64 KiB chunks
+(`source_room()` is at least one chunk whenever the window has a chunk of room), so each
+delivered chunk triggers a byte-count ACK and epochs sample.
+
+`base_rtt` is per leg and does not age: a same-leg path RTT increase above 50 ms reads as
+queueing and pins the window at `FLOOR` until the next leg (a reconnect re-learns it). This
+tradeoff is accepted; rolling minima (LEDBAT's base-delay history) are deferred.
+
 **Considered:**
-- A fixed smaller window (for example 256 KiB). Simplest, but too large for a 128 KiB/s link and
-  too small for a fast long-haul one. Rejected: does not adapt.
+- A fixed smaller window (for example 256 KiB). Simplest, but it cannot track both ends of the
+  range: 256 KiB is about 1 s of queue at 256 KiB/s and 0.25 s at 1 MiB/s, and too small for a
+  fast long-haul link. The adaptive window's own minimum is bounded by `FLOOR` (about 0.5 s of
+  queue at 256 KiB/s, the bottom of the supported range, §5). Rejected: does not adapt.
 - A BBR-style window, `gain * delivery_rate * min_rtt`. Needs a delivery-rate estimator and pacing
   to be stable. Rejected as more machinery than a TUI's traffic needs. The delay signal directly
   measures the staleness we want to bound.
@@ -107,8 +129,10 @@ queue than intended.
 **Recommended:** a `link` knob in `tests/mosh_harness.rs` holding
 `<one-way delay ms> <rate bytes/s>`. When it is present, the fake `ssh` pipes both directions of
 a session or plain leg through a delay line: a Perl script, written by the harness next to the
-fake `ssh`. Each chunk read at time `t` is released at `max(t + delay, previous release + len /
-rate)`, so the line models propagation delay plus a serializing bottleneck. It is single
+fake `ssh`. Each chunk read at time `t_arrival` departs at
+`depart = max(t_arrival, prev_depart) + len / rate` and is delivered at `depart + delay`, so every
+chunk pays serialization, idle line or not, and the line models a serializing bottleneck plus
+propagation delay. It is single
 threaded, uses `select`, and keeps an in-memory queue. It follows the existing `throttle` knob's
 pattern, needs no root and no `tc`, and runs wherever the harness runs. Loss is not emulated. On a
 TCP link, loss shows up as stalls, and the loss phases (3a and 3b) own that behaviour.
@@ -124,20 +148,32 @@ TCP link, loss shows up as stalls, and the loss phases (3a and 3b) own that beha
 
 **Recommended:** `tests/mosh_pacing.rs`:
 
-- **Ctrl-C under flood:** link `150 ms` one way and rate `R`. A pane runs `yes; echo <marker>`,
-  and the test waits until the client output has grown for 2 s of flood. It writes `\x03` into the
-  client pty and measures the time until the client screen shows the marker. The assertion is
-  `<= 1.5 s` (5 RTT).
-- **No throughput regression:** with no link knob (LAN), the keeper trace shows the window
-  growing to at least 1 MiB under the same flood.
+- **Ctrl-C under flood:** link `150 ms` one way and rate `R`. The pane command must print the
+  marker after SIGINT and must not contain the marker literally: an interactive `sh` aborts the
+  rest of a command list when its foreground child dies of SIGINT, so `yes; echo <marker>` never
+  prints it, and the echoed command line would match a literal marker. The pane runs
+  `trap 'printf "%s%s\n" MA RKER' INT; yes; trap - INT` (or equivalent): the trap prints the
+  marker built by expansion, so the typed line never contains it. The test waits until the
+  client output has grown for 2 s of flood. It writes `\x03` into the client pty and measures the
+  time until the client screen shows the marker. The assertion is `<= 1.5 s` (5 RTT).
+- **No throughput regression:** with no link knob (LAN), under the same flood, client-side
+  delivered bytes/s with the adaptive window is within 10 % of the Phase 1 fixed-window
+  throughput recorded in the baseline (§6). (Window size is not asserted: on a sub-ms path with a
+  source-bound flood the sender is rarely window-limited, so the window need not grow.)
 - **Window converges:** under the slow profile, the keeper's traced window settles to at most
-  `max(FLOOR, 2 * R * 0.3 s)` plus one chunk.
+  `max(FLOOR, 2 * R * 0.3 s)` plus one chunk. This is an upper bound only; a window pinned at
+  `FLOOR` also satisfies it. Lower-bound sanity: the traced window is never below `FLOOR`, and the
+  measured goodput under the flood is at least `0.8 * R`.
 
 `R` is fixed by the measurement leaf (§6) as the largest of 256 KiB/s and 1 MiB/s that is at most
 half the server's measured flood output rate at the test terminal size. The terminal size may be
 raised from 80x24 to reach a usable flood rate. With the Phase 1 fixed window the same test must
 fail the 1.5 s bound. That baseline is measured once and recorded as evidence, not kept as a CI
 test.
+
+Supported range: the 1.5 s goal is claimed for `R >= 256 KiB/s`. Below that, `FLOOR` (128 KiB)
+alone is about 0.5 s or more of queue, before the server-socket backlog, and the goal is not
+claimed; no acceptance test runs there.
 
 **Considered:** a CI test that runs both the fixed and the adaptive window. It would need a
 production knob to force the fixed window. Rejected: configurability nobody needs.
@@ -147,7 +183,8 @@ production knob to force the fixed window. Rejected: configurability nobody need
 **Recommended:** a measurement leaf runs first on the link harness against the current code
 (fixed window). It records in the run's `evidence/`:
 
-- (a) the server's flood output rate at the test terminal size;
+- (a) the server's flood output rate at the test terminal size (the LAN flood throughput with the
+  fixed window, the parity reference for §5), and the LAN max ring occupancy with the fixed window;
 - (b) the Ctrl-C latency at the chosen profile (the baseline);
 - (c) the server-socket backlog. In the baseline the keeper trace does not exist yet, so it is
   sampled externally (the `Recv-Q` of the keeper's server-side Unix socket, via `ss -xp`). Once
@@ -186,16 +223,18 @@ change D3 reserves for evidence. Recorded as an option in the follow-up if (c) i
 - Frame-aware cancel-on-supersede (Phase 3b).
 - Loss emulation, QUIC (Phase 3a).
 - Prediction (Phase 4).
+- `base_rtt` aging (rolling minima); a same-leg RTT increase pins the window at `FLOOR` until the
+  next leg (§1).
 
 ## Key abstractions
 
 **InflightWindow** — new struct (`src/mosh/window.rs`), the sender-side delay-based (Vegas/LEDBAT-style) in-flight window controller; a sans-IO state machine.
-- Owns: the current window value and the constants FLOOR, INITIAL, CAP and TARGET_QUEUE_DELAY; the bounded send-time record of the first transmission of each fresh DATA chunk's end offset; RTT sampling, which only accepts ACKs that advance the acked offset by at least `ACK_EVERY_BYTES` and never samples replayed bytes (Karn's rule); `base_rtt` and `epoch_min`; epoch boundaries (an epoch ends at the first ACK that covers the first byte sent after the epoch began); the window-limited flag for the epoch; the decrease/grow/hold rule; reset to INITIAL with no samples. When an epoch closes it produces a snapshot (window, base_rtt, epoch_min) that its owner can take.
+- Owns: the current window value and the constants FLOOR, INITIAL, CAP and TARGET_QUEUE_DELAY; the send-time record of first transmissions of fresh DATA, kept in bytes/offsets and coalesced to at most one record per `ACK_EVERY_BYTES` boundary of offset (bounded by bytes in flight; coalesced, never dropped, at the bound); RTT sampling, which only accepts ACKs that advance the acked offset by at least `ACK_EVERY_BYTES` and never samples replayed bytes (Karn's rule); `base_rtt` and `epoch_min`; epoch boundaries, tracked as a byte offset (an epoch ends at the first ACK that covers the first byte sent after the epoch began); an epoch with no qualifying sample holds the window; the window-limited flag for the epoch; the decrease/grow/hold rule; reset to INITIAL with no samples. When an epoch closes it produces a snapshot (window, base_rtt, epoch_min) that its owner can take.
 - Hides: the control law and its tuning. No other code compares RTTs, knows the 50 ms target or knows the 3/4 and +1-chunk steps.
 - Must not: touch the ring, offsets beyond those it is told about, sockets, the clock (time is an input) or trace output. It must not know which side it runs on. The keeper does the tracing and the FIONREAD read. `SessionEndpoint` decides when a leg is up.
 - Relationships: composed by `SessionEndpoint`, one per endpoint, so the keeper and the local end each have one. It depends on nothing fork-side except the `session.rs` constants it derives from (`WINDOW`, `ACK_EVERY_BYTES`, `MAX_DATA_CHUNK`). No trait: only one controller exists, and the spec names no second one (§1 rejects BBR and fixed windows instead of keeping them as alternatives).
 - Lifecycle: built with the endpoint and lives for the whole session. `SessionEndpoint` resets it on leg up and leg down. It is single-owner and moves with the endpoint under the keeper's table lock. Nothing needs releasing.
-- Errors: none. Implausible inputs are ignored, never reported: an ACK below the oldest record, an empty deque, a sample before any send. An ACK beyond the sent bytes is already a leg protocol error raised by `SessionEndpoint` before the controller sees it.
+- Errors: none. Implausible inputs are ignored, never reported: an ACK below the oldest record, an empty send record, a sample before any send. An ACK beyond the sent bytes is already a leg protocol error raised by `SessionEndpoint` before the controller sees it.
 
 **SessionEndpoint** — extended: it now owns an `InflightWindow` and is the only place that feeds it. `poll_send` reports fresh (non-replay) DATA sends. The ACK path reports the new acked offset. `set_up` and `leg_down` reset the controller. `may_read_source`, `poll_send`'s room calculation and the new `source_room()` use the controller's current window while a leg is up, and the ring cap while down. `WINDOW` is now only the hard cap, and the `push_source` assertion is restated against it. It passes the epoch snapshot on to its owner unchanged.
 

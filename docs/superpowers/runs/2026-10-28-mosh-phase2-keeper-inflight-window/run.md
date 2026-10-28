@@ -11,9 +11,10 @@ spec: 2026-10-28-mosh-phase2-keeper-inflight-window-design.md
 epic: mosh-hex
 branch: super-auto/mosh-phase2-keeper-inflight-window
 base: mosh
-roastDesignRound: 1
+roastDesignRound: 2
 findingsLedgerDesign: findings-ledger-design.md
 roast-design: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1.md
+stepBackDesign-round-1: local — seven independent-or-clustered r1 findings, no mechanical triggers; two clusters (C1 sampling bookkeeping, C2 claims derivable from the law) fixed by one rule each
 
 approvals:
 - top-split · auto · mosh-hex.1 LEAF, mosh-hex.2 LEAF, mosh-hex.3 LEAF, mosh-hex.4 LEAF, mosh-hex.5 LEAF
