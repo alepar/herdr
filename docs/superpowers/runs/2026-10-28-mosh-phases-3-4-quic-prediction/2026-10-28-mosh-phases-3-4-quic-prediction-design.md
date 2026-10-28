@@ -5,7 +5,7 @@
 A herdr remote session can run over a QUIC leg that survives a network switch or a long suspend
 and resumes within about one RTT. Under 10 % packet loss, typing and output keep flowing instead of
 stalling behind lost render frames. With prediction enabled at 150 ms RTT, most printable keys
-appear locally within 5 ms, and wrong predictions are cleared within one RTT.
+appear locally within 5 ms, and wrong predictions are cleared within one RTT plus mosh's 50 ms echo delay and one render (refined in the Phase 4 design).
 
 Builds on Phases 1 and 2 (`docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/`,
 `docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/`, code in `src/mosh/`).
@@ -179,7 +179,7 @@ the link.
 - **3b:** at 10 % loss and 150 ms one-way delay, typing produces visible output within 2 s, and
   `yes`-style output keeps advancing. Measured against the same profile over the ssh leg.
 - **4:** at 150 ms one-way delay with prediction on, the median local echo of printable keys in a
-  shell is under 5 ms, and a wrong prediction is cleared within 1 RTT plus one render.
+  shell is under 5 ms, and a wrong prediction is cleared within 1 RTT + 50 ms + one render (Phase 4 design).
 
 ### 7. Constraints held
 

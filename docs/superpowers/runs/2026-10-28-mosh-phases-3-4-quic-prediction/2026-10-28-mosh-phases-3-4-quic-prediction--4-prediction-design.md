@@ -90,7 +90,7 @@ New upstream lines, each one tagged statement:
 | Client disconnect | 1 |
 | `x-mosh-echo-v1` status line | 1 |
 
-That is 6–7 lines. Running total after 3a and 3b is about 25 of 30.
+That is 7 added lines (the observe and paint lines are edits). Running total: 12 today + 3a 1 + 3b 4 + Phase 4 7 + the mosh-19g.5 mount line ≈ 25 of 30.
 
 ### 5. Acceptance and tests
 
