@@ -185,6 +185,35 @@ change D3 reserves for evidence. Recorded as an option in the follow-up if (c) i
 - Loss emulation, QUIC (Phase 3a).
 - Prediction (Phase 4).
 
+## Key abstractions
+
+**InflightWindow** — new struct (`src/mosh/window.rs`), the sender-side delay-based (Vegas/LEDBAT-style) in-flight window controller; a sans-IO state machine.
+- Owns: the current window value and the constants FLOOR, INITIAL, CAP and TARGET_QUEUE_DELAY; the bounded send-time record of the first transmission of each fresh DATA chunk's end offset; RTT sampling, which only accepts ACKs that advance the acked offset by at least `ACK_EVERY_BYTES` and never samples replayed bytes (Karn's rule); `base_rtt` and `epoch_min`; epoch boundaries (an epoch ends at the first ACK that covers the first byte sent after the epoch began); the window-limited flag for the epoch; the decrease/grow/hold rule; reset to INITIAL with no samples. When an epoch closes it produces a snapshot (window, base_rtt, epoch_min) that its owner can take.
+- Hides: the control law and its tuning. No other code compares RTTs, knows the 50 ms target or knows the 3/4 and +1-chunk steps.
+- Must not: touch the ring, offsets beyond those it is told about, sockets, the clock (time is an input) or trace output. It must not know which side it runs on. The keeper does the tracing and the FIONREAD read. `SessionEndpoint` decides when a leg is up.
+- Relationships: composed by `SessionEndpoint`, one per endpoint, so the keeper and the local end each have one. It depends on nothing fork-side except the `session.rs` constants it derives from (`WINDOW`, `ACK_EVERY_BYTES`, `MAX_DATA_CHUNK`). No trait: only one controller exists, and the spec names no second one (§1 rejects BBR and fixed windows instead of keeping them as alternatives).
+- Lifecycle: built with the endpoint and lives for the whole session. `SessionEndpoint` resets it on leg up and leg down. It is single-owner and moves with the endpoint under the keeper's table lock. Nothing needs releasing.
+- Errors: none. Implausible inputs are ignored, never reported: an ACK below the oldest record, an empty deque, a sample before any send. An ACK beyond the sent bytes is already a leg protocol error raised by `SessionEndpoint` before the controller sees it.
+
+**SessionEndpoint** — extended: it now owns an `InflightWindow` and is the only place that feeds it. `poll_send` reports fresh (non-replay) DATA sends. The ACK path reports the new acked offset. `set_up` and `leg_down` reset the controller. `may_read_source`, `poll_send`'s room calculation and the new `source_room()` use the controller's current window while a leg is up, and the ring cap while down. `WINDOW` is now only the hard cap, and the `push_source` assertion is restated against it. It passes the epoch snapshot on to its owner unchanged.
+
+**Keeper** — extended: `server_reader` sizes each read with `source_room()`, rounded up to 4 KiB. When an epoch snapshot is available, the keeper reads `FIONREAD` on that session's server stream and emits one `window` trace event (`window`, `base_rtt`, `epoch_min`, `server_backlog`). Both the backlog measurement and the trace stay in the keeper.
+
+**LocalBridge** — extended: the client reader sizes reads with `source_room()`, the same as the keeper (§3, for symmetry). It does not emit trace events.
+
+**Fake-ssh harness (`tests/mosh_harness.rs`)** — extended: a `link` knob next to `throttle`, the Perl delay-line script the harness writes beside the fake `ssh`, and `Remote::set_link` / `clear_link`. These are test-only knob helpers, not a new abstraction.
+
+Variation: the control law and its constants are the only thing likely to vary (retuning, or the Phase 3a QUIC leg), and they all live in `InflightWindow`. The kind of leg (ssh now, QUIC later) does not reach the controller, because it sees only send and ACK events from `SessionEndpoint`. There is no registry: one controller, constructed in one place, the endpoint constructor.
+Walk-through: the keeper reads up to `source_room()` from the server and calls `push_source`. `poll_send` emits a DATA chunk and records its send time in `InflightWindow`. The local side delivers and ACKs every 64 KiB. `on_leg_bytes` passes the ACK to the controller, which samples the RTT. When the epoch closes, the controller shrinks the window (q > 50 ms) or grows it (window-limited). The keeper takes the snapshot, adds FIONREAD and traces it. A smaller `source_room()` then stops the keeper draining the server socket, so the server's latest-wins slot holds the backlog. A future change to a different law, or to tuning after Phase 3a QUIC, touches only `window.rs`. No caller changes, because callers see only "current window", "room" and "epoch snapshot".
+Gap settled here (fills §2, does not override it): with §3's reads sized to the window, ring occupancy never exceeds the window, so `poll_send` never stops for lack of room on its own and the window-limited signal would never fire. `SessionEndpoint` also marks the epoch window-limited when the source was refused room (occupancy reached the window); that decision lives in the endpoint and is passed to the controller, never inferred in the keeper or the bridge.
+Per spec §2: the upstream direction (client input) also runs the controller, at INITIAL. This is deliberate symmetry, not a missing per-side branch. Do not add a role check to turn it off.
+Per spec §5: there is deliberately no production switch between the fixed and the adaptive window. The fixed-window baseline is measured once on the pre-change code.
+
+Digest:
+- InflightWindow: owns the in-flight window value, RTT sampling (Karn, ack-quantum gating), epochs and the delay-based grow/shrink law;
+  new control behaviour and constants are added in `src/mosh/window.rs` only;
+  callers never compare RTTs, apply window arithmetic or emit traces from it; they feed send/ACK/reset events through `SessionEndpoint` and read the current window or epoch snapshot.
+
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
