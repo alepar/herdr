@@ -1,6 +1,6 @@
 //! Phase 2 pacing tests. This file starts with the link-emulation harness self-test
 //! (mosh-hex.1), the fixed-window baseline measurement helpers and ignored evidence tests
-//! (mosh-hex.3); the acceptance tests (mosh-hex.5) are added here later.
+//! (mosh-hex.3), and the Phase 2 acceptance tests (mosh-hex.5).
 
 #![cfg(unix)]
 
@@ -501,6 +501,337 @@ fn baseline_ctrl_c_latency_at_the_profile() {
             percentile(&samples, 95),
             samples.iter().max().copied().unwrap_or(0),
             samples.len()
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+// ---- Phase 2 acceptance (mosh-hex.5) ----------------------------------------------------
+
+/// Mirrors of `src/mosh/window.rs` (`FLOOR`, `INITIAL`) and `session::MAX_DATA_CHUNK`; test
+/// crates cannot import crate-private items. Test (3) asserts the first traced window equals
+/// `INITIAL`, which catches drift.
+const FLOOR: u64 = 128 * 1024;
+const INITIAL: u64 = 256 * 1024;
+const CHUNK: u64 = 64 * 1024;
+/// Amended bound (bead mosh-hex.5 amendment 2026-10-28): the spec's 1.5 s goal is recorded as
+/// an agent check in the evidence file, not asserted.
+const CTRL_C_BOUND: Duration = Duration::from_millis(2500);
+/// Median Ctrl-C latency with the fixed 2 MiB window at the same profile, measured once at
+/// `b9ea542` (evidence/phase2-acceptance.md). Test (1) requires <= 0.35 x this.
+const FIXED_WINDOW_CTRL_C_MS: u64 = 9182;
+/// Terminal size of the dense-flood tests: wide enough that herdr's screen diffs exceed R.
+const DENSE_SIZE: (u16, u16) = (400, 100);
+
+/// A content-dense flood that saturates the profile link (about 508 KiB/s on a LAN at
+/// `DENSE_SIZE`, about 1.98 x R), unlike `FLOOD_PROBE` (`yes` redraws a uniform screen, so
+/// herdr sends about 3 KB/s). Same trap construction as `FLOOD_PROBE`.
+const SATURATING_FLOOD: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)"#;
+
+/// Keeper `window` events, oldest first.
+fn window_events(remote: &Remote) -> Vec<serde_json::Value> {
+    remote
+        .keeper_events()
+        .into_iter()
+        .filter(|line| line["event"] == "window")
+        .collect()
+}
+
+/// The convergence bound: `max(FLOOR, 2 * R * 0.3 s)` plus one chunk.
+fn window_bound(rate: u64) -> u64 {
+    FLOOR.max(rate * 6 / 10) + CHUNK
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `wchar` of `/proc/<pid>/io`.
+#[cfg(target_os = "linux")]
+fn wchar(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/io"))
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("wchar: ")?.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// The fake ssh of the client's newest linked leg.
+#[cfg(target_os = "linux")]
+fn linked_ssh_pid(remote: &Remote, client: &str) -> u32 {
+    remote
+        .linked_legs(client)
+        .last()
+        .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+        .expect("no linked leg")
+}
+
+/// Direct children of `parent`.
+#[cfg(target_os = "linux")]
+fn children_of(parent: u32) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            stat.rsplit(')')
+                .next()
+                .and_then(|r| r.split_whitespace().nth(1))
+                == Some(parent.to_string().as_str())
+        })
+        .collect()
+}
+
+/// The downstream delay-line process of the client's newest linked leg: the child of the
+/// fake ssh whose stdout is the same pipe as the ssh's own stdout.
+#[cfg(target_os = "linux")]
+fn downstream_line_pid(remote: &Remote, client: &str) -> u32 {
+    let ssh = linked_ssh_pid(remote, client);
+    let out = std::fs::read_link(format!("/proc/{ssh}/fd/1")).expect("ssh stdout");
+    children_of(ssh)
+        .into_iter()
+        .find(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/fd/1"))
+                .ok()
+                .as_ref()
+                == Some(&out)
+        })
+        .expect("no downstream delay line")
+}
+
+/// SIGKILL the client's newest linked leg: the pipeline's processes first, then the fake ssh.
+/// `Remote::signal_leg` alone would kill only the ssh shell and leave the delay lines holding
+/// the client's pipe open, so the client would never see the leg die.
+#[cfg(target_os = "linux")]
+fn kill_linked_leg(remote: &Remote, client: &str) {
+    let ssh = linked_ssh_pid(remote, client);
+    for pid in children_of(ssh).into_iter().chain([ssh]) {
+        // SAFETY: kill(2) on a process of this test's own fake ssh pipeline.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// Start the dense flood in the remote pane (through the API) and settle it.
+fn start_dense_flood(remote: &Remote, client: &Client, settle: Duration) {
+    remote.pane_run(SATURATING_FLOOD);
+    settle_flood(client, settle);
+}
+
+#[test]
+fn ctrl_c_under_a_dense_flood_is_far_faster_than_the_fixed_window_at_300_ms_rtt() {
+    let _lock = timing_lock();
+    let remote = Remote::start();
+    remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
+    let mut client = attach(&remote, true, DENSE_SIZE);
+    let keepers = remote.keeper_pids();
+    let mut latencies = Vec::new();
+    for run in 1..=3 {
+        start_dense_flood(&remote, &client, Duration::from_secs(2));
+        let latency = ctrl_c_latency(&mut client, Duration::from_secs(60));
+        let backlog: Vec<u64> = window_events(&remote)
+            .iter()
+            .filter_map(|l| l["server_backlog"].as_u64())
+            .collect();
+        eprintln!(
+            "run {run}: ctrl-c {:.0} ms; window events {}; server_backlog p95 {} B (staleness {:.0} ms); ss now {:?}",
+            latency.as_secs_f64() * 1000.0,
+            window_events(&remote).len(),
+            percentile(&backlog, 95),
+            percentile(&backlog, 95) as f64 * 1000.0 / PROFILE_RATE as f64,
+            keeper_server_backlog(&keepers),
+        );
+        latencies.push(latency.as_millis() as u64);
+        thread::sleep(Duration::from_secs(2));
+    }
+    latencies.sort_unstable();
+    let median = latencies[1];
+    eprintln!("ctrl-c median {median} ms of {latencies:?} (spec goal 1500 ms)");
+    assert!(
+        median <= CTRL_C_BOUND.as_millis() as u64,
+        "median ctrl-c {median} ms > {CTRL_C_BOUND:?} ({latencies:?})"
+    );
+    assert!(
+        median * 100 <= FIXED_WINDOW_CTRL_C_MS * 35,
+        "median ctrl-c {median} ms > 0.35 x fixed-window {FIXED_WINDOW_CTRL_C_MS} ms ({latencies:?})"
+    );
+}
+
+#[test]
+fn lan_dense_flood_throughput_matches_the_plain_bridge() {
+    let _lock = timing_lock();
+    let remote = Remote::start();
+    let mut rates = [Vec::new(), Vec::new()]; // [plain, adaptive]
+    for round in 0..2 {
+        for (i, resume) in [false, true].into_iter().enumerate() {
+            let mut client = attach(&remote, resume, DENSE_SIZE);
+            start_dense_flood(&remote, &client, Duration::from_secs(2));
+            rates[i].push(client_rate(&client, Duration::from_secs(5)));
+            let _ = ctrl_c_latency(&mut client, Duration::from_secs(60));
+            eprintln!(
+                "round {round} resume={resume}: {:.0} B/s",
+                rates[i].last().copied().unwrap_or(0.0)
+            );
+        }
+    }
+    let mean = |v: &Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
+    let (plain, adaptive) = (mean(&rates[0]), mean(&rates[1]));
+    eprintln!("plain {plain:.0} B/s, adaptive {adaptive:.0} B/s");
+    assert!(
+        adaptive >= 0.9 * plain,
+        "adaptive {adaptive:.0} B/s < 0.9 x plain {plain:.0} B/s"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_window_converges_near_the_bandwidth_delay_product_under_a_dense_flood() {
+    let _lock = timing_lock();
+    let remote = Remote::start();
+    remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
+    let mut client = attach(&remote, true, DENSE_SIZE);
+    let start_ms = now_ms();
+    remote.pane_run(SATURATING_FLOOD);
+    settle_flood(&client, Duration::from_secs(1));
+    let line = downstream_line_pid(&remote, &client.id);
+    thread::sleep(Duration::from_secs(10));
+    let (w0, t0) = (wchar(line), Instant::now());
+    thread::sleep(Duration::from_secs(10));
+    let goodput = (wchar(line) - w0) as f64 / t0.elapsed().as_secs_f64();
+    let end_ms = now_ms();
+    let _ = ctrl_c_latency(&mut client, Duration::from_secs(60));
+
+    let events = window_events(&remote);
+    assert_eq!(
+        events.first().and_then(|l| l["window"].as_u64()),
+        Some(INITIAL)
+    );
+    let flood: Vec<(u64, u64)> = events
+        .iter()
+        .filter_map(|l| Some((l["ms"].as_u64()?, l["window"].as_u64()?)))
+        .filter(|(ms, _)| *ms >= start_ms && *ms <= end_ms)
+        .collect();
+    let mut last_5s: Vec<u64> = flood
+        .iter()
+        .filter(|(ms, _)| *ms + 5_000 >= end_ms)
+        .map(|(_, w)| *w)
+        .collect();
+    last_5s.sort_unstable();
+    let median = last_5s.get(last_5s.len() / 2).copied();
+    let bound = window_bound(PROFILE_RATE);
+    eprintln!(
+        "median window {median:?} (bound {bound}); goodput {goodput:.0} B/s of {PROFILE_RATE} ({:.2} R; spec 0.8 R agent check); {} epochs, {} in the last 5 s",
+        goodput / PROFILE_RATE as f64,
+        flood.len(),
+        last_5s.len()
+    );
+    let median = median.expect("no window event in the last 5 s of the flood");
+    assert!(median <= bound, "median window {median} > {bound}");
+    assert!(
+        events
+            .iter()
+            .filter_map(|l| l["window"].as_u64())
+            .all(|w| w >= FLOOR),
+        "window below FLOOR: {events:?}"
+    );
+    assert!(
+        goodput >= 0.6 * PROFILE_RATE as f64,
+        "goodput {goodput:.0} B/s < 0.6 R ({})",
+        0.6 * PROFILE_RATE as f64
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_leg_killed_mid_dense_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() {
+    let _lock = timing_lock();
+    let remote = Remote::start();
+    remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
+    let mut client = attach(&remote, true, DENSE_SIZE);
+    start_dense_flood(&remote, &client, Duration::from_secs(2));
+    let first_leg = window_events(&remote).last().map(|l| l["leg"].clone());
+    kill_linked_leg(&remote, &client.id);
+    assert!(
+        remote.wait_leg_count(&client.id, 2, READY),
+        "no reconnect leg"
+    );
+    assert!(client.has_welcome_after_resume(READY), "no resumed welcome");
+    assert!(
+        mosh_harness::wait_for(READY, || window_events(&remote)
+            .iter()
+            .any(|l| Some(l["leg"].clone()) != first_leg)),
+        "no window event on the new leg"
+    );
+    let new_leg = window_events(&remote)
+        .into_iter()
+        .find(|l| Some(l["leg"].clone()) != first_leg)
+        .expect("a window event on the new leg");
+    assert_eq!(new_leg["window"].as_u64(), Some(INITIAL), "{new_leg}");
+    settle_flood(&client, Duration::from_secs(2));
+    let latency = ctrl_c_latency(&mut client, Duration::from_secs(60));
+    eprintln!(
+        "after resume: ctrl-c {:.0} ms",
+        latency.as_secs_f64() * 1000.0
+    );
+    assert!(
+        latency <= CTRL_C_BOUND,
+        "after resume: ctrl-c took {latency:?}"
+    );
+}
+
+/// Evidence only (mosh-hex.5, closes the mosh-hex.3 "unmeasured saturating backlog" gap):
+/// Ctrl-C latency, link goodput and server backlog at the profile rate under a flood that
+/// does saturate the link, at 400x100. Run by hand, against either code version:
+/// `cargo nextest run --locked --test mosh_pacing --run-ignored ignored-only --no-capture saturating_flood`
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "evidence only (mosh-hex.5); run by hand"]
+fn saturating_flood_evidence() {
+    let _lock = timing_lock();
+    let remote = Remote::start();
+    remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
+    let mut client = attach(&remote, true, (400, 100));
+    let keepers = remote.keeper_pids();
+    for run in 1..=3 {
+        let from_ms = now_ms();
+        let backlog = Sampler::start({
+            let keepers = keepers.clone();
+            move || keeper_server_backlog(&keepers)
+        });
+        remote.pane_run(SATURATING_FLOOD);
+        settle_flood(&client, Duration::from_secs(2));
+        let line = downstream_line_pid(&remote, &client.id);
+        let (w0, t0) = (wchar(line), Instant::now());
+        thread::sleep(Duration::from_secs(8));
+        let goodput = (wchar(line) - w0) as f64 / t0.elapsed().as_secs_f64();
+        let latency = ctrl_c_latency(&mut client, Duration::from_secs(60));
+        let ss = backlog.finish();
+        let traced: Vec<u64> = window_events(&remote)
+            .iter()
+            .filter(|l| l["ms"].as_u64() >= Some(from_ms))
+            .filter_map(|l| l["server_backlog"].as_u64())
+            .collect();
+        let windows: Vec<u64> = window_events(&remote)
+            .iter()
+            .filter(|l| l["ms"].as_u64() >= Some(from_ms))
+            .filter_map(|l| l["window"].as_u64())
+            .collect();
+        eprintln!(
+            "run {run}: ctrl-c {:.0} ms; goodput {goodput:.0} B/s of {PROFILE_RATE}; window p50 {} max {} ({} epochs); \
+             trace backlog p50 {} p95 {} max {}; ss backlog p50 {} p95 {} max {} ({} samples)",
+            latency.as_secs_f64() * 1000.0,
+            percentile(&windows, 50),
+            percentile(&windows, 100),
+            windows.len(),
+            percentile(&traced, 50),
+            percentile(&traced, 95),
+            percentile(&traced, 100),
+            percentile(&ss, 50),
+            percentile(&ss, 95),
+            percentile(&ss, 100),
+            ss.len(),
         );
         thread::sleep(Duration::from_secs(2));
     }
