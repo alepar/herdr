@@ -607,6 +607,7 @@ impl HeadlessServer {
             }
 
             // 8. Wait for next event.
+            #[rustfmt::skip] let () = crate::client::mosh_outage::server_hooks::echo_due(&self.clients, now); // mosh-fork hook
             let next_deadline = self
                 .app
                 .next_headless_loop_deadline_with_git_refresh(
@@ -623,6 +624,7 @@ impl HeadlessServer {
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
+            #[rustfmt::skip] let next_deadline = crate::client::mosh_outage::server_hooks::echo_deadline(next_deadline); // mosh-fork hook
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -944,6 +946,7 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        #[rustfmt::skip] let () = crate::client::mosh_outage::server_hooks::on_client_disconnected(client_id); // mosh-fork hook
         self.disconnect_native_graphics(client_id);
         let disconnected_focus = self
             .clients

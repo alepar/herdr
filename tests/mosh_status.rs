@@ -29,6 +29,7 @@ fn status_client_json_advertises_fork_capabilities() {
     assert!(caps.contains(&"x-mosh-resume-bridge-v1"), "{caps:?}");
     assert!(caps.contains(&"x-mosh-quic-v1"), "{caps:?}");
     assert!(caps.contains(&"x-mosh-supersede-v1"), "{caps:?}");
+    assert!(caps.contains(&"x-mosh-echo-v1"), "{caps:?}");
     let upstream = caps.iter().filter(|c| !c.starts_with("x-mosh-")).count();
     assert_eq!(upstream, 3, "exactly three upstream capabilities: {caps:?}");
 }
