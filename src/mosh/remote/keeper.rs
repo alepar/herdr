@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use super::keeper_leg::{KeeperLeg, LegShutdown};
 use super::quic_acceptor::{OnConn, QuicAcceptor, QuicConn, TokenVerdict};
+use super::render_lane::LaneQueue;
 use super::rendezvous::{self, KeeperRendezvous};
 use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
 use crate::remote::attach::mosh::quic::{BlockingRecv, BlockingSend, QUIC_SILENCE_WINDOW};
@@ -126,12 +127,17 @@ struct Session {
     eof: bool,
     /// The final END was written to the current leg.
     end_sent: bool,
+    /// Render frames travel on the leg's render lane; fixed by the HELLO that created the
+    /// session, never changed by a resume.
+    render_split: bool,
 }
 
 struct LegSlot {
     id: u64,
     /// For shutdown on steal, verdict or end.
     shutdown: LegShutdown,
+    /// The leg's render-lane queue; `None` on Unix legs. Closed when the leg is dropped.
+    lane: Option<LaneQueue>,
 }
 
 impl Shared {
@@ -199,6 +205,9 @@ impl Shared {
         if let Some(session) = table.sessions.remove(&token) {
             if let Some(leg) = session.leg {
                 (leg.shutdown)();
+                if let Some(lane) = &leg.lane {
+                    lane.close();
+                }
             }
             let _ = session.server.set_write_timeout(Some(CLOSE_BUDGET));
             let server = session.server;
@@ -216,6 +225,9 @@ impl Shared {
     fn detach_leg(&self, session: &mut Session, token: Token, now: Instant, reason: &str) {
         if let Some(leg) = session.leg.take() {
             (leg.shutdown)();
+            if let Some(lane) = &leg.lane {
+                lane.close();
+            }
         }
         session.endpoint.leg_down();
         session.end_sent = false;
@@ -635,11 +647,13 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
                     leg: Some(LegSlot {
                         id,
                         shutdown: Arc::clone(&leg.shutdown),
+                        lane: leg.render_lane.clone(),
                     }),
                     grace: Duration::from_millis(u64::from(hello.grace_ms)),
                     grace_deadline: None,
                     eof: false,
                     end_sent: false,
+                    render_split: hello.render_split,
                 },
             );
             drop(table);
@@ -684,6 +698,7 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
             session.leg = Some(LegSlot {
                 id,
                 shutdown: Arc::clone(&leg.shutdown),
+                lane: leg.render_lane.clone(),
             });
             shared.trace(
                 "resume",
@@ -723,7 +738,16 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
         return;
     }
     let status_name = if status == WelcomeStatus::New { "new" } else { "resumed" };
-    shared.trace("welcome", token, json!({"status": status_name}));
+    let render_split = shared
+        .lock()
+        .sessions
+        .get(&token)
+        .is_some_and(|session| session.render_split);
+    shared.trace(
+        "welcome",
+        token,
+        json!({"status": status_name, "render_split": render_split}),
+    );
     shared.trace("leg_up", token, json!({}));
     {
         let table = shared.lock();
@@ -917,8 +941,10 @@ fn server_writer(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::remote::attach::mosh::link_frames::FrameClass;
     use crate::remote::attach::mosh::quic::{self, QuicRuntime};
     use crate::remote::attach::mosh::quic_bootstrap::QuicToken;
+    use super::super::render_lane::Offer;
     use crate::remote::attach::mosh::window::{CAP, FLOOR, INITIAL};
     use std::sync::atomic::AtomicBool;
 
@@ -1420,11 +1446,13 @@ mod tests {
                 leg: Some(LegSlot {
                     id: 1,
                     shutdown: KeeperLeg::unix(leg).unwrap().shutdown,
+                    lane: None,
                 }),
                 grace: Duration::from_secs(60),
                 grace_deadline: None,
                 eof: true,
                 end_sent: true,
+                render_split: false,
             },
         );
         run_timers(
@@ -2032,6 +2060,140 @@ mod tests {
         let endpoint = &table.sessions[&token].endpoint;
         assert_eq!(endpoint.poll_timers(before + Duration::from_secs(7)), None);
         assert!(endpoint.poll_timers(Instant::now() + Duration::from_secs(8)).is_some());
+    }
+
+    fn admit_shared(dir: &TestDir) -> Arc<Shared> {
+        let server_socket = dir.0.join("server.sock");
+        let listener = UnixListener::bind(&server_socket).unwrap();
+        // Keep the listener alive for the test's duration; connections wait in its backlog.
+        std::mem::forget(listener);
+        Arc::new(Shared {
+            table: Mutex::new(Table {
+                sessions: HashMap::new(),
+                empty_since: None,
+            }),
+            kick: Condvar::new(),
+            server_socket,
+            trace_dir: None,
+            next_id: AtomicU64::new(1),
+            pending: AtomicUsize::new(0),
+            quic: QuicAcceptor::default(),
+        })
+    }
+
+    #[test]
+    fn render_split_fixed_at_new() {
+        let dir = TestDir::new();
+        let shared = admit_shared(&dir);
+        let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        local.set_render_split(true);
+        let token = local.token();
+        let hello = hello_for(&mut local);
+        assert!(hello.render_split);
+        let (leg_end, _peer) = UnixStream::pair().unwrap();
+        let admitted = admit(&shared, KeeperLeg::unix(leg_end).unwrap(), hello)
+            .unwrap()
+            .unwrap();
+        assert!(shared.lock().sessions[&token].render_split);
+
+        // A resume that says `false` does not change the session.
+        local.set_render_split(false);
+        local
+            .on_leg_bytes(Instant::now(), &admitted.welcome)
+            .unwrap();
+        let resume = hello_for(&mut local);
+        assert!(resume.resume && !resume.render_split);
+        let (leg_end, _peer2) = UnixStream::pair().unwrap();
+        assert!(admit(&shared, KeeperLeg::unix(leg_end).unwrap(), resume)
+            .unwrap()
+            .is_some());
+        assert!(shared.lock().sessions[&token].render_split);
+
+        // A session created without the flag stays unsplit even if a resume claims it.
+        let mut plain = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        let plain_token = plain.token();
+        let hello = hello_for(&mut plain);
+        let (leg_end, _peer3) = UnixStream::pair().unwrap();
+        let admitted = admit(&shared, KeeperLeg::unix(leg_end).unwrap(), hello)
+            .unwrap()
+            .unwrap();
+        assert!(!shared.lock().sessions[&plain_token].render_split);
+        plain.set_render_split(true);
+        plain
+            .on_leg_bytes(Instant::now(), &admitted.welcome)
+            .unwrap();
+        let resume = hello_for(&mut plain);
+        let (leg_end, _peer4) = UnixStream::pair().unwrap();
+        assert!(admit(&shared, KeeperLeg::unix(leg_end).unwrap(), resume)
+            .unwrap()
+            .is_some());
+        assert!(!shared.lock().sessions[&plain_token].render_split);
+    }
+
+    #[test]
+    fn unix_legs_have_no_lane() {
+        let dir = TestDir::new();
+        let shared = admit_shared(&dir);
+        let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        let token = local.token();
+        let hello = hello_for(&mut local);
+        let (leg_end, _peer) = UnixStream::pair().unwrap();
+        let admitted = admit(&shared, KeeperLeg::unix(leg_end).unwrap(), hello)
+            .unwrap()
+            .unwrap();
+        assert!(shared.lock().sessions[&token].leg.as_ref().unwrap().lane.is_none());
+        local
+            .on_leg_bytes(Instant::now(), &admitted.welcome)
+            .unwrap();
+        let resume = hello_for(&mut local);
+        let (leg_end, _peer2) = UnixStream::pair().unwrap();
+        assert!(admit(&shared, KeeperLeg::unix(leg_end).unwrap(), resume)
+            .unwrap()
+            .is_some());
+        assert!(shared.lock().sessions[&token].leg.as_ref().unwrap().lane.is_none());
+    }
+
+    #[test]
+    fn admit_copies_the_lane_and_a_steal_closes_it() {
+        let dir = TestDir::new();
+        let shared = admit_shared(&dir);
+        let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        let token = local.token();
+        let hello = hello_for(&mut local);
+        let (leg_end, _peer) = UnixStream::pair().unwrap();
+        let mut leg = KeeperLeg::unix(leg_end).unwrap();
+        let first_lane = LaneQueue::new();
+        leg.render_lane = Some(first_lane.clone());
+        let admitted = admit(&shared, leg, hello).unwrap().unwrap();
+        assert!(shared.lock().sessions[&token].leg.as_ref().unwrap().lane.is_some());
+
+        // The slot holds the same queue the leg carried.
+        let slot_lane = shared.lock().sessions[&token]
+            .leg
+            .as_ref()
+            .unwrap()
+            .lane
+            .clone()
+            .unwrap();
+        slot_lane.offer(FrameClass::Chained, vec![9]);
+
+        // Stealing the leg closes the old lane (drained, then ended); the new lane is its own.
+        local
+            .on_leg_bytes(Instant::now(), &admitted.welcome)
+            .unwrap();
+        let resume = hello_for(&mut local);
+        let (leg_end, _peer2) = UnixStream::pair().unwrap();
+        let mut leg = KeeperLeg::unix(leg_end).unwrap();
+        let second_lane = LaneQueue::new();
+        leg.render_lane = Some(second_lane.clone());
+        assert!(admit(&shared, leg, resume).unwrap().is_some());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(
+            rt.block_on(first_lane.pop()),
+            Some((FrameClass::Chained, vec![9]))
+        );
+        assert_eq!(rt.block_on(first_lane.pop()), None);
+        assert_eq!(second_lane.offer(FrameClass::Chained, vec![1]), Offer::Accepted);
     }
 
     #[test]

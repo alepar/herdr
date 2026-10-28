@@ -16,6 +16,8 @@ mod keeper;
 mod keeper_leg;
 #[cfg(unix)]
 mod quic_acceptor;
+#[cfg(unix)]
+mod render_lane;
 
 use std::io;
 

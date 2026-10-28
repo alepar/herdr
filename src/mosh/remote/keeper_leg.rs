@@ -14,8 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Placeholder for the render-lane queue handle; mosh-19g.2.8 replaces this type (same field).
-pub(super) struct RenderLaneSlot;
+use super::render_lane::LaneQueue;
 
 /// Closes the leg; callable from any thread (steal, silence verdict, session end).
 pub(super) type LegShutdown = Arc<dyn Fn() + Send + Sync>;
@@ -24,9 +23,8 @@ pub(super) struct KeeperLeg {
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
     pub shutdown: LegShutdown,
-    /// Always `None` until mosh-19g.2.8 gives it a consumer.
-    #[allow(dead_code)]
-    pub render_lane: Option<RenderLaneSlot>,
+    /// The leg's render-lane queue (QUIC legs of a render-split session); `None` on Unix legs.
+    pub render_lane: Option<LaneQueue>,
     /// `None` = Phase 1 silence timeout; QUIC legs set a longer window.
     pub silence_timeout: Option<Duration>,
 }

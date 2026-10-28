@@ -198,6 +198,10 @@ pub(super) struct Hello {
     /// QUIC admission token (hex text, opaque here); only the keeper's QUIC acceptor parses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quic_token: Option<String>,
+    /// The client wants render frames on the render lane (3b); fixed by the HELLO that
+    /// creates the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub render_split: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +415,8 @@ pub(super) struct SessionEndpoint {
     silence_timeout: Option<Duration>,
     /// Sent in every HELLO while set (QUIC legs only).
     quic_token: Option<String>,
+    /// Sent in every HELLO (3b render split).
+    render_split: bool,
 }
 
 impl SessionEndpoint {
@@ -437,7 +443,15 @@ impl SessionEndpoint {
             grace_ms: 0,
             silence_timeout: None,
             quic_token: None,
+            render_split: false,
         }
+    }
+
+    /// Whether the next HELLOs ask for render-split delivery.
+    // mosh-19g.2.9 (the attacher) is its only non-test caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_render_split(&mut self, split: bool) {
+        self.render_split = split;
     }
 
     /// The QUIC admission token the next HELLOs carry; `None` for ssh legs.
@@ -507,6 +521,7 @@ impl SessionEndpoint {
             grace_ms,
             previous_token,
             quic_token: self.quic_token.clone(),
+            render_split: self.render_split,
         })
         .encode()
     }
@@ -931,6 +946,7 @@ mod tests {
             grace_ms: 60_000,
             previous_token: None,
             quic_token: None,
+            render_split: false,
         }
     }
 
@@ -1128,6 +1144,37 @@ mod tests {
         };
         assert_eq!(hello.quic_token, None);
         assert_eq!(hello, hello_msg(true));
+    }
+
+    #[test]
+    fn hello_render_split_round_trips() {
+        let mut endpoint = SessionEndpoint::new(Role::Local, tok(), 1024);
+        let off = endpoint.hello(Instant::now(), 60_000, None);
+        assert!(!std::str::from_utf8(&off[5..]).unwrap().contains("render_split"));
+        let SessionMsg::Hello(hello) = one(&off) else {
+            panic!("not a HELLO");
+        };
+        assert!(!hello.render_split);
+
+        endpoint.set_render_split(true);
+        let on = endpoint.hello(Instant::now(), 60_000, None);
+        assert!(std::str::from_utf8(&on[5..]).unwrap().contains(r#""render_split":true"#));
+        let SessionMsg::Hello(hello) = one(&on) else {
+            panic!("not a HELLO");
+        };
+        assert!(hello.render_split);
+    }
+
+    #[test]
+    fn old_hello_json_parses_as_not_split() {
+        let json = br#"{"v":1,"token":"000102030405060708090a0b0c0d0e0f","resume":false,"recv_offset":0,"grace_ms":1}"#;
+        let mut wire = vec![TYPE_HELLO];
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(json);
+        let SessionMsg::Hello(hello) = one(&wire) else {
+            panic!("not a HELLO");
+        };
+        assert!(!hello.render_split);
     }
 
     #[test]
