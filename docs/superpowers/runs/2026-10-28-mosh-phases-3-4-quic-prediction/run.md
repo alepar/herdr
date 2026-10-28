@@ -15,3 +15,4 @@ base: mosh
 approvals:
 - top-split · auto · mosh-19g.1 PROMOTE, mosh-19g.2 PROMOTE, mosh-19g.3 PROMOTE, mosh-19g.4 LEAF, mosh-19g.5 LEAF, mosh-19g.6 LEAF
 - coverage-round-1 · canonical R-list: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/coverage-round-1-requirements.md (R1–R13; R14, R15 appended from r-new) · requirements: 13 · mapped: 13 · unmapped: 0 · NEEDS-SPEC re-runs: both reviewers (one each); reviewer 2's re-run asked again for mosh-19g.2, not honored · auto applied C1–C6, C8–C19 (coverage-ledger.md); auto rejected C7
+- coverage-round-2 · requirements: 16 · mapped: 14 · unmapped: 2 (R15, R16) — both applied this round · divergence: findings 19 → 15 · novel 10/15 (67%) · widening: no · auto applied C20–C23, C25, C27–C33; auto rejected C24, C26, C34 · integration sweep: mosh-19g.7 (deps on all 24 leaves) · coverage loop ended (cap 2)

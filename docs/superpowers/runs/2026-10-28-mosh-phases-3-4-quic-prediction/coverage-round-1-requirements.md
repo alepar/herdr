@@ -13,3 +13,4 @@ R12 New Cargo dependencies are only quinn/rustls/rcgen with the ring provider (n
 R13 Tests live only in fork files; wall-clock acceptance tests are opt-in (#[ignore], --run-ignored all, timing_lock(), dense flood) and use a userspace UDP relay with delay, seeded loss and rebind.
 R14 Prediction stays correct within R7/R8 over a QUIC leg with render lanes and 10 % loss (echo-ack may arrive before its surface).
 R15 At least one end-to-end scenario runs all three phases together (QUIC leg, supersede under loss, prediction on).
+R16 No keystroke is lost or duplicated, and the session stays attached, across any leg change (QUIC redial, QUIC→ssh fallback, ssh reconnect).

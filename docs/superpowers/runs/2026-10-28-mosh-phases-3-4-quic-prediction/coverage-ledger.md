@@ -18,3 +18,18 @@ C16 · r1 · UNOWNED-SEAM · harness bootstrap-port rewrite · applied — 1.5 e
 C17 · r1 · UNOWNED-SEAM · surface_revision across resync · applied — 2.2 owns monotonicity, with a test
 C18 · r1 · UNOWNED-SEAM · Leg admission token into Hello.quic_token · applied — named in 1.4 owns
 C19 · r1 · GAP · root goal latency wording · applied — root goal restated (2 RTT on the same connection, 3 RTT + backoff on redial, 150 ms one-way)
+C20 · r2 · GAP · R15 · applied — Integration sweep mosh-19g.7 created, owns the three-phase scenario
+C21 · r2 · GAP · R11 · applied — mosh-19g.7 runs mosh-diff-budget.sh on the merged tree
+C22 · r2 · GAP · R3 token validity · applied — 1.3 states bound tokens stay valid for the session; 1.5 long-gap asserts reuse
+C23 · r2 · UNOWNED-SEAM · keeper-side QUIC silence window · applied — QUIC_SILENCE_WINDOW in 1.1; KeeperLeg override in 1.2; set by 1.3; 1.5 asserts keeper did not enter grace
+C24 · r2 · GAP · R4 mid-session UDP block test · rejected — already in 1.5 acceptance ("Mid-session UDP block longer than the silence timeout → reconnect falls back to ssh")
+C25 · r2 · GAP · R6 QUIC→ssh→QUIC · applied — 2.7 leg-change case extended to redial back to QUIC
+C26 · r2 · GAP · R10 3a/Phase 4 old peers · rejected — covered: 1.3 attacher without --x-mosh-quic-v1 prints no line (old client), 1.5 strip-capability (old remote), 3.5 old remote no subscribe; an old keeper never receives quic_token because the bridge only dials QUIC on x-mosh-quic-v1
+C27 · r2 · UNOWNED-SEAM · x-mosh-supersede-v1 constant · applied — defined in 2.1
+C28 · r2 · UNOWNED-SEAM · x-mosh-quic-v1 constant · applied — defined in 1.1
+C29 · r2 · UNOWNED-SEAM · render-stream header · applied — named in 1.1 owns
+C30 · r2 · UNOWNED-SEAM · QUIC Leg RTT probe · applied — named in 1.6 owns, direct dep on mosh-19g.6
+C31 · r2 · GAP · 2.3 no dependents · applied — 2.7 ← 2.3
+C32 · r2 · UNOWNED-SEAM · keeper render-lane slot · applied — 1.2 owns the slot; 2.8 ← 1.2
+C33 · r2 · GAP · R16 exactly-once input · applied — 1.5 exactly-once case across fallback and redial
+C34 · r2 · GAP · C14 generation increment owner · rejected — the generation is the upstream client registry's existing counter, not a fork component; 3.1 verifies the numbering
