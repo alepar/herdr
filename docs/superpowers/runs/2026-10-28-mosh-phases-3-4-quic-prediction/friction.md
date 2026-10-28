@@ -5,3 +5,4 @@
 - [2026-10-28 design/4] Phase 4 promotion review ISSUES: LinkStatus.echo moved to 3.2 (+dep 3.4←3.2), trace events moved to 3.2, budget recount ≈25/30 written into spec §4, root goal wrong-prediction bound loosened to 1 RTT + 50 ms + one render
 - [2026-10-28 design/coverage] coverage-inputs: header 'Bead: <id>.' (sentence-final period) is captured into the id → unmatched-spec; the Bead regex takes [^ \t]* so punctuation leaks in — moved Bead: to its own line
 - [2026-10-28 design/coverage r1] both reviewers used their NEEDS-SPEC re-run (only Goal sections + first sentences reach them, so owns/acceptance detail in long bead descriptions was invisible); reviewer 2's re-run asked again
+- [2026-10-28 phase 3] mergeCheck is cargo check --all-targets --locked (default features); --all-features not covered, as in phases 1-2; Windows target (ci.yml:278) not covered — QUIC code is cfg(unix)
