@@ -74,6 +74,10 @@ per epoch (an epoch ends when an ACK covers the boundary offset, about one RTT):
 - otherwise unchanged. An idle link never grows the window, so a sudden flood after idle starts
   from a small window, not the cap.
 
+After any window change, the next epoch is a hold epoch: its samples were sent under the old
+window, so it updates the epoch bookkeeping and `base_rtt` but makes no grow or shrink decision.
+Every decision therefore judges bytes sent under the current window.
+
 Constants: `FLOOR = 2 * ACK_EVERY_BYTES` (128 KiB), `INITIAL = 256 KiB`, `CAP = WINDOW` (2 MiB),
 `TARGET_QUEUE_DELAY = 50 ms`. A new leg resets the controller to `INITIAL` with no samples,
 because a reconnect may be a different path.
@@ -151,19 +155,24 @@ TCP link, loss shows up as stalls, and the loss phases (3a and 3b) own that beha
 - **Ctrl-C under flood:** link `150 ms` one way and rate `R`. The pane command must print the
   marker after SIGINT and must not contain the marker literally: an interactive `sh` aborts the
   rest of a command list when its foreground child dies of SIGINT, so `yes; echo <marker>` never
-  prints it, and the echoed command line would match a literal marker. The pane runs
-  `trap 'printf "%s%s\n" MA RKER' INT; yes; trap - INT` (or equivalent): the trap prints the
-  marker built by expansion, so the typed line never contains it. The test waits until the
+  prints it, and the echoed command line would match a literal marker. A job-control shell also
+  delivers SIGINT only to the foreground job, so a shell-level `INT` trap never fires. The pane
+  runs `(trap 'printf "%s%s\n" MA RKER; exit' INT; yes)`: the trap lives inside the foreground
+  job, `yes` writes to the terminal so the flood is on screen, and the marker is built by
+  expansion, so the typed line never contains it. The test waits until the
   client output has grown for 2 s of flood. It writes `\x03` into the client pty and measures the
   time until the client screen shows the marker. The assertion is `<= 1.5 s` (5 RTT).
-- **No throughput regression:** with no link knob (LAN), under the same flood, client-side
-  delivered bytes/s with the adaptive window is within 10 % of the Phase 1 fixed-window
-  throughput recorded in the baseline (§6). (Window size is not asserted: on a sub-ms path with a
-  source-bound flood the sender is rarely window-limited, so the window need not grow.)
-- **Window converges:** under the slow profile, the keeper's traced window settles to at most
-  `max(FLOOR, 2 * R * 0.3 s)` plus one chunk. This is an upper bound only; a window pinned at
-  `FLOOR` also satisfies it. Lower-bound sanity: the traced window is never below `FLOOR`, and the
-  measured goodput under the flood is at least `0.8 * R`.
+- **No throughput regression:** with no link knob (LAN), the same test runs the same flood twice:
+  once over the plain bridge (`HERDR_MOSH_RESUME=0`, the existing Phase 1 fallback, no window at
+  all) and once with the resumable session. The assertion is one-sided: adaptive delivered
+  bytes/s `>= 0.9 *` plain-bridge delivered bytes/s, both measured client-side in the same run.
+  (Window size is not asserted: on a sub-ms path with a source-bound flood the sender is rarely
+  window-limited, so the window need not grow.)
+- **Window converges:** under the slow profile with a 20 s flood, the median of the keeper's
+  traced window over the last 5 s is at most `max(FLOOR, 2 * R * 0.3 s)` plus one chunk. This is
+  an upper bound only; a window pinned at `FLOOR` also satisfies it. Lower-bound sanity: the
+  traced window is never below `FLOOR`, and the measured goodput under the flood is at least
+  `0.8 * R`.
 
 `R` is fixed by the measurement leaf (§6) as the largest of 256 KiB/s and 1 MiB/s that is at most
 half the server's measured flood output rate at the test terminal size. The terminal size may be
@@ -175,8 +184,18 @@ Supported range: the 1.5 s goal is claimed for `R >= 256 KiB/s`. Below that, `FL
 alone is about 0.5 s or more of queue, before the server-socket backlog, and the goal is not
 claimed; no acceptance test runs there.
 
+Latency budget for the marker: `0.15 s` upstream (the `\x03`) + in-flight window drain
+(`window / R`) + server-socket backlog `/ R` + `0.15 s` downstream. The in-flight window already
+occupies the pipe, so downstream propagation is not counted a second time on top of the drain.
+The 1.5 s claim is verified only at the `R` the acceptance test runs (chosen by the measurement
+leaf, §6). The measurement leaf's predicted budget decides whether the 256 KiB/s bottom closes:
+if its prediction for 256 KiB/s exceeds 1.5 s, the evidence file says so and the supported
+bottom moves up to the lowest `R` where the budget closes.
+
 **Considered:** a CI test that runs both the fixed and the adaptive window. It would need a
-production knob to force the fixed window. Rejected: configurability nobody needs.
+production knob to force the fixed window. Rejected: configurability nobody needs. The plain
+bridge (`HERDR_MOSH_RESUME=0`, no window) is the same-run throughput reference instead, and needs
+no new knob.
 
 ### 6. Measurement and D3 (chosen: measure, record, do not build pacing)
 
@@ -184,8 +203,10 @@ production knob to force the fixed window. Rejected: configurability nobody need
 (fixed window). It records in the run's `evidence/`:
 
 - (a) the server's flood output rate at the test terminal size (the LAN flood throughput with the
-  fixed window, the parity reference for §5), and the LAN max ring occupancy with the fixed window;
-- (b) the Ctrl-C latency at the chosen profile (the baseline);
+  fixed window; evidence only, the §5 parity test uses the same-run plain-bridge reference), and
+  the LAN max ring occupancy with the fixed window;
+- (b) the Ctrl-C latency at the chosen profile (the baseline), using the §5 probe line, which is
+  first verified under `sh -i` in a pty to print the marker after `\x03`;
 - (c) the server-socket backlog. In the baseline the keeper trace does not exist yet, so it is
   sampled externally (the `Recv-Q` of the keeper's server-side Unix socket, via `ss -xp`). Once
   the window lands, the keeper traces `FIONREAD` on its server stream once per window epoch, as
@@ -229,7 +250,7 @@ change D3 reserves for evidence. Recorded as an option in the follow-up if (c) i
 ## Key abstractions
 
 **InflightWindow** — new struct (`src/mosh/window.rs`), the sender-side delay-based (Vegas/LEDBAT-style) in-flight window controller; a sans-IO state machine.
-- Owns: the current window value and the constants FLOOR, INITIAL, CAP and TARGET_QUEUE_DELAY; the send-time record of first transmissions of fresh DATA, kept in bytes/offsets and coalesced to at most one record per `ACK_EVERY_BYTES` boundary of offset (bounded by bytes in flight; coalesced, never dropped, at the bound); RTT sampling, which only accepts ACKs that advance the acked offset by at least `ACK_EVERY_BYTES` and never samples replayed bytes (Karn's rule); `base_rtt` and `epoch_min`; epoch boundaries, tracked as a byte offset (an epoch ends at the first ACK that covers the first byte sent after the epoch began); an epoch with no qualifying sample holds the window; the window-limited flag for the epoch; the decrease/grow/hold rule; reset to INITIAL with no samples. When an epoch closes it produces a snapshot (window, base_rtt, epoch_min) that its owner can take.
+- Owns: the current window value and the constants FLOOR, INITIAL, CAP and TARGET_QUEUE_DELAY; the send-time record of first transmissions of fresh DATA, kept in bytes/offsets and coalesced to at most one record per `ACK_EVERY_BYTES` boundary of offset (bounded by bytes in flight; coalesced, never dropped, at the bound); RTT sampling, which only accepts ACKs that advance the acked offset by at least `ACK_EVERY_BYTES` and never samples replayed bytes (Karn's rule); `base_rtt` and `epoch_min`; epoch boundaries, tracked as a byte offset (an epoch ends at the first ACK that covers the first byte sent after the epoch began); an epoch with no qualifying sample holds the window; the epoch after any window change is a hold epoch (updates bookkeeping and `base_rtt`, no grow/shrink decision), so every decision judges bytes sent under the current window; the window-limited flag for the epoch; the decrease/grow/hold rule; reset to INITIAL with no samples. When an epoch closes it produces a snapshot (window, base_rtt, epoch_min) that its owner can take.
 - Hides: the control law and its tuning. No other code compares RTTs, knows the 50 ms target or knows the 3/4 and +1-chunk steps.
 - Must not: touch the ring, offsets beyond those it is told about, sockets, the clock (time is an input) or trace output. It must not know which side it runs on. The keeper does the tracing and the FIONREAD read. `SessionEndpoint` decides when a leg is up.
 - Relationships: composed by `SessionEndpoint`, one per endpoint, so the keeper and the local end each have one. It depends on nothing fork-side except the `session.rs` constants it derives from (`WINDOW`, `ACK_EVERY_BYTES`, `MAX_DATA_CHUNK`). No trait: only one controller exists, and the spec names no second one (§1 rejects BBR and fixed windows instead of keeping them as alternatives).
