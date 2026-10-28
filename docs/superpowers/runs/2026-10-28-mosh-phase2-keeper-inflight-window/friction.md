@@ -10,3 +10,4 @@
 - [phase 4] round 2 assembler: same inherited provenance gap; bounded direct review over product paths again
 - [phase 4] round 3 assembler skipped as known-unavailable (same inherited provenance gap twice); bounded direct review over product paths
 - [phase 5] round-3 (cap round) step-back not dispatched: one test-only Nit, 0 Blocking, no triggers; recorded local by the orchestrator (same as phase 1)
+- [phase 6] stripped Co-Authored-By trailers from 6 run commits by recreating mosh..HEAD with git commit-tree (filter-branch unavailable): trees byte-identical, old head tagged p2-before-msg-rewrite
