@@ -11,6 +11,10 @@ mod link_frames;
 #[cfg(unix)]
 mod local_bridge;
 pub(in crate::remote) mod remote;
+#[cfg(unix)]
+mod quic;
+#[cfg(unix)]
+mod quic_bootstrap;
 mod ring;
 mod session;
 mod ssh_leg;

@@ -59,6 +59,9 @@ portable-pty = { path = "vendor/portable-pty" }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # logind's delay inhibitor lets the server save before host shutdown kills panes.
