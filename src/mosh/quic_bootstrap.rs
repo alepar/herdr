@@ -260,7 +260,10 @@ mod tests {
         let tok = "11".repeat(32);
         let cases = [
             r#"{"port":1}"#.to_string(),
-            format!(r#"{{"port":1,"fingerprint":"{}","token":"{tok}"}}"#, "zz".repeat(32)),
+            format!(
+                r#"{{"port":1,"fingerprint":"{}","token":"{tok}"}}"#,
+                "zz".repeat(32)
+            ),
             format!(r#"{{"port":0,"fingerprint":"{fp}","token":"{tok}"}}"#),
             format!(r#"{{"port":1,"fingerprint":"{fp}","token":"{tok}","extra":1}}"#),
             "not json".to_string(),

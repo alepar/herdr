@@ -241,7 +241,10 @@ impl ServerCertVerifier for PinnedVerifier {
 
 /// max_idle_timeout = `idle`, keep_alive_interval None, max_concurrent_bidi_streams 1,
 /// max_concurrent_uni_streams = `incoming_uni` (client: 64, the 3b render-lane cap; keeper: 0).
-pub(super) fn transport_config(idle: Duration, incoming_uni: u32) -> io::Result<quinn::TransportConfig> {
+pub(super) fn transport_config(
+    idle: Duration,
+    incoming_uni: u32,
+) -> io::Result<quinn::TransportConfig> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(quinn::IdleTimeout::try_from(idle).map_err(other)?));
     transport.keep_alive_interval(None);
@@ -267,7 +270,10 @@ pub(super) fn server_config(
     Ok(config)
 }
 
-pub(super) fn client_config(pinned: Fingerprint, idle: Duration) -> io::Result<quinn::ClientConfig> {
+pub(super) fn client_config(
+    pinned: Fingerprint,
+    idle: Duration,
+) -> io::Result<quinn::ClientConfig> {
     let provider = provider();
     let verifier = PinnedVerifier {
         pinned,
@@ -446,9 +452,15 @@ mod tests {
             Ok(echoed)
         });
 
-        let echoed = client_thread.join().expect("client thread").expect("client");
+        let echoed = client_thread
+            .join()
+            .expect("client thread")
+            .expect("client");
         assert_eq!(echoed, pattern(PAYLOAD, 3));
-        server_thread.join().expect("server thread").expect("server");
+        server_thread
+            .join()
+            .expect("server thread")
+            .expect("server");
     }
 
     #[test]
@@ -508,7 +520,9 @@ mod tests {
             .block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(5),
-                    endpoint.connect_with(config, addr, SERVER_NAME).expect("connect"),
+                    endpoint
+                        .connect_with(config, addr, SERVER_NAME)
+                        .expect("connect"),
                 )
                 .await
             })
@@ -552,7 +566,10 @@ mod tests {
             .expect("block_on");
         let client_conn = client_conn.expect("client handshake");
         let server_conn = server_conn.expect("server handshake");
-        let (send, _recv) = rt.block_on(client_conn.open_bi()).expect("rt").expect("open");
+        let (send, _recv) = rt
+            .block_on(client_conn.open_bi())
+            .expect("rt")
+            .expect("open");
         let mut send = BlockingSend::new(rt.handle(), send);
         send.write_all(b"x").expect("write");
         let (_s, recv) = rt
