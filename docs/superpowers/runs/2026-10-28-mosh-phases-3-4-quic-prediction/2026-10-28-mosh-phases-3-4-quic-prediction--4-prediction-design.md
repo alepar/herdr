@@ -6,7 +6,7 @@ Research brief: `inputs/seam-brief.md` §3–§4 (client compose, fast path, inp
 
 ## Goal
 
-On a slow link, typed printable characters appear immediately. At 150 ms one-way delay with prediction on, the median time from keypress to the character on screen is under 5 ms. A wrong prediction disappears within 1 RTT plus one render. On a fast link, or when the remote lacks support, nothing changes.
+On a slow link, typed printable characters appear immediately. At 150 ms one-way delay with prediction on, the median time from keypress to the character on screen is under 5 ms. A wrong prediction disappears within 1 RTT + 50 ms (mosh's echo delay) + one render. On a fast link, or when the remote lacks support, nothing changes.
 
 ## Problem description
 
@@ -27,9 +27,8 @@ To judge a prediction it needs one more fact: which of its inputs the server has
 - **The echo-ack carries a surface revision.** `x-mosh.echo-ack.v1` data is `{pane_id, input_seq, surface_revision}`.
   - It means: the first `input_seq` input events for this pane have been applied, and their effect is in every surface with revision ≥ `surface_revision`.
   - The client judges a prediction only once it holds both an ack covering it and a retained surface at or above that revision. This resolves root gap (a) independently of arrival order.
-- **Opt-in subscription.** The server sends echo-acks only to a client that sent `x-mosh.echo-subscribe.v1` (a client→server EndpointControl through 3b's `server_hooks` dispatch, so no new upstream line).
-  - The client subscribes only when prediction is enabled and the remote advertises `x-mosh-echo-v1`.
-  - The bridge learns that from its status probe and exposes it process-locally, like SRTT.
+- **Opt-in subscription, injected by the bridge.** The server sends echo-acks only to a client subscribed with `x-mosh.echo-subscribe.v1` (a client→server EndpointControl through 3b's `server_hooks` dispatch, so no new upstream line).
+  - The local bridge injects it right after Hello when the probe shows `x-mosh-echo-v1` and prediction is not `off`, then sets `LinkStatus.echo` so the client knows per endpoint.
 - **Client SRTT from `LinkStatus.srtt_ms`.** It arrives per endpoint through the existing link-frame observe hook (mosh-19g.6). Without a link frame, which means no mosh, prediction stays off.
 
 ## Decision points, by section
@@ -45,7 +44,7 @@ To judge a prediction it needs one more fact: which of its inputs the server has
   - A new connection resets both sides: the server on client disconnect, the client on endpoint reset or a new `Welcome`.
 - **Client disconnect:** one hook statement calls the `server_hooks` disconnect entry point, which removes the client's `EchoTracker` entries (root gap c).
 
-### 2. Echo-ack emission (chosen: after the render that reflects applied input)
+### 2. Echo-ack emission (chosen: deadline-driven, as mosh; see Key abstractions)
 
 - One hook statement at the render send path, the full and patch senders (render.rs:963 and retained_surface.rs:566), reports `(client, surface_revision)` once a frame is enqueued.
   - If both senders cannot share one statement, it is two lines.
@@ -112,6 +111,85 @@ That is 6–7 lines. Running total after 3a and 3b is about 25 of 30.
 - Predicting Backspace and cursor movement.
 - Predictions in alternate-screen applications beyond what content validation allows.
 - Client-side RTT measurement independent of the bridge.
+
+## Key abstractions
+
+**EchoAck** — new value type in `predict.rs`: the one definition of the `x-mosh.echo-ack.v1` and `x-mosh.echo-subscribe.v1` kind strings and of the ack JSON `{pane_id, input_seq, surface_revision}`.
+- It lives next to its consumer, as `LinkStatus` lives in `outage.rs`.
+- `server_hooks` encodes it, `Predictor` decodes it, and `link_frames` builds the subscribe frame from it.
+- No I/O. A malformed payload decodes to none.
+
+**Client fork facade (`mosh_outage`, outage.rs)** — extended (root-defined).
+- Mounting: still mounted only from client/mod.rs:33. `predict.rs` is mounted as its child (`#[path]`), costing no upstream line.
+- One process-global mutex holds both `OutageState` and `Predictor`, so there is no lock order. All callers are on the client's current_thread runtime.
+- `observe` is one closed `match kind`:
+  - `LINK_KIND`: parse `LinkStatus` once. The outage state gets its state; `Predictor` gets `srtt_ms` and `echo`.
+  - echo-ack kind: `Predictor`.
+  - anything else: false.
+  The observe hook line (client/mod.rs:2095) is edited, not added, to also pass the `generation` in scope.
+- `paint` paints the banner, then the predictions. The hook line (composition.rs:723) is edited to also pass the retained surface, `pane_surface_generation` and `layout.pane_surface`.
+- New entry points, each the body of one hook statement: `tap` and `blocks_fast_path`.
+
+**Predictor** — extended (root-defined).
+- Keying: state is keyed by `(ClientEndpointId, connection generation)`, then by pane. A new generation replaces the entry; this is the client-side reset, needing no `Welcome` hook. A mosh resume keeps the generation.
+- Input classes: one closed match over `ClientPaneInputEvent`:
+  - Key with `generated_text`, or TextCommit → Printable;
+  - Paste → ClearPane;
+  - key releases and modifier-only keys → Ignore, so report-all keyboard modes do not end an epoch on every key;
+  - everything else → EpochBreak.
+  Every event counts toward `sent`.
+- Creation: predictions are created only when echo is on and the mode threshold is met; counting always runs. `adaptive` on a fast link therefore holds no predictions and keeps the fast path.
+- Judging happens only in `paint`, where the surface and ack state are read together:
+  - a prediction is judged once an ack with `input_seq` ≥ its seq exists and the surface revision is ≥ that ack's revision;
+  - a pane whose `inner_rect` differs from the one recorded with its predictions is cleared (resize, with no hook).
+- `paint` also moves `frame.cursor` past the last visible prediction.
+- Failure: a prediction uncovered by any ack after max(1 s, 4×SRTT) clears the pane and turns prediction off for that generation. This covers an old still-running server under a new binary's capability line (status.rs:302 lists constants), and a lost subscribe.
+
+**EchoTracker / server_hooks** — extended (root-defined, mosh-19g.5).
+- A process-global mutex keyed by client id, holding per pane `received`, `acked` and a FIFO of `(count, received_at)`. It is never held across a channel send.
+- Subscribe: an arm in 3b's dispatch entry (client_transport.rs:1349) creates the client's entry and returns no `ServerEvent`; this costs no line.
+- Counting: on receipt, on the reader thread (client_transport.rs:1196), for subscribed clients only. Receipt also covers events the main loop later drops (headless.rs:2365-2386), so the counts match the client's.
+- Emission, on mosh's deadline:
+  - An ack covers input received at least `ECHO_DELAY` (50 ms) earlier and carries the client's last committed `surface_revision`, via `render_state.last_pane_surface()`.
+  - With no baseline (just after a resync), the ack waits for a later tick. Acks go on the control lane.
+  - It is driven by two main-loop statements in headless.rs: `echo_due` before step 8 (~:608), and `echo_deadline` folded into `next_deadline` (the loop otherwise wakes every 250 ms, :167).
+- Disconnect: one statement in `remove_client` (headless.rs:946), which both detach and disconnect pass through.
+
+**LinkStatus** — extended: `Linked` gains `echo: bool` (`serde(default)`, skipped when false). The bridge sets it once it has injected the subscribe. This is the per-endpoint path for "the remote advertises x-mosh-echo-v1".
+
+**LocalBridge / link_frames** — extended: `encode_echo_subscribe_frame` sits beside `encode_resync_frame`. When the probe shows `x-mosh-echo-v1` and the predict mode is not `off`, the bridge injects the subscribe once per session through 3b's upstream `FrameSplitter` path, right after the first client frame (Hello), as offset-bearing DATA so it is replayed on a new leg.
+
+**status.rs** — one tagged line, `x-mosh-echo-v1`.
+
+**Variation:**
+- Fork kinds on the client → the facade's closed match.
+- Kinds on the server → 3b's dispatch match.
+- Input classes → one match in `Predictor`.
+- Mode → a closed enum, read once.
+- `EchoTracker` is concrete.
+
+**Walk-through** (mode `on`, 150 ms one-way):
+1. The probe shows echo, and the bridge injects subscribe after Hello. The server marks the client subscribed before any pane input arrives, so both sides count from zero.
+2. The first SRTT sample brings `Linked{srtt_ms:300, echo:true}`.
+3. A keypress: the tap statement in the input loop counts it, places "a" at the cursor, recomposes, and returns the frame; the loop's final present writes it, well under 5 ms.
+4. The server counts on receipt. 50 ms later, after the echo has rendered as revision R, a main-loop tick queues the ack `{pane, n, R}`.
+5. An ack that overtakes R leaves the prediction pending. R arrives as a patch; the guard declines the fast path, compose runs, and paint confirms "a".
+6. With `stty -echo`, R is the old surface, so the prediction is judged wrong and cleared.
+- Future change, Backspace prediction: one class arm plus its placement rule inside `Predictor`. No hook, server or wire change.
+
+**Corrections to the spec as first written** (applied in §§1–3 and the Goal):
+- The input tap goes in the client input loop (shell_runtime.rs ~:811, before `for request in outcome.requests`, gated on `active_endpoint_online && pending_activation.is_none()`) and returns a recomposed frame.
+  - `request_repaint` (client/state.rs:149) composes nothing.
+  - Tapping in `push_target_event` would count requests that are later dropped (shell_runtime.rs:843-850).
+- Echo-acks are deadline-driven (above), not sent after a render. Applying input is not echoing it, and input that causes no render would never be acked. A wrong prediction therefore clears within 1 RTT + 50 ms + one render.
+- The bridge injects the subscribe; the client never sends it. The client learns `echo` only after the first SRTT sample, too late for counts to match. This keeps the root's "Predictor must not send anything".
+- The fast-path guard declines while any prediction exists for the active endpoint, hidden ones included, so the deciding revision is always composed and judged.
+- `unicode-width` is already a dependency (Cargo.toml:53).
+- To verify during implementation: `pane_surface_generation` is numbered the same way as the registry's `connection.generation`.
+
+Digest:
+- EchoAck: owns the echo-ack and echo-subscribe kind strings and the ack JSON;
+  new echo fields go here; no caller formats or parses these kinds itself.
 
 ## Post-Implementation Notes
 
