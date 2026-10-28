@@ -253,6 +253,9 @@ pub(super) fn transport_config(
     transport.keep_alive_interval(None);
     transport.max_concurrent_bidi_streams(1u32.into());
     transport.max_concurrent_uni_streams(incoming_uni.into());
+    // Render streams are prioritised oldest-first (3b); round-robin among equal-priority
+    // streams would let later small frames overtake a large older one.
+    transport.send_fairness(false);
     Ok(transport)
 }
 

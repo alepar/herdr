@@ -22,12 +22,12 @@ use serde_json::{json, Value};
 
 use super::chain_gate::{ChainGate, LegState, Route};
 use super::keeper_leg::{KeeperLeg, LegShutdown};
-use super::quic_acceptor::{OnConn, QuicAcceptor, QuicConn, TokenVerdict};
+use super::quic_acceptor::{self, OnConn, QuicAcceptor, QuicConn, TokenVerdict};
 use super::render_lane::{LaneQueue, Offer};
 use super::rendezvous::{self, KeeperRendezvous};
 use crate::remote::attach::mosh::link_frames::{encode_resync_frame, FrameClass, FrameSplitter};
 use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
-use crate::remote::attach::mosh::quic::{BlockingRecv, BlockingSend, QUIC_SILENCE_WINDOW};
+use crate::remote::attach::mosh::quic::{BlockingRecv, BlockingSend};
 use crate::remote::attach::mosh::session::{
     self, end_reason, End, Hello, HelloAnswer, Role, SessionEndpoint, SessionEvent, SessionMsg,
     Token, Welcome, WelcomeStatus, MAX_CONTROL_PAYLOAD, MAX_DATA_CHUNK, PRE_WELCOME_BOUND,
@@ -531,14 +531,7 @@ fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Ad
         return Ok(None);
     }
     reader.set_read_timeout(None);
-    let closer = conn;
-    let leg = KeeperLeg {
-        reader: Box::new(reader),
-        writer: Box::new(writer),
-        shutdown: Arc::new(move || closer.close(0u32.into(), b"leg")),
-        render_lane: None,
-        silence_timeout: Some(QUIC_SILENCE_WINDOW),
-    };
+    let leg = quic_acceptor::keeper_leg(&handle, conn, Box::new(reader), Box::new(writer));
     admit(shared, leg, hello)
 }
 
