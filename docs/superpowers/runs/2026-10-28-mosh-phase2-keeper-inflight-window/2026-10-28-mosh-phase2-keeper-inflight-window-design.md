@@ -149,8 +149,10 @@ production knob to force the fixed window. Rejected: configurability nobody need
 
 - (a) the server's flood output rate at the test terminal size;
 - (b) the Ctrl-C latency at the chosen profile (the baseline);
-- (c) the server-socket backlog: the keeper traces `FIONREAD` on its server stream once per
-  window epoch, as `server_backlog` bytes.
+- (c) the server-socket backlog. In the baseline the keeper trace does not exist yet, so it is
+  sampled externally (the `Recv-Q` of the keeper's server-side Unix socket, via `ss -xp`). Once
+  the window lands, the keeper traces `FIONREAD` on its server stream once per window epoch, as
+  `server_backlog` bytes.
 
 Once the window lands, the acceptance leaf re-records (b) and (c). Backlog staleness is
 `backlog / R`. If its 95th percentile exceeds 250 ms, the upper clamp in D3, the evidence file
