@@ -27,5 +27,6 @@ fn status_client_json_advertises_resume_bridge_capability() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(caps.contains(&"x-mosh-resume-bridge-v1"), "{caps:?}");
-    assert_eq!(caps.len(), 4, "three upstream entries plus ours: {caps:?}");
+    assert!(caps.contains(&"x-mosh-quic-v1"), "{caps:?}");
+    assert_eq!(caps.len(), 5, "three upstream entries plus ours: {caps:?}");
 }

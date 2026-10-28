@@ -768,13 +768,19 @@ pub(super) fn classify_spawn_error(kind: LegKind, err: io::Error) -> LegError {
     }
 }
 
+/// The remote binary chosen for resume, with the capabilities its qualifying status advertised.
+pub(super) struct ResumeCandidate {
+    pub herdr: RemoteHerdr,
+    pub capabilities: Vec<String>,
+}
+
 /// Probe the selected remote binary, then the other candidates, for the resume capability.
-/// `Ok(Some(h))`: resume with `h` (possibly a different candidate than `selected`);
+/// `Ok(Some(c))`: resume with `c.herdr` (possibly a different candidate than `selected`);
 /// `Ok(None)`: plain. Silent: the caller prints the `HERDR_REMOTE_BINARY` hint.
 pub(super) fn select_resume_candidate(
     ssh: &RemoteSsh,
     selected: &RemoteHerdr,
-) -> io::Result<Option<RemoteHerdr>> {
+) -> io::Result<Option<ResumeCandidate>> {
     select_with(
         selected,
         |herdr| attach::remote_client_status(ssh, herdr),
@@ -786,7 +792,7 @@ fn select_with(
     selected: &RemoteHerdr,
     mut status: impl FnMut(&RemoteHerdr) -> io::Result<Option<RemoteClientStatusJson>>,
     candidates: impl FnOnce() -> io::Result<Vec<RemoteHerdr>>,
-) -> io::Result<Option<RemoteHerdr>> {
+) -> io::Result<Option<ResumeCandidate>> {
     fn qualifies(herdr: &RemoteHerdr, status: &RemoteClientStatusJson) -> bool {
         status
             .endpoint_capabilities
@@ -800,7 +806,10 @@ fn select_with(
     }
     if let Some(found) = status(selected)? {
         if qualifies(selected, &found) {
-            return Ok(Some(selected.clone()));
+            return Ok(Some(ResumeCandidate {
+                herdr: selected.clone(),
+                capabilities: found.endpoint_capabilities,
+            }));
         }
     }
     for mut candidate in candidates()? {
@@ -810,7 +819,10 @@ fn select_with(
         if let Some(found) = status(&candidate).unwrap_or(None) {
             if qualifies(&candidate, &found) {
                 candidate.bridge_idle_timeout = found.remote_bridge_idle_timeout;
-                return Ok(Some(candidate));
+                return Ok(Some(ResumeCandidate {
+                    herdr: candidate,
+                    capabilities: found.endpoint_capabilities,
+                }));
             }
         }
     }
@@ -1602,7 +1614,7 @@ mod tests {
         selected: &str,
         candidates: &[&str],
         table: Vec<(&str, io::Result<Option<RemoteClientStatusJson>>)>,
-    ) -> (io::Result<Option<RemoteHerdr>>, Vec<String>, bool) {
+    ) -> (io::Result<Option<ResumeCandidate>>, Vec<String>, bool) {
         let mut table = table;
         let mut probed = Vec::new();
         let mut asked = false;
@@ -1631,7 +1643,12 @@ mod tests {
             &["/b/herdr"],
             vec![("/a/herdr", Ok(Some(status_json(true, good()))))],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/a/herdr");
+        let chosen = result.unwrap().unwrap();
+        assert_eq!(path_of(&chosen.herdr), "/a/herdr");
+        assert!(chosen
+            .capabilities
+            .iter()
+            .any(|c| c == super::super::STATUS_CAPABILITY));
         assert_eq!(probed, ["/a/herdr"]);
         assert!(!asked, "candidates must not be discovered");
     }
@@ -1647,7 +1664,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        let chosen = result.unwrap().unwrap();
+        let chosen = result.unwrap().unwrap().herdr;
         assert_eq!(path_of(&chosen), "/c/herdr");
         assert!(chosen.bridge_idle_timeout, "copied from the candidate's status");
         assert_eq!(probed, ["/a/herdr", "/b/herdr", "/c/herdr"]);
@@ -1677,7 +1694,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
+        assert_eq!(path_of(&result.unwrap().unwrap().herdr), "/c/herdr");
     }
 
     #[test]
@@ -1690,7 +1707,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
+        assert_eq!(path_of(&result.unwrap().unwrap().herdr), "/c/herdr");
 
         let (result, _, asked) = select(
             "/a/herdr",

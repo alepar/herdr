@@ -19,6 +19,8 @@ mod quic_bootstrap;
 mod quic_leg;
 mod ring;
 mod session;
+#[cfg(unix)]
+mod ssh_config;
 mod ssh_leg;
 mod window;
 
@@ -43,6 +45,7 @@ pub(in crate::remote) const KEEPER_FLAG: &str = "--x-mosh-keeper-v1";
 
 const MOSH_RESUME_ENV: &str = "HERDR_MOSH_RESUME";
 const MOSH_GRACE_ENV: &str = "HERDR_MOSH_GRACE";
+const MOSH_QUIC_ENV: &str = "HERDR_MOSH_QUIC";
 #[cfg(unix)]
 const MOSH_TRACE_ENV: &str = "HERDR_MOSH_TRACE";
 const DEFAULT_GRACE_SECS: u64 = 60;
@@ -54,12 +57,15 @@ const MAX_GRACE_SECS: u64 = 3600;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct MoshConfig {
     pub resume_enabled: bool,
+    /// `HERDR_MOSH_QUIC=0` is the only way to turn the QUIC leg off.
+    pub quic_enabled: bool,
     pub grace: Duration,
 }
 
 impl MoshConfig {
-    fn parse(resume: Option<&str>, grace: Option<&str>) -> MoshConfig {
+    fn parse(resume: Option<&str>, grace: Option<&str>, quic: Option<&str>) -> MoshConfig {
         let resume_enabled = resume.map(str::trim) != Some("0");
+        let quic_enabled = quic.map(str::trim) != Some("0");
         let grace_secs = grace
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map_or(DEFAULT_GRACE_SECS, |secs| {
@@ -67,6 +73,7 @@ impl MoshConfig {
             });
         MoshConfig {
             resume_enabled,
+            quic_enabled,
             grace: Duration::from_secs(grace_secs),
         }
     }
@@ -79,6 +86,7 @@ pub(super) fn get() -> MoshConfig {
         MoshConfig::parse(
             std::env::var(MOSH_RESUME_ENV).ok().as_deref(),
             std::env::var(MOSH_GRACE_ENV).ok().as_deref(),
+            std::env::var(MOSH_QUIC_ENV).ok().as_deref(),
         )
     })
 }
@@ -162,14 +170,45 @@ pub(in crate::remote) fn start_ui_bridge(
         };
         // Exactly `SshStdioBridge::start`'s command, from the ORIGINAL (not re-selected) binary.
         let plain_command = plain_bridge_command(&remote_herdr, &session_name, noninteractive);
-        let dialer = ssh_leg::SshLegDialer::new(
+        let ssh_dialer = ssh_leg::SshLegDialer::new(
             target.clone(),
-            &candidate,
+            &candidate.herdr,
             &session_name,
             ssh_options,
             noninteractive,
-            idle_opt_in(&candidate, noninteractive),
+            idle_opt_in(&candidate.herdr, noninteractive),
         );
+        let ssh_target = if quic_eligible(config, &candidate.capabilities) {
+            ssh_config::ssh_g(&target, ssh_options)
+                .map(|output| ssh_config::parse_ssh_g(&output))
+                .map_err(|err| tracing::debug!(%err, "ssh -G failed; ssh legs only"))
+                .ok()
+        } else {
+            None
+        };
+        let dialer: Box<dyn ssh_leg::LegDialer> = match choose_dialer(
+            config,
+            &candidate.capabilities,
+            ssh_target.as_ref(),
+        ) {
+            DialerChoice::Ssh => Box::new(ssh_dialer),
+            DialerChoice::Quic { dial_host } => {
+                match quic_leg::QuicLegDialer::new(ssh_dialer, dial_host, config.grace) {
+                    Ok(dialer) => Box::new(dialer),
+                    Err(err) => {
+                        tracing::debug!(%err, "QUIC dialer unavailable; ssh legs only");
+                        Box::new(ssh_leg::SshLegDialer::new(
+                            target.clone(),
+                            &candidate.herdr,
+                            &session_name,
+                            ssh_options,
+                            noninteractive,
+                            idle_opt_in(&candidate.herdr, noninteractive),
+                        ))
+                    }
+                }
+            }
+        };
         local_bridge::start(
             local_bridge::BridgeParams {
                 local_socket,
@@ -183,9 +222,45 @@ pub(in crate::remote) fn start_ui_bridge(
                 },
                 trace_dir: std::env::var_os(MOSH_TRACE_ENV).map(PathBuf::from),
             },
-            Box::new(dialer),
+            dialer,
             should_stop,
         )
+    }
+}
+
+/// Which `LegDialer` `start_ui_bridge` registers.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum DialerChoice {
+    Ssh,
+    Quic { dial_host: String },
+}
+
+/// The checks that decide whether `ssh -G` is worth running at all.
+#[cfg(unix)]
+fn quic_eligible(config: MoshConfig, capabilities: &[String]) -> bool {
+    config.quic_enabled && capabilities.iter().any(|c| c == quic::QUIC_CAPABILITY)
+}
+
+/// QUIC only when enabled, the remote advertises it, and `ssh -G` resolved a host without a
+/// jump (UDP would bypass the path ssh takes through a jump host).
+#[cfg(unix)]
+fn choose_dialer(
+    config: MoshConfig,
+    capabilities: &[String],
+    target: Option<&ssh_config::SshTarget>,
+) -> DialerChoice {
+    if !quic_eligible(config, capabilities) {
+        return DialerChoice::Ssh;
+    }
+    match target {
+        Some(ssh_config::SshTarget {
+            hostname: Some(host),
+            jump: false,
+        }) => DialerChoice::Quic {
+            dial_host: host.clone(),
+        },
+        _ => DialerChoice::Ssh,
     }
 }
 
@@ -215,7 +290,7 @@ mod tests {
     use super::*;
 
     fn grace(value: Option<&str>) -> Duration {
-        MoshConfig::parse(None, value).grace
+        MoshConfig::parse(None, value, None).grace
     }
 
     #[test]
@@ -230,8 +305,8 @@ mod tests {
 
     #[test]
     fn platform_gate_takes_resume_only_for_enabled_posix_remotes() {
-        let enabled = MoshConfig::parse(None, None);
-        let killed = MoshConfig::parse(Some("0"), None);
+        let enabled = MoshConfig::parse(None, None, None);
+        let killed = MoshConfig::parse(Some("0"), None, None);
         assert!(platform_gate(enabled, false));
         assert!(!platform_gate(killed, false));
         assert!(!platform_gate(enabled, true));
@@ -240,9 +315,48 @@ mod tests {
 
     #[test]
     fn kill_switch_only_on_zero() {
-        assert!(!MoshConfig::parse(Some("0"), None).resume_enabled);
-        assert!(!MoshConfig::parse(Some(" 0 "), None).resume_enabled);
-        assert!(MoshConfig::parse(None, None).resume_enabled);
-        assert!(MoshConfig::parse(Some("1"), None).resume_enabled);
+        assert!(!MoshConfig::parse(Some("0"), None, None).resume_enabled);
+        assert!(!MoshConfig::parse(Some(" 0 "), None, None).resume_enabled);
+        assert!(MoshConfig::parse(None, None, None).resume_enabled);
+        assert!(MoshConfig::parse(Some("1"), None, None).resume_enabled);
+    }
+
+    #[test]
+    fn quic_kill_switch_only_on_zero() {
+        assert!(!MoshConfig::parse(None, None, Some("0")).quic_enabled);
+        assert!(!MoshConfig::parse(None, None, Some(" 0 ")).quic_enabled);
+        assert!(MoshConfig::parse(None, None, None).quic_enabled);
+        assert!(MoshConfig::parse(None, None, Some("1")).quic_enabled);
+        assert!(MoshConfig::parse(None, None, Some("")).quic_enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn choose_dialer_table() {
+        let on = MoshConfig::parse(None, None, None);
+        let off = MoshConfig::parse(None, None, Some("0"));
+        let with = vec![quic::QUIC_CAPABILITY.to_string()];
+        let without = vec![STATUS_CAPABILITY.to_string()];
+        let direct = ssh_config::SshTarget {
+            hostname: Some("box.example".into()),
+            jump: false,
+        };
+        let jumped = ssh_config::SshTarget {
+            hostname: Some("box.example".into()),
+            jump: true,
+        };
+        let nameless = ssh_config::SshTarget::default();
+        let quic = DialerChoice::Quic {
+            dial_host: "box.example".into(),
+        };
+        assert_eq!(choose_dialer(on, &with, Some(&direct)), quic);
+        assert_eq!(choose_dialer(off, &with, Some(&direct)), DialerChoice::Ssh);
+        assert_eq!(choose_dialer(on, &without, Some(&direct)), DialerChoice::Ssh);
+        assert_eq!(choose_dialer(on, &with, Some(&jumped)), DialerChoice::Ssh);
+        assert_eq!(choose_dialer(on, &with, Some(&nameless)), DialerChoice::Ssh);
+        assert_eq!(choose_dialer(on, &with, None), DialerChoice::Ssh);
+        assert!(quic_eligible(on, &with));
+        assert!(!quic_eligible(off, &with));
+        assert!(!quic_eligible(on, &without));
     }
 }

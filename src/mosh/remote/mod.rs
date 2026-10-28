@@ -156,6 +156,17 @@ mod tests {
         let hook = format!("\"{}\", // mosh-fork hook", super::super::STATUS_CAPABILITY);
         assert!(status.contains(&hook), "status.rs lacks {hook}");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_hook_advertises_quic_capability() {
+        let status = include_str!("../../cli/status.rs");
+        let hook = format!(
+            "\"{}\", // mosh-fork hook",
+            super::super::quic::QUIC_CAPABILITY
+        );
+        assert!(status.contains(&hook), "status.rs lacks {hook}");
+    }
 }
 
 /// Keeper rendezvous contract (unix only: uses `flock`, owner and mode checks).
