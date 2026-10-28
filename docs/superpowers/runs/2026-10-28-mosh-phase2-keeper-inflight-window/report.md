@@ -122,4 +122,7 @@ Graph, cleanup and evidence gaps:
 ## Phase-7 cleanup
 
 - Finish: merged into `mosh` @ a900f967 and pushed to `fork` (human choice: merge, accepted as is). Upstream-feedback draft sent to the laptop superpowers agent (herdr-threads message mnSGIFED8uqR), not filed on GitHub.
+- Superseded 2026-10-28 by verified cleanup below.
 - Retained (process-unknown, not removed): the 12 task worktrees under `.worktrees/super-auto-mosh-phase2-keeper-inflight-window/.worktrees/`, that parent, `/tmp/sp-fd54fa48`, and the run worktree itself. Reason: `remove-task-worktree --sweep` exit 4 on uninspectable sshd-session pids 1097853 and 403694 (LAN client sessions, not run-owned). Next safe check: confirm those pids are unrelated, then `git worktree remove` each kept path and delete the `task-mosh-hex.*` branches.
+- Verified cleanup (2026-10-28): the two sshd sessions predate the run and serve a LAN client, so they are not run-owned. All 12 task worktrees, `/tmp/sp-fd54fa48` and the run worktree were removed (each clean first); the `task-mosh-hex.*` branches were deleted after `git cherry` showed every patch in `mosh`; the local run branch was deleted (ancestor of `mosh`; `fork` keeps a copy).
+- Root acceptance stays open (report-status --acceptance exit 3): no whole-range final review or code roast exists, and the sweep measured 09b05438 rather than the final `mosh` tree. Epic `mosh-hex` stays open with those owners.
