@@ -9,3 +9,4 @@
 - [phase 5] scope-dispositions --project --keys returned an empty projection although round-1 punch-listed keys exist; punch-list file written from the scope keys instead (same gap as phase 1)
 - [phase 4] round 2 assembler: same inherited provenance gap; bounded direct review over product paths again
 - [phase 4] round 3 assembler skipped as known-unavailable (same inherited provenance gap twice); bounded direct review over product paths
+- [phase 5] round-3 (cap round) step-back not dispatched: one test-only Nit, 0 Blocking, no triggers; recorded local by the orchestrator (same as phase 1)

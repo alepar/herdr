@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-28-mosh-phase2-keeper-inflight-window
 
 flags: planOneShot=f skipPlanRoast=f skipCodeRoast=f autonomous=t
-phase: roast-code
+phase: report
 codeMechanism: Workflow
 runTag: mosh-phase2-keeper-inflight-window-20261028T074108
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -13,8 +13,10 @@ branch: super-auto/mosh-phase2-keeper-inflight-window
 base: mosh
 roastDesignRound: 2
 roastCodeRound: 3
-roast-code: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-1.md, 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-2.md
+roast-code: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-1.md, 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-2.md, 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-3.md
 findingsLedger: findings-ledger.md
+roastCodeExit: capped
+stepBackCode-round-3: local — cap round, recorded by the orchestrator without dispatch: one new test-only Nit (macOS base64 marker split), 0 Blocking, no mechanical triggers; punch-listed
 scopeFilter-round-2: 2 in-scope · 1 punch-listed
   scopeFilter-round-2: [Should-fix] tests/mosh_resume.rs:19 in-scope — The goal names clippy -D warnings building on macOS CI; ungated dead constants make that lint fail, so this is a failure in a goal-named path.
   scopeFilter-round-2: [Should-fix] src/mosh/session.rs:641 in-scope — The goal names the down-time read cap at INITIAL, and no test fails when the window reset in leg_down is deleted, so a goal-named behavior is missing a test.
