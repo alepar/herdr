@@ -21,7 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::keeper_leg::{KeeperLeg, LegShutdown};
+use super::quic_acceptor::{OnConn, QuicAcceptor, QuicConn, TokenVerdict};
 use super::rendezvous::{self, KeeperRendezvous};
+use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
+use crate::remote::attach::mosh::quic::{BlockingRecv, BlockingSend, QUIC_SILENCE_WINDOW};
 use crate::remote::attach::mosh::session::{
     self, end_reason, End, Hello, HelloAnswer, Role, SessionEndpoint, SessionEvent, SessionMsg,
     Token, Welcome, WelcomeStatus, MAX_CONTROL_PAYLOAD, MAX_DATA_CHUNK, PRE_WELCOME_BOUND,
@@ -99,6 +102,8 @@ struct Shared {
     next_id: AtomicU64,
     /// Accepted connections whose HELLO is not yet answered; they defer the idle exit.
     pending: AtomicUsize,
+    /// The QUIC endpoint, started by the first bootstrap query.
+    quic: QuicAcceptor,
 }
 
 struct Table {
@@ -301,6 +306,7 @@ fn serve(config: KeeperConfig) -> io::Result<()> {
         trace_dir: config.trace_dir.clone(),
         next_id: AtomicU64::new(1),
         pending: AtomicUsize::new(0),
+        quic: QuicAcceptor::default(),
     });
 
     let mut backoff = POLL;
@@ -418,19 +424,97 @@ fn spawn_handler(shared: &Arc<Shared>, stream: UnixStream) {
 fn accept_leg(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admitted>> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(PRE_WELCOME_BOUND))?;
-    let mut first = [0u8; 1];
-    stream.read_exact(&mut first)?;
-    match first[0] {
-        session::HELLO_TYPE => {
-            let hello = read_hello_after(&mut stream, first[0])?;
-            stream.set_read_timeout(None)?;
-            admit(shared, KeeperLeg::unix(stream)?, hello)
+    loop {
+        let mut first = [0u8; 1];
+        stream.read_exact(&mut first)?;
+        match first[0] {
+            session::HELLO_TYPE => {
+                let hello = read_hello_after(&mut stream, first[0])?;
+                stream.set_read_timeout(None)?;
+                return admit(shared, KeeperLeg::unix(stream)?, hello);
+            }
+            // The attacher's bootstrap query: one JSON line, then the connection may ask again
+            // or send its HELLO.
+            session::BOOTSTRAP_QUERY => {
+                let reply = shared.quic.query(quic_conn_handler(shared), Instant::now());
+                if reply.is_none() {
+                    shared.trace_keeper("quic_bootstrap", json!({"available": false}));
+                }
+                let mut line = QuicBootstrap::encode_reply(reply.as_ref());
+                line.push('\n');
+                stream.write_all(line.as_bytes())?;
+            }
+            _ => return Ok(None),
         }
-        // Reserved for the QUIC acceptor's bootstrap query (mosh-19g.1.3): until it lands the
-        // connection closes, like an unknown first byte.
-        session::BOOTSTRAP_QUERY => Ok(None),
-        _ => Ok(None),
     }
+}
+
+/// Counts the connection as pending and runs its admission on a std thread. Called on the
+/// acceptor's runtime, so it only spawns. Holds the keeper weakly: the acceptor lives in
+/// `Shared`.
+fn quic_conn_handler(shared: &Arc<Shared>) -> OnConn {
+    let weak = Arc::downgrade(shared);
+    Arc::new(move |conn: QuicConn| {
+        let Some(shared) = weak.upgrade() else { return };
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        thread::spawn(move || {
+            let admitted = accept_quic_leg(&shared, conn);
+            shared.pending.fetch_sub(1, Ordering::SeqCst);
+            if let Ok(Some(admitted)) = admitted {
+                run_leg(&shared, admitted);
+            }
+        });
+    })
+}
+
+/// The QUIC producer: reads HELLO under `PRE_WELCOME_BOUND`, gates it on the admission token,
+/// then hands the leg to the shared `admit`, which never sees the token.
+fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Admitted>> {
+    let QuicConn {
+        handle,
+        tokens,
+        conn,
+        send,
+        recv,
+    } = quic;
+    let mut reader = BlockingRecv::new(handle.clone(), recv);
+    reader.set_read_timeout(Some(PRE_WELCOME_BOUND));
+    let mut writer = BlockingSend::new(handle.clone(), send);
+    let mut first = [0u8; 1];
+    reader.read_exact(&mut first)?;
+    if first[0] != session::HELLO_TYPE {
+        conn.close(0u32.into(), b"not a HELLO");
+        return Ok(None);
+    }
+    let hello = read_hello_after(&mut reader, first[0])?;
+    let verdict = tokens.lock().unwrap_or_else(|e| e.into_inner()).check(
+        hello.quic_token.as_deref(),
+        hello.token,
+        Instant::now(),
+    );
+    if verdict == TokenVerdict::Refuse {
+        shared.trace(
+            "welcome",
+            hello.token,
+            json!({"status": "refused", "reason": end_reason::QUIC_TOKEN}),
+        );
+        let _ = writer.write_all(&end_bytes(end_reason::QUIC_TOKEN));
+        let _ = writer.finish();
+        // Closing at once would discard the END; give the peer a moment to read it and close.
+        let _ = handle.block_on(tokio::time::timeout(Duration::from_secs(2), conn.closed()));
+        conn.close(0u32.into(), b"quic-token");
+        return Ok(None);
+    }
+    reader.set_read_timeout(None);
+    let closer = conn;
+    let leg = KeeperLeg {
+        reader: Box::new(reader),
+        writer: Box::new(writer),
+        shutdown: Arc::new(move || closer.close(0u32.into(), b"leg")),
+        render_lane: None,
+        silence_timeout: Some(QUIC_SILENCE_WINDOW),
+    };
+    admit(shared, leg, hello)
 }
 
 /// A leg that passed the HELLO table and is attached to a session.
@@ -833,6 +917,8 @@ fn server_writer(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::remote::attach::mosh::quic::{self, QuicRuntime};
+    use crate::remote::attach::mosh::quic_bootstrap::QuicToken;
     use crate::remote::attach::mosh::window::{CAP, FLOOR, INITIAL};
     use std::sync::atomic::AtomicBool;
 
@@ -1313,6 +1399,7 @@ mod tests {
             trace_dir: None,
             next_id: AtomicU64::new(1),
             pending: AtomicUsize::new(0),
+            quic: QuicAcceptor::default(),
         };
         let now = Instant::now();
         let token = Token::generate().unwrap();
@@ -1781,10 +1868,108 @@ mod tests {
         assert!(h.trace().iter().all(|line| line["event"] != "welcome"));
     }
 
+    /// Ask the keeper for a bootstrap on an open rendezvous connection: one line back.
+    fn ask(stream: &mut UnixStream) -> QuicBootstrap {
+        stream.write_all(&[session::BOOTSTRAP_QUERY]).unwrap();
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        while byte[0] != b'\n' {
+            stream.read_exact(&mut byte).unwrap();
+            line.push(byte[0]);
+        }
+        QuicBootstrap::parse_reply(std::str::from_utf8(&line).unwrap()).expect("a bootstrap reply")
+    }
+
+    fn query_stream(h: &Harness) -> UnixStream {
+        let stream = UnixStream::connect(&h.rdv.socket).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream
+    }
+
     #[test]
-    fn bootstrap_query_byte_closes_until_acceptor_lands() {
+    fn query_returns_parseable_reply() {
         let h = Harness::new();
-        assert!(closed_by_keeper(&h, &[session::BOOTSTRAP_QUERY]));
+        let reply = ask(&mut query_stream(&h));
+        assert_ne!(reply.port, 0);
+        assert_eq!(h.server().connections(), 0);
+    }
+
+    #[test]
+    fn query_twice_on_one_connection_answers_twice() {
+        let h = Harness::new();
+        let mut stream = query_stream(&h);
+        let first = ask(&mut stream);
+        let second = ask(&mut stream);
+        // One endpoint, a fresh admission token per query.
+        assert_eq!(first.port, second.port);
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_ne!(first.token, second.token);
+    }
+
+    /// A pinned QUIC client dialled at the keeper's endpoint, HELLO sent with `quic_token`.
+    /// Returns the first message the keeper answers with (the connection stays up until the
+    /// returned guard drops).
+    fn quic_hello(
+        reply: &QuicBootstrap,
+        quic_token: String,
+    ) -> (SessionMsg, (Arc<QuicRuntime>, quinn::Connection)) {
+        let rt = QuicRuntime::new("test-quic-client").unwrap();
+        let endpoint = quic::client_endpoint(&rt, false).unwrap();
+        let config = quic::client_config(reply.fingerprint, Duration::from_secs(30)).unwrap();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], reply.port));
+        let conn = rt
+            .block_on(async {
+                endpoint
+                    .connect_with(config, addr, quic::SERVER_NAME)
+                    .map_err(io::Error::other)?
+                    .await
+                    .map_err(io::Error::other)
+            })
+            .unwrap()
+            .unwrap();
+        let (send, recv) = rt.block_on(conn.open_bi()).unwrap().unwrap();
+        let mut writer = BlockingSend::new(rt.handle(), send);
+        let mut reader = BlockingRecv::new(rt.handle(), recv);
+        reader.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut endpoint = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        endpoint.set_quic_token(Some(quic_token));
+        writer
+            .write_all(&endpoint.hello(Instant::now(), 60_000, None))
+            .unwrap();
+        let mut header = [0u8; 5];
+        reader.read_exact(&mut header).unwrap();
+        let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut payload = vec![0u8; len];
+        reader.read_exact(&mut payload).unwrap();
+        let mut decoder = session::Decoder::default();
+        decoder.push(&header);
+        decoder.push(&payload);
+        (decoder.next().unwrap().unwrap(), (rt, conn))
+    }
+
+    #[test]
+    fn quic_hello_with_minted_token_gets_welcome_new() {
+        let h = Harness::new();
+        let reply = ask(&mut query_stream(&h));
+        let (answer, _guard) = quic_hello(&reply, reply.token.to_string());
+        let SessionMsg::Welcome(welcome) = answer else {
+            panic!("expected WELCOME, got {answer:?}");
+        };
+        assert_eq!(welcome.status, WelcomeStatus::New);
+        assert!(wait_until(Duration::from_secs(2), || h.server().connections() == 1));
+    }
+
+    #[test]
+    fn quic_hello_with_bad_token_gets_end_quic_token() {
+        let h = Harness::new();
+        let reply = ask(&mut query_stream(&h));
+        let bad = QuicToken::generate().unwrap();
+        assert_ne!(bad, reply.token);
+        let (answer, _guard) = quic_hello(&reply, bad.to_string());
+        let SessionMsg::End(end) = answer else {
+            panic!("expected END, got {answer:?}");
+        };
+        assert_eq!(end.reason, end_reason::QUIC_TOKEN);
         assert_eq!(h.server().connections(), 0);
     }
 
@@ -1813,6 +1998,7 @@ mod tests {
             trace_dir: None,
             next_id: AtomicU64::new(1),
             pending: AtomicUsize::new(0),
+            quic: QuicAcceptor::default(),
         });
         let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
         let token = local.token();

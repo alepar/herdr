@@ -82,6 +82,8 @@ pub(super) mod end_reason {
     pub const RING_OVERFLOW: &str = "ring-overflow";
     /// The keeper ends the session.
     pub const CLIENT_GONE: &str = "client-gone";
+    /// The keeper refused the QUIC admission token on a QUIC leg: the dialer falls back.
+    pub const QUIC_TOKEN: &str = "quic-token";
 }
 
 /// A problem that ends the current leg, never the session.
@@ -193,6 +195,9 @@ pub(super) struct Hello {
     pub grace_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_token: Option<Token>,
+    /// QUIC admission token (hex text, opaque here); only the keeper's QUIC acceptor parses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,6 +409,8 @@ pub(super) struct SessionEndpoint {
     grace_ms: u32,
     /// Per-leg override of `SILENCE_TIMEOUT`; `None` is the Phase 1 value.
     silence_timeout: Option<Duration>,
+    /// Sent in every HELLO while set (QUIC legs only).
+    quic_token: Option<String>,
 }
 
 impl SessionEndpoint {
@@ -429,7 +436,15 @@ impl SessionEndpoint {
             last_contact: None,
             grace_ms: 0,
             silence_timeout: None,
+            quic_token: None,
         }
+    }
+
+    /// The QUIC admission token the next HELLOs carry; `None` for ssh legs.
+    // The attacher's QUIC dialer (the attacher half of mosh-19g.1.3) is its only non-test caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_quic_token(&mut self, token: Option<String>) {
+        self.quic_token = token;
     }
 
     /// Sets the inbound silence that kills the current leg; `None` restores `SILENCE_TIMEOUT`.
@@ -491,6 +506,7 @@ impl SessionEndpoint {
             recv_offset: self.recv_offset,
             grace_ms,
             previous_token,
+            quic_token: self.quic_token.clone(),
         })
         .encode()
     }
@@ -914,6 +930,7 @@ mod tests {
             recv_offset: 7,
             grace_ms: 60_000,
             previous_token: None,
+            quic_token: None,
         }
     }
 
@@ -1092,6 +1109,37 @@ mod tests {
         assert_eq!(serde_json::from_str::<Token>(&json).unwrap(), t);
         assert!(serde_json::from_str::<Token>("\"abc\"").is_err());
         assert_ne!(Token::generate().unwrap(), Token::generate().unwrap());
+    }
+
+    #[test]
+    fn hello_without_quic_token_omits_the_field() {
+        let wire = SessionMsg::Hello(hello_msg(false)).encode();
+        assert!(!std::str::from_utf8(&wire[5..]).unwrap().contains("quic_token"));
+    }
+
+    #[test]
+    fn old_hello_json_parses() {
+        let json = br#"{"v":1,"token":"000102030405060708090a0b0c0d0e0f","resume":true,"recv_offset":7,"grace_ms":60000}"#;
+        let mut wire = vec![TYPE_HELLO];
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(json);
+        let SessionMsg::Hello(hello) = one(&wire) else {
+            panic!("not a HELLO");
+        };
+        assert_eq!(hello.quic_token, None);
+        assert_eq!(hello, hello_msg(true));
+    }
+
+    #[test]
+    fn hello_with_quic_token_round_trips() {
+        let mut endpoint = SessionEndpoint::new(Role::Local, tok(), 1024);
+        endpoint.set_quic_token(Some("ab".repeat(32)));
+        let bytes = endpoint.hello(Instant::now(), 60_000, None);
+        let SessionMsg::Hello(hello) = one(&bytes) else {
+            panic!("not a HELLO");
+        };
+        assert_eq!(hello.quic_token, Some("ab".repeat(32)));
+        assert!(std::str::from_utf8(&bytes[5..]).unwrap().contains(r#""quic_token":"abab"#));
     }
 
     // ---- negotiation ----
