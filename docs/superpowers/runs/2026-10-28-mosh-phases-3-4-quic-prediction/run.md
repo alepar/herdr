@@ -17,3 +17,9 @@ approvals:
 - coverage-round-1 · canonical R-list: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/coverage-round-1-requirements.md (R1–R13; R14, R15 appended from r-new) · requirements: 13 · mapped: 13 · unmapped: 0 · NEEDS-SPEC re-runs: both reviewers (one each); reviewer 2's re-run asked again for mosh-19g.2, not honored · auto applied C1–C6, C8–C19 (coverage-ledger.md); auto rejected C7
 - coverage-round-2 · requirements: 16 · mapped: 14 · unmapped: 2 (R15, R16) — both applied this round · divergence: findings 19 → 15 · novel 10/15 (67%) · widening: no · auto applied C20–C23, C25, C27–C33; auto rejected C24, C26, C34 · integration sweep: mosh-19g.7 (deps on all 24 leaves) · coverage loop ended (cap 2)
 roastDesignRound: 1
+findingsLedgerDesign: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger-design.md
+roastDesignReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md
+stepBackDesign-round-1: local — two sweepable clusters (stale-root, ssh-handoff); child specs already hold the corrected designs, fixes are small and local
+parked:
+- 2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md · escalation · "QUIC PTO exponential backoff / persistent-congestion collapse may break the 2 RTT same-connection echo bound after a 20-30 s blackhole (external-unverified); measured by mosh-19g.1.5's opt-in short-idle-gap test"
+- 2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md · escalation · "loss-based QUIC congestion control may not deliver a full PaneSurface within the 3b 2 s bound at 10 % loss / 150 ms one-way (external-unverified); measured by mosh-19g.2.7's opt-in timing test"

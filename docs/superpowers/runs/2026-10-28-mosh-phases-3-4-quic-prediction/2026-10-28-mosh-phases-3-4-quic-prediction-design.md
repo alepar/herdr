@@ -5,7 +5,8 @@
 A herdr remote session can run over a QUIC leg that survives a network switch or a long suspend:
 a switch or a gap under 30 s shows the next echo within 2 RTT of the link returning on the same
 connection, and a longer suspend within grace redials QUIC (not ssh) within 3 RTT plus one reconnect
-backoff step. Under 10 % packet loss, typing and output keep flowing instead of
+backoff step, plus up to the 3 s handshake bound of an attempt already in flight when the link
+returns. Under 10 % packet loss, typing and output keep flowing instead of
 stalling behind lost render frames. With prediction enabled at 150 ms one-way delay, most printable keys
 appear locally within 5 ms, and wrong predictions are cleared within one RTT plus mosh's 50 ms echo delay and one render (refined in the Phase 4 design).
 
@@ -51,11 +52,11 @@ and run over one reliable QUIC stream. Supersede (3b) is done in the fork's tran
 the keeper classifies each server frame, sends render frames on their own QUIC streams and resets a
 stream when a later self-contained frame supersedes it; the local bridge drops every chain-dependent
 frame after a gap and asks the server for a full frame through one new `EndpointControl` kind, which
-needs a one-statement server hook. The vision's server-side ring of sent surfaces with an acked base is
+needs a small server hook (3–4 lines, 3b §5). The vision's server-side ring of sent surfaces with an acked base is
 not built: forcing a full frame achieves the same "no stall" outcome with one hook instead of a server
 rewrite (recorded below as a parked follow-up). Prediction (4) runs in the client and draws over the
-retained surface; the server reports per-pane echo progress as `x-mosh.echo-ack.v1` through a hook on
-its input and render paths. The upstream hook budget rises from 20 to 30 lines for these phases.
+retained surface; the server reports per-pane echo progress as `x-mosh.echo-ack.v1` through hooks on
+its input path and its main-loop deadline (Phase 4 §2). The upstream hook budget rises from 20 to 30 lines for these phases.
 
 ## Decision points, by section
 
@@ -63,26 +64,41 @@ its input and render paths. The upstream hook budget rises from 20 to 30 lines f
 
 **Recommended:**
 - **Keeper side.** The keeper opens one UDP listener per keeper process and runs a `quinn` endpoint on
-  its own tokio runtime thread. Each QUIC connection is a leg. The keeper's existing per-connection leg
+  its own tokio runtime thread. It binds a dual-stack wildcard (`[::]` with `IPV6_V6ONLY` off, falling
+  back to `0.0.0.0`). Each QUIC connection is a leg. The keeper's existing per-connection leg
   handling (HELLO/WELCOME/DATA/ACK/HEARTBEAT/END) runs over one bidirectional QUIC stream adapted to
   blocking `Read`/`Write`.
-- **Bootstrap over ssh.** The attacher, which owns the ssh stdio, asks the keeper over the rendezvous
-  socket for `port`, the certificate's SHA-256 fingerprint and a per-session 32-byte token. It prints
-  one line `herdr-mosh-quic:1 <port> <fingerprint> <token>` after the ready marker. The certificate is
-  self-signed (`rcgen`) and lives as long as the keeper. The token binds the QUIC leg to the session:
-  the first message on the stream is the existing HELLO, carrying the token.
-- **Local side.** `QuicLegDialer` dials `<ssh target host>:<port>`, pins the fingerprint, and hands the
-  bridge a `Leg` whose reader and writer wrap the stream. The bridge is unchanged.
-- **Roaming.** QUIC connection migration carries the leg across an address change. The client side
-  calls `Endpoint::rebind` on a network change detected by a failed send or a silence timeout, and
-  keeps the connection ID. The keeper's idle timeout is the session grace period (`HELLO.grace_ms`), so
-  a 10-minute suspend within grace resumes the same QUIC connection, or dials a new one in one RTT.
-- **Fallback.** Leg 0 dials QUIC only after the ssh bootstrap printed the line. If the QUIC handshake
-  does not complete within 3 s, or the line is absent (older remote), the dialer falls back to the
-  ssh leg for this session, and later legs use ssh too. A capability `x-mosh-quic-v1` in
+- **Bootstrap over ssh** (3a §1). Only when started with `--x-mosh-quic-v1`, the attacher, which owns
+  the ssh stdio, asks the keeper over the rendezvous socket for `port`, the certificate's SHA-256
+  fingerprint and a 32-byte token (minted per query). It then writes exactly one line after the ready
+  marker and before any session bytes: `herdr-mosh-quic:1 <port> <fingerprint> <token>`, or
+  `herdr-mosh-quic:1 none` when the keeper's UDP bind failed or its reply did not arrive within 2 s.
+  The certificate is self-signed (`rcgen`) and lives as long as the keeper. The token binds the QUIC
+  leg to the session: the first message on the stream is the existing HELLO, carrying it as
+  `quic_token`.
+- **Local side** (3a §3, §6). The ssh leg's dialer waits for that one line (a 5 s safety timeout counts
+  as `none`). `QuicLegDialer` dials the `hostname` that `ssh -G <target>` reports, in the address
+  family it resolves to; when `ssh -G` shows a `proxyjump` or `proxycommand`, QUIC is skipped for the
+  session (`start_ui_bridge` does not wrap the ssh dialer). It pins
+  the fingerprint and hands the bridge a `Leg` whose reader and writer wrap the stream. The ssh child
+  stays alive until WELCOME arrives over QUIC, so any QUIC failure before WELCOME on leg 0 continues on
+  the live ssh leg.
+- **Roaming** (3a §4, §6, §7). The client socket binds the wildcard address, so QUIC connection
+  migration carries the leg across an address change; there is no error-triggered
+  `Endpoint::rebind`. `max_idle_timeout` is fixed in `TransportConfig` on both peers before the dial:
+  the keeper advertises 3600 s and the client its grace, so the negotiated value is the client's grace.
+  Grace itself stays a keeper application timer. QUIC legs carry a 30 s silence window (a
+  silence-timeout override on `Leg` and `KeeperLeg`): a gap under it resumes on the same connection, a
+  longer gap ends the leg and redials QUIC (§6 3a).
+- **Fallback** (3a Key decisions, §6). Fallback is per dial, not sticky. Leg 0 dials QUIC only after a
+  bootstrap line that is not `none`; if the handshake does not complete within 3 s or QUIC fails before
+  WELCOME, the live ssh leg carries the session. Reconnect legs try QUIC first with the cached bootstrap,
+  then ssh in the same dial, and ssh legs refresh the bootstrap. A capability `x-mosh-quic-v1` in
   `status client --json` gates the attempt.
-- **Dependencies.** `quinn` (features `runtime-tokio`, `rustls-ring`), `rustls`, `rcgen`; ring, never
-  aws-lc-rs. tokio is already a dependency with `net` reachable.
+- **Dependencies.** Under a `cfg(unix)` target table: `quinn` and `rustls` with
+  `default-features = false` (`quinn`: `runtime-tokio`, `rustls-ring`; `rustls`: `ring`, `std`,
+  `tls12`), and `rcgen` with `ring`. ring, never aws-lc-rs: `cargo tree -i aws-lc-rs` (and
+  `aws-lc-sys`) must come back empty. tokio is already a dependency with `net` reachable.
 
 **Considered:** a QUIC leg that replaces the session layer (QUIC's own reliability instead of Phase 1's
 offsets and replay). Rejected: a new QUIC connection after a long suspend loses QUIC's stream state,
@@ -94,7 +110,9 @@ QUIC gives encryption, congestion control and migration for free.
 **Recommended:**
 - **Classification** (keeper, server→client direction). Each server frame is classified by its bincode
   tag and, for tag 20, its kind string:
-  - **self-contained render:** `PaneSurface` (13), `ClientShellSnapshot` (12);
+  - **self-contained render:** `PaneSurface` (13). (`ClientShellSnapshot`, tag 12, is never sent live:
+    the snapshot travels as EndpointControl `shell.snapshot.v1` on the control lane, so it is
+    reliable.)
   - **chained render:** `PaneSurfacePatch` (19), `EndpointControl` kinds `endpoint.surface-reuse.v1`,
     `endpoint.surface-delta.v1`, `endpoint.surface-scroll.v1`;
   - **everything else:** reliable, in order, on the session stream as today.
@@ -105,18 +123,24 @@ QUIC gives encryption, congestion control and migration for free.
   later self-contained frame.
 - **Ordering and gaps** (local bridge). The bridge delivers render frames to the client in render
   sequence order, interleaved with session-stream frames by arrival. When a render frame is missing
-  (its stream was reset or is overdue by more than 1 RTT), the bridge drops every later chained
-  frame until the next self-contained frame, so the client's decoder never sees a broken chain. Then
-  it sends one `EndpointControl` kind `x-mosh.surface-resync.v1` towards the server.
-- **Server hook.** On `x-mosh.surface-resync.v1` the server marks that client for a full
-  `PaneSurface` on its next render, through an existing reset path (reactivation already sends a
-  full surface). This is one hook statement at the server's client `EndpointControl` dispatch
-  (`src/server/client_transport.rs:1349`). Unknown kinds are already ignored, so an older server is
-  safe: the bridge then just waits for the next naturally sent full frame.
-- **Capability.** `x-mosh-supersede-v1` in `status client --json`; the keeper splits render frames only
-  when both ends advertise it.
-- **Resume.** Render frames are not in the session replay ring; after a reconnect the bridge sends
-  `x-mosh.surface-resync.v1` once.
+  (its stream was reset, or it is overdue by more than `max(SRTT, 50 ms)` after a later one arrived;
+  3b §3), the bridge drops every later chained frame until the next self-contained frame, so the
+  client's decoder never sees a broken chain. Then it sends one `EndpointControl` kind
+  `x-mosh.surface-resync.v1` towards the server, once per gap and not for a supersede reset. Frames
+  the keeper itself fails to deliver (leg down, lane overflow, leg change) are covered by its chain
+  gate (3b §2).
+- **Server hook** (3b §5). On `x-mosh.surface-resync.v1` the server resets that client's transport
+  baseline, discards its pending render and requests a repaint, so the next frame is a full
+  `PaneSurface`. The dispatch at `src/server/client_transport.rs:1349` maps the kind to a new
+  `ServerEvent` variant handled by one arm in `headless.rs` (3–4 hook lines). Unknown kinds are
+  already ignored, so an older server is safe: the bridge then just waits for the next naturally sent
+  full frame.
+- **Capability** (3b §1). `x-mosh-supersede-v1` in `status client --json`. When the probe shows it,
+  the bridge sets `render_split` in every HELLO, and the keeper fixes the session's flag from the HELLO
+  that answered `new`. Render frames ride a lane only on legs that carry one; on ssh legs they stay on
+  the session stream.
+- **Resume.** Render frames are not in the session replay ring; on every admitted leg after the first
+  the bridge sends `x-mosh.surface-resync.v1` once after WELCOME (3b §4).
 
 **Considered:**
 - The vision's protocol-level surface acks: a server-side ring of sent surfaces with an acked base and
@@ -131,20 +155,27 @@ QUIC gives encryption, congestion control and migration for free.
 **Recommended:**
 - **Predictor** (client, fork module). Watches outgoing `ClientShellPaneInput` key events for printable
   text, places predicted cells at the pane's cursor (mapped through `PaneSurfacePane.inner_rect`),
-  and tracks them in epochs as mosh does: content-only validation against incoming surfaces, an epoch
-  ends on a non-printable key, a confirmed wrong prediction clears the epoch, paste and resize reset.
-  Shown only when SRTT > 60 ms, underlined when SRTT > 160 ms.
-- **SRTT source.** The local bridge already measures RTT (`InflightWindow`); it exposes a process-local
-  SRTT the client reads (same process). Over the plain bridge (no mosh), prediction stays off.
-- **Echo signal.** The server emits `EndpointControl` kind `x-mosh.echo-ack.v1` with
-  `{pane_id, input_seq}` on the render lane after a render that follows processed input, so the client
-  can judge predictions made before that input. Two hook statements: one where the server applies
-  pane input, one where it sends a render. The client tags its own input sequence locally; the server
-  echoes the count of input events it has applied per pane.
+  and tracks them in epochs as mosh does: content-only validation against the retained surface, an
+  epoch ends on a non-printable key, a confirmed wrong prediction clears the epoch, paste and resize
+  reset. `on` shows predictions whenever the link reports SRTT, `adaptive` only when SRTT > 60 ms;
+  both underline when SRTT > 160 ms (Phase 4 §3).
+- **SRTT source.** The client reads `LinkStatus.srtt_ms`, delivered per endpoint through the existing
+  link-frame observe hook (Phase 4 Key decisions). Over the plain bridge (no mosh), prediction stays
+  off.
+- **Echo signal** (Phase 4 §§1–2). The unit is one element of `ClientShellPaneInput.events`, counted at
+  the client's input tap and at the server's receipt (client_transport.rs:1196). Counts are per
+  (server client connection, pane). The bridge, not the client, injects `x-mosh.echo-subscribe.v1`;
+  the server creates the client's `EchoTracker` entry on the first subscribe, and a repeated subscribe
+  (replayed on a new leg) is idempotent and does not reset counts. The client resets on a new
+  connection generation, which is exactly when the server side is a new client connection. Acks are
+  deadline-driven: input received at least 50 ms earlier is acked as `EndpointControl` kind
+  `x-mosh.echo-ack.v1` `{pane_id, input_seq, surface_revision}` on the control lane (session stream,
+  `FrameClass` `Reliable`). The client judges a prediction only against a retained surface at or above
+  that `surface_revision`, and clears a prediction no ack covers after max(1 s, 4×SRTT).
 - **Painting.** Predictions are painted in the existing composition hook (the outage banner's paint
-  function is extended, no new line), and one hook line makes the patch fast path decline while
-  predictions are visible.
-- **Flag.** Off unless `HERDR_MOSH_PREDICT=1` (or `adaptive`, mosh's default behaviour).
+  function is extended, no new line), and one hook line makes the patch fast path decline while any
+  prediction exists, hidden ones included.
+- **Flag.** `HERDR_MOSH_PREDICT` is `off` (the default), `on` or `adaptive`.
 
 **Considered:** a client-side terminal emulator to predict (mosh's way). Rejected by the vision: the
 retained surface is already on the client.
@@ -153,12 +184,12 @@ retained surface is already on the client.
 
 **Recommended:** the hook budget rises from 20 to 30 for these phases (the vision set 20 "through
 Phase 2"). Expected new hooks:
-- `status.rs` capability lines for `x-mosh-quic-v1` and `x-mosh-supersede-v1`;
-- the server resync dispatch;
-- two server echo-ack hooks;
+- `status.rs` capability lines for `x-mosh-quic-v1`, `x-mosh-supersede-v1` and `x-mosh-echo-v1`;
+- the server resync dispatch, its `ServerEvent` variant and `headless.rs` arm (3b §5);
+- the server echo hooks: input count, `echo_due`, `echo_deadline`, client disconnect (Phase 4 §4);
 - the client fast-path guard and the client input tap for the predictor.
 
-That is about 7–9 new lines, each one statement tagged `// mosh-fork hook`.
+Each is one statement tagged `// mosh-fork hook`; the running total is about 25 of 30 (Phase 4 §4).
 `scripts/mosh-diff-budget.sh` gets the new limit.
 
 **Considered:** keep 20. Rejected: it forces 3b or 4 out of scope, and the vision deliberately
@@ -178,7 +209,8 @@ the link.
 - **3a:** a relay rebind mid-session, and an idle gap under the 30 s QUIC silence window, both resume on
   the same QUIC connection and show the next keystroke's echo within 2 RTT of the link returning. A
   longer gap within grace (up to 10 min) redials QUIC, never ssh, within 3 RTT plus one backoff step
-  (coverage round 1). Fallback: with UDP blocked, the session comes
+  plus up to the 3 s handshake bound of an attempt already in flight when the link returns
+  (coverage round 1; design roast r1). Fallback: with UDP blocked, the session comes
   up over ssh within 3 s plus the ssh time.
 - **3b:** at 10 % loss and 150 ms one-way delay, typing produces visible output within 2 s, and
   `yes`-style output keeps advancing. Measured against the same profile over the ssh leg.
@@ -207,26 +239,26 @@ the link.
 **QuicLegDialer** — new struct, the second `LegDialer` implementation: a QUIC leg with ssh bootstrap and ssh fallback (`src/mosh/quic_leg.rs`).
 - Owns:
   - the client quinn endpoint and its tokio runtime thread;
-  - the leg-0 `QuicBootstrap`;
-  - the sticky "fell back to ssh" decision for the session;
+  - the cached `QuicBootstrap` (leg 0's, refreshed by ssh legs) and per-dial fallback (3a §6);
+  - the dial address: `ssh -G`'s `hostname`, in the family it resolves to (3a §3);
   - the 3 s handshake bound;
   - fingerprint pinning;
-  - roaming (`Endpoint::rebind` on a failed send or a short silence watchdog, keeping the connection ID);
-  - classification of QUIC leg ends.
+  - the wildcard-bound client endpoint: roaming by QUIC migration, no error-triggered `Endpoint::rebind` (3a §6);
+  - classification of QUIC leg ends (3a Key abstractions).
 - Hides: QUIC. The bridge sees a `Leg` and never learns about migration, rebinds or fallback.
-- Must not: build ssh commands or read ssh preambles. It composes an `SshLegDialer` for the leg-0 bootstrap and for every leg after fallback. It must not touch session bytes or the give-up deadline (still the `LocalBridge`'s, Phase 1).
+- Must not: build ssh commands or read ssh preambles. It composes an `SshLegDialer` for the leg-0 bootstrap and for every ssh leg. It must not touch session bytes or the give-up deadline (still the `LocalBridge`'s, Phase 1).
 - Relationships: implements `LegDialer`; composes `SshLegDialer` (delegation); uses the `quic` module and `QuicBootstrap`. Dependencies point `local_bridge` → trait ← `quic_leg` → `ssh_leg`.
-- Lifecycle: built by `start_ui_bridge` and owned by the `LocalBridge` behind the existing `Arc<Mutex<Box<dyn LegDialer>>>`. Dropping it shuts the runtime down. On leg 0 it dials ssh, takes the bootstrap, then returns a QUIC leg (tearing the ssh child down) or that same ssh leg as the fallback, so fallback costs no second ssh handshake.
+- Lifecycle: built by `start_ui_bridge` and owned by the `LocalBridge` behind the existing `Arc<Mutex<Box<dyn LegDialer>>>`. Dropping it shuts the runtime down. On leg 0 it dials ssh and waits for the one bootstrap line. It returns a QUIC leg that keeps the live ssh leg as its standby until WELCOME arrives over QUIC (the ssh child is torn down then), or that same ssh leg as the fallback, so fallback costs no second ssh handshake (3a §6).
 - Errors:
-  - Leg 0: any QUIC failure (timeout, UDP blocked, fingerprint mismatch, missing line) fails over to ssh and is never surfaced as a `LegError`.
-  - Reconnect legs: an unreachable host or a timeout is `Retryable`; a fingerprint mismatch is `Fatal`.
+  - Leg 0: any QUIC failure before WELCOME (timeout, UDP blocked, fingerprint mismatch, a `none` line, token refusal, pre-WELCOME bound, early loss) continues on the live ssh leg and is never surfaced as a `LegError`.
+  - Reconnect legs: any QUIC failure, a fingerprint mismatch included, falls through to an ssh leg in the same dial (`Retryable`), never `Fatal`.
   - A keeper `END` keeps Phase 1's classification.
 
-**QuicBootstrap** — new value type, the single definition of `herdr-mosh-quic:1 <port> <fingerprint> <token>` and of the keeper's rendezvous answer that produces it.
+**QuicBootstrap** — new value type, the single definition of `herdr-mosh-quic:1 <port> <fingerprint> <token>` (and `herdr-mosh-quic:1 none`) and of the keeper's rendezvous answer that produces it.
 - Owns: encoding (attacher side), parsing (dialer side), validating the fields, and the 32-byte token type.
 - Must not: do I/O.
 - Relationships: shared by Attacher, Keeper and `QuicLegDialer`, like `LinkStatus`.
-- Errors: a malformed or absent line means "no bootstrap", which the dialer turns into the ssh fallback.
+- Errors: a `none` line, a malformed line, or no line within the dialer's 5 s safety timeout means "no bootstrap", which the dialer turns into the ssh fallback.
 
 **quic module** — new module of QUIC plumbing shared by both ends (`src/mosh/quic.rs`).
 - Owns:
@@ -237,7 +269,7 @@ the link.
 - Must not: know session or HELLO semantics, or decide which frames go on render streams.
 - Relationships: used by `QuicLegDialer`, `QuicAcceptor`, `RenderLane` and the bridge's render-lane reader.
 
-**KeeperLeg** — new struct, the keeper's transport-neutral accepted leg: reader and writer halves, a shutdown handle callable from another thread (stealing, the silence verdict, session end), and an optional `RenderLane`.
+**KeeperLeg** — new struct, the keeper's transport-neutral accepted leg: reader and writer halves, a shutdown handle callable from another thread (stealing, the silence verdict, session end), an optional `RenderLane`, and an optional silence-timeout override (the 30 s QUIC silence window).
 - Owns: what `admit`/`run_leg`/`leg_writer`/`LegSlot` take today from a concrete `UnixStream`.
 - Hides: whether the leg is a rendezvous Unix connection or a QUIC stream.
 - Must not: carry session state.
@@ -246,12 +278,12 @@ the link.
 
 **QuicAcceptor** — new struct, the keeper's UDP endpoint: one per keeper process, on its own tokio runtime thread.
 - Owns:
-  - the certificate, port and fingerprint (answering the bootstrap query through the keeper);
-  - minting and checking per-session tokens;
+  - the dual-stack wildcard bind, certificate, port and fingerprint (answering the bootstrap query through the keeper);
+  - minting and checking tokens (per query, bound to the session at the first QUIC HELLO; 3a §2);
   - accepting connections and their first bidirectional stream;
   - the pre-WELCOME bound;
-  - the connection idle timeout, from `HELLO.grace_ms`;
-  - building a `KeeperLeg` with a `RenderLane`.
+  - the transport config: `max_idle_timeout` advertised as 3600 s before any dial, so the client's advertised grace wins (3a Key abstractions); grace stays a keeper application timer;
+  - building a `KeeperLeg` with a `RenderLane` and the 30 s silence-timeout override.
 - Hides: QUIC admission. A bad or missing token is refused here, so `admit` stays transport-blind.
 - Must not: apply the HELLO table, steal legs, or touch the token table beyond the token check.
 - Lifecycle: started lazily by the first bootstrap query; dies with the keeper process.
@@ -259,9 +291,9 @@ the link.
 
 **FrameClass** — new closed enum `SelfContained | Chained | Reliable`, plus the one function that classifies a whole herdr frame (`link_frames.rs`, next to `FrameSplitter`).
 - Owns: spec §2's table:
-  - tags 13 and 12 → `SelfContained`;
+  - tag 13 → `SelfContained`;
   - tag 19 and the tag-20 kinds `endpoint.surface-reuse/delta/scroll.v1` → `Chained`;
-  - everything else → `Reliable`.
+  - everything else, every other tag-20 kind included (`shell.snapshot.v1`, `x-mosh.echo-ack.v1`) → `Reliable`.
   It decodes the bincode tag, and the kind string for tag 20.
 - Hides: the frozen wire layout from the keeper and the bridge.
 - Must not: decide what happens to a class.
@@ -270,14 +302,14 @@ the link.
 **RenderLane** — new struct, the keeper-side render sender for one QUIC leg.
 - Owns: render sequence numbers; one unidirectional stream per render frame with its header; the in-flight set; supersede. A `SelfContained` frame resets every older in-flight stream; `Chained` frames are only reset with that batch.
 - Hides: QUIC stream reset.
-- Must not: classify frames, touch the ring or the `InflightWindow`, or buffer while the leg is down (the keeper drops render frames with no lane).
+- Must not: classify frames, touch the ring or the `InflightWindow`, or buffer while the leg is down (the keeper's `ChainGate` drops render frames then; on an ssh leg they ride the session stream; 3b §2).
 - Relationships: owned by a `KeeperLeg`; fed from the session's `server_reader` through a channel into the keeper runtime. Concrete, QUIC only.
 - Lifecycle: per leg; a new leg starts a fresh sequence.
 
 **RenderReorder** — new struct, the bridge-side render ordering and gap state machine; sans-IO, time as an input.
 - Owns:
   - in-order delivery by render sequence;
-  - gap detection (a reset stream, or a frame overdue by more than 1 SRTT);
+  - gap detection (a reset stream, or a frame overdue by more than `max(SRTT, 50 ms)` after a later one arrived; 3b §3);
   - dropping `Chained` frames after a gap until the next `SelfContained` frame;
   - the once-per-gap `x-mosh.surface-resync.v1` decision.
   Each leg starts in the gap state, which covers spec §2 "Resume".
@@ -289,41 +321,42 @@ the link.
 **Predictor** — new client fork module (`src/mosh/predict.rs`, mounted in the client), with state per endpoint and per pane.
 - Owns:
   - the `HERDR_MOSH_PREDICT` mode (`off | on | adaptive`, a closed enum, read once);
-  - the input tap: printable text from `ClientShellPaneInput`, and the per-pane input-event count;
+  - the input tap: printable text from `ClientShellPaneInput`, and the per-pane count of `events` elements;
   - predicted cells placed at the cursor through `inner_rect`;
-  - epochs and mosh's rules: content-only validation against the retained surface at paint time, an epoch ending on a non-printable key, clearing on a confirmed wrong prediction, reset on paste or resize;
-  - consuming `x-mosh.echo-ack.v1`;
-  - the thresholds (shown above 60 ms, underlined above 160 ms);
-  - the "predictions visible" answer the fast-path guard reads.
+  - epochs and mosh's rules: content-only validation against the retained surface at paint time, judged only once an ack covers the prediction and the surface revision is at or above the ack's `surface_revision`; an epoch ending on a non-printable key, clearing on a confirmed wrong prediction, reset on paste or resize;
+  - consuming `x-mosh.echo-ack.v1`, and clearing a prediction no ack covers after max(1 s, 4×SRTT) (Phase 4 Key abstractions);
+  - the thresholds (`on`: whenever SRTT is reported; `adaptive`: above 60 ms; underlined above 160 ms);
+  - the "any prediction exists" answer the fast-path guard reads.
 - Hides: the prediction rules from every client hook.
 - Must not: mutate the retained surface or the decoder baseline (it paints an overlay only); measure RTT (the bridge supplies SRTT); send anything to the server.
 - Relationships: reached only through the fork's client hooks. The existing `mosh_outage::observe`/`paint` become the fork's client facade: a closed `match` on kind routes `x-mosh.link.v1` → `OutageState` and `x-mosh.echo-ack.v1` → `Predictor`, and paints both overlays. Two new hooks: the input tap and the fast-path guard.
-- Lifecycle: process-global behind a mutex, like `OutageState`; entries go when an endpoint is removed or reset.
+- Lifecycle: process-global behind a mutex, like `OutageState`; state is keyed by (endpoint, connection generation), so a new generation resets it (Phase 4 Key abstractions).
 - Errors: a malformed echo-ack is consumed and ignored.
 
 **EchoTracker / server hooks** — new fork module for the server side (`src/mosh/server_hooks.rs`), the bodies behind the server hook statements.
 - Owns:
-  - the resync hook: `x-mosh.surface-resync.v1` marks that client for a full `PaneSurface` through the existing reactivation reset path;
-  - the applied input-event count per client and pane;
-  - the decision to emit `x-mosh.echo-ack.v1 {pane_id, input_seq}` after a render that follows newly applied input.
-- Hides: echo bookkeeping from `client_transport.rs` and `render.rs`.
-- Must not: put the echo-ack in the latest-wins render slot. It follows the render it acknowledges through the ordered lane.
-- Lifecycle: a process-global map keyed by client, with entries removed on client disconnect.
+  - the resync hook: `x-mosh.surface-resync.v1` resets the client's baseline, discards its pending render and requests a repaint, through a `ServerEvent` arm (3b §5);
+  - the subscription: the first `x-mosh.echo-subscribe.v1` creates the client's entry; a repeated one is idempotent and keeps the counts;
+  - the received `events` count per (client connection, pane), counted on receipt;
+  - the deadline-driven emission of `x-mosh.echo-ack.v1 {pane_id, input_seq, surface_revision}` for input received at least 50 ms earlier (Phase 4 §2).
+- Hides: echo bookkeeping from `client_transport.rs` and `headless.rs`.
+- Must not: put the echo-ack in the latest-wins render slot. It goes on the control lane (session stream, `FrameClass` `Reliable`); ordering against renders comes from `surface_revision`, not from the wire.
+- Lifecycle: a process-global map keyed by client, with entries created on the first subscribe and removed on client disconnect (`remove_client`).
 
 **UdpRelay** — new test helper (`tests/mosh_harness.rs`): a userspace UDP relay with one-way delay, seeded loss and `rebind`; test-only, beside the Phase 2 `link` knob. The fake-ssh wrapper rewrites the bootstrap port to the relay's port, so production code gets no address override.
 
 **Extended:**
-- **Leg** — optionally carries a render-lane receiver (`None` for ssh), taken like the reader and writer. Its end report gains a QUIC close reason in place of an `ExitStatus`. It still never interprets bytes.
-- **SshLegDialer** — in bootstrap mode it reads one line after the ready marker with a short bound and exposes the parsed `QuicBootstrap`; absent or malformed means none.
-- **start_ui_bridge** — still the single registration point. It wraps `SshLegDialer` in `QuicLegDialer` when the probe shows `x-mosh-quic-v1`.
+- **Leg** — optionally carries a render-lane receiver (`None` for ssh), taken like the reader and writer. Its end report gains a QUIC close reason in place of an `ExitStatus`. It also gains an optional silence-timeout override (30 s on QUIC legs) that `LocalBridge` honours, an optional opaque admission token copied into HELLO, and, on a leg-0 QUIC leg, the live ssh leg as a standby that the bridge switches to if the QUIC leg ends before WELCOME and drops once WELCOME arrives (3a §6). It still never interprets bytes.
+- **SshLegDialer** — in bootstrap mode it adds `--x-mosh-quic-v1`, waits for the one bootstrap line after the ready marker (5 s safety timeout, treated as `none`) and exposes the parsed `QuicBootstrap`; `none` or malformed means none.
+- **start_ui_bridge** — still the single registration point. It wraps `SshLegDialer` in `QuicLegDialer` when the probe shows `x-mosh-quic-v1`, `HERDR_MOSH_QUIC` is not `0`, and `ssh -G` shows no jump (3a Key abstractions).
 - **Keeper**:
   - a pre-HELLO bootstrap query on a rendezvous connection (a closed match on the first byte, not a new `SessionMsg` variant);
   - legs arrive as `KeeperLeg`;
-  - a per-session render-split flag, fixed by the leg that answered `new` (QUIC lane plus both capabilities). When set, `server_reader` runs `FrameSplitter` + `FrameClass`: `Reliable` frames go to the ring; render frames go to the current leg's `RenderLane`, or are dropped while down.
-- **Attacher** — after the ready marker and before pumping, it queries the keeper and prints the `QuicBootstrap` line.
-- **LocalBridge** — reads the leg's render lane into `RenderReorder`; interleaves delivered frames into the client output without offsets (not acked, not replayed); injects the resync `ClientMessage` frame upstream at a client frame boundary, which needs a client→server `FrameSplitter`.
-- **InflightWindow** — also keeps a smoothed RTT (SRTT), still the only RTT sampler.
-- **LinkStatus** — `Linked` gains an optional `srtt_ms`, re-injected only on meaningful SRTT change; this is how SRTT reaches the right client endpoint.
+  - a per-session render-split flag, fixed from the HELLO that answered `new` and independent of the leg type (3b §1). When set, `server_reader` runs `FrameSplitter` + `FrameClass` + `ChainGate`: `Reliable` frames go to the ring; render frames go to the current leg's `RenderLane`, to the ring on an ssh leg, or are dropped while down (3b §2).
+- **Attacher** — only when started with `--x-mosh-quic-v1`: after the ready marker and before any session bytes, it queries the keeper (2 s reply timeout) and writes exactly one line, the `QuicBootstrap` line or `herdr-mosh-quic:1 none`.
+- **LocalBridge** — reads the leg's render lane into `RenderReorder`; interleaves delivered frames into the client output without offsets (not acked, not replayed); injects the resync and echo-subscribe `ClientMessage` frames upstream at a client frame boundary, which needs a client→server `FrameSplitter`.
+- **InflightWindow** — also keeps a smoothed RTT (SRTT); on QUIC legs the `Leg`'s RTT probe supplies the connection's own estimate (3a §6).
+- **LinkStatus** — `Linked` gains an optional `srtt_ms`, re-injected only on meaningful SRTT change, and `echo` (Phase 4); this is how SRTT and echo support reach the right client endpoint.
 - **FrameSplitter / link_frames** — holds `FrameClass` and the resync frame encoder next to the link-frame encoder.
 
 **Variation:**
@@ -336,30 +369,30 @@ the link.
 **Walk-through.**
 - Setup:
   1. `start_ui_bridge` sees `x-mosh-quic-v1` and registers `QuicLegDialer(SshLegDialer)`.
-  2. On leg 0, the attacher queries the keeper (starting `QuicAcceptor`) and prints the line.
-  3. `SshLegDialer` parses the bootstrap; `QuicLegDialer` finishes a pinned handshake in under 3 s and returns a `Leg` with a render lane, then the ssh child is torn down.
-  4. The bridge sends HELLO. `QuicAcceptor` checks the token and builds a `KeeperLeg` with a `RenderLane`; `admit` answers `new` and sets render-split.
+  2. On leg 0, the attacher queries the keeper (starting `QuicAcceptor`) and writes the one bootstrap line before any session bytes.
+  3. `SshLegDialer` waits for and parses the line; `QuicLegDialer` finishes a pinned handshake in under 3 s and returns a `Leg` with a render lane, holding the live ssh leg as its standby.
+  4. The bridge sends HELLO with the token. `QuicAcceptor` checks it and builds a `KeeperLeg` with a `RenderLane`; `admit` answers `new` and fixes render-split from HELLO. WELCOME arrives over QUIC and the standby ssh child is torn down. Had the QUIC leg ended before WELCOME, the bridge would have continued on the standby ssh leg.
 - Output:
   1. Server frames go through `FrameSplitter` + `FrameClass`. `Reliable` frames go to the ring; render frames go to `RenderLane`, where a newer `PaneSurface` resets older streams.
   2. The bridge's `RenderReorder` sees the gap, drops chained frames, and injects one resync.
-  3. The server hook marks a full surface, which arrives and closes the gap.
+  3. The server hook forces a full surface, which arrives and closes the gap.
 - Input and prediction:
-  1. A keystroke goes through the input tap to `Predictor` and is painted through the facade. The fast-path guard declines while predictions are visible.
-  2. The server input hook counts the input; its render hook sends the echo-ack after the render.
-  3. The facade's `observe` passes it to `Predictor`, which confirms or clears the prediction.
+  1. The bridge injected `x-mosh.echo-subscribe.v1` after Hello. A keystroke goes through the input tap to `Predictor`, which counts its `events` and paints through the facade. The fast-path guard declines while any prediction exists.
+  2. The server counts the events on receipt; a main-loop deadline 50 ms later queues the echo-ack with the committed `surface_revision` on the control lane.
+  3. The facade's `observe` passes it to `Predictor`, which confirms or clears the prediction once the retained surface reaches that revision.
 - Future changes: a new chained surface kind touches one `FrameClass` arm. A third transport adds one `LegDialer` impl plus one `KeeperLeg` producer, registered in `start_ui_bridge`.
 
 **Deliberate exceptions:**
 - Per spec §2: the keeper now classifies herdr frames, overriding Phase 1's "keeper must not parse herdr frames". This is confined to `FrameSplitter` + `FrameClass` in `server_reader`, render-split sessions only.
-- Per spec §2: the server resync hook is a deliberate per-kind branch at the client `EndpointControl` dispatch (client_transport.rs:1349).
+- Per spec §2: the server resync hook is a deliberate per-kind branch at the client `EndpointControl` dispatch (client_transport.rs:1349), plus a `ServerEvent` variant and its `headless.rs` arm (3b §5).
 - Per spec §3: `Predictor` is deliberately process-global, like `OutageState`. Painting and observing reuse the existing `mosh_outage` hooks, so that module is now the fork's client facade under its old mount name.
-- Per spec §1: the ssh fallback is leg-0-only and sticky. A QUIC session whose UDP path breaks later retries until give-up and never switches to ssh, because render-split is fixed for the session.
+- Per spec §1 and 3a Key decisions: the ssh fallback is per dial, not sticky, and render-split is a session flag with per-leg lanes (3b §1). A QUIC session whose UDP path breaks later reconnects QUIC-first, then over ssh in the same dial, and goes back to QUIC once UDP returns.
 
 **Gaps for the subepic designs:**
-- (a) Echo-ack ordering. The echo-ack rides the session stream while renders ride separate streams, so it can arrive first. `Predictor` must judge only against a surface received after the ack, for example via an optional surface revision in the echo-ack JSON.
-- (b) SRTT sampling. `InflightWindow` samples only on ACKs advancing ≥ `ACK_EVERY_BYTES`, so a typing-only session gets no samples. SRTT needs its own rule, such as the heartbeat/ACK round trip.
-- (c) Cleanup. `EchoTracker` entries need removing on client disconnect, either via one more hook or by pruning inside the existing ones.
-- (d) QUIC token. The 32-byte QUIC token differs from the 128-bit session `Token`, so it needs a new optional HELLO field, checked only by `QuicAcceptor`.
+- (a) Echo-ack ordering. Resolved in Phase 4: the ack carries `surface_revision`, rides the control lane, and `Predictor` judges only against a retained surface at or above that revision.
+- (b) SRTT sampling — resolved by mosh-19g.6: QUIC legs read quinn's connection RTT; ssh legs keep an EWMA over InflightWindow samples plus heartbeat→ACK round trips, so a typing-only session still gets samples.
+- (c) Cleanup. Resolved in Phase 4: one hook statement in `remove_client` removes the client's `EchoTracker` entries.
+- (d) QUIC token. Resolved in 3a §2: a new optional HELLO field `quic_token`, checked only by `QuicAcceptor`.
 
 Digest:
 - QuicLegDialer: owns QUIC legs, ssh bootstrap and fallback, pinning and roaming;
@@ -388,3 +421,5 @@ Digest:
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+- 2026-10-28: Design roast r1 fixes applied (stale-root sweep against 3a/3b/4; ssh handoff contract; dial address family; echo counting unit; dependency features; redial bound). Escalations parked: QUIC PTO backoff vs 2 RTT after a blackhole; throughput at 10 % loss vs the 2 s 3b bound — both measured by the opt-in timing tests.

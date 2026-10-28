@@ -36,13 +36,16 @@ To judge a prediction it needs one more fact: which of its inputs the server has
 
 ### 1. Input accounting (chosen: count events per pane per connection)
 
+- **Unit:** one element of `ClientShellPaneInput.events`, counted at the client's input tap and at the
+  server's receipt (client_transport.rs:1196). Counts are per (server client connection, pane).
 - **Client:**
   - One input-tap hook statement at the point where `ClientShellPaneInput{pane_id, events}` is sent (client/shell_runtime.rs:805 or `push_target_event`).
   - It passes the pane id and events to the predictor, which adds `events.len()` to that pane's sent counter and creates predictions for printable text: `Key.generated_text` and `TextCommit`.
 - **Server:**
   - One hook statement where the server applies `ClientShellPaneInput` (client_transport.rs:1196) adds `events.len()` to the client and pane's applied counter in `EchoTracker`.
   - The counts are per server-side client connection. A mosh resume keeps that connection (the keeper holds it), so the counts continue.
-  - A new connection resets both sides: the server on client disconnect, the client on endpoint reset or a new `Welcome`.
+  - The server creates the client's `EchoTracker` entry on the first `x-mosh.echo-subscribe.v1`. A repeated subscribe (the replay on a new leg) is idempotent and does not reset counts.
+  - The client resets on a new connection generation (Key abstractions, Predictor keying), which is exactly when the server side is a new client connection; the server's old entry went with the old connection's disconnect.
 - **Client disconnect:** one hook statement calls the `server_hooks` disconnect entry point, which removes the client's `EchoTracker` entries (root gap c).
 
 ### 2. Echo-ack emission (chosen: deadline-driven, as mosh; see Key abstractions)
@@ -149,7 +152,7 @@ That is 7 added lines (the observe and paint lines are edits; the render-sent ho
 
 **EchoTracker / server_hooks** — extended (root-defined, mosh-19g.5).
 - A process-global mutex keyed by client id, holding per pane `received`, `acked` and a FIFO of `(count, received_at)`. It is never held across a channel send.
-- Subscribe: an arm in 3b's dispatch entry (client_transport.rs:1349) creates the client's entry and returns no `ServerEvent`; this costs no line.
+- Subscribe: an arm in 3b's dispatch entry (client_transport.rs:1349) creates the client's entry on the first subscribe and returns no `ServerEvent`; this costs no line. A repeated subscribe on the same connection is a no-op and keeps the counts.
 - Counting: on receipt, on the reader thread (client_transport.rs:1196), for subscribed clients only. Receipt also covers events the main loop later drops (headless.rs:2365-2386), so the counts match the client's.
 - Emission, on mosh's deadline:
   - An ack covers input received at least `ECHO_DELAY` (50 ms) earlier and carries the client's last committed `surface_revision`, via `render_state.last_pane_surface()`.
