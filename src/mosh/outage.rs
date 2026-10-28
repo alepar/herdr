@@ -17,6 +17,10 @@ use crate::protocol::{color_to_u32, modifier_to_u16, FrameData};
 #[path = "server_hooks.rs"]
 pub(crate) mod server_hooks;
 
+/// Predictive echo core (mosh-19g.3.1): `EchoAck` codec and the `Predictor` state machine.
+#[path = "predict.rs"]
+pub(crate) mod predict;
+
 pub(crate) const LINK_KIND: &str = "x-mosh.link.v1";
 const STALE_AFTER: Duration = Duration::from_secs(2);
 
