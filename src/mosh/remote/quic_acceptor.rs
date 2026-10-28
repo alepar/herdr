@@ -26,7 +26,7 @@ use crate::remote::attach::mosh::quic_bootstrap::{Fingerprint, QuicBootstrap, Qu
 use crate::remote::attach::mosh::session::{Token, PRE_WELCOME_BOUND};
 
 use super::keeper_leg::KeeperLeg;
-use super::render_lane::{LaneQueue, RenderLane};
+use super::render_lane::{LaneQueue, LaneTrace, RenderLane};
 
 /// An unbound token older than this is refused.
 const UNBOUND_TTL: Duration = Duration::from_secs(60);
@@ -105,8 +105,9 @@ pub(super) fn keeper_leg(
     conn: quinn::Connection,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
+    trace: Option<LaneTrace>,
 ) -> KeeperLeg {
-    let lane = LaneQueue::new();
+    let lane = LaneQueue::with_trace(trace);
     RenderLane::spawn(handle, conn.clone(), lane.clone());
     let closing = lane.clone();
     KeeperLeg {
@@ -353,6 +354,7 @@ mod tests {
             pair.server.clone(),
             Box::new(io::empty()),
             Box::new(io::sink()),
+            None,
         );
         assert_eq!(leg.silence_timeout, Some(QUIC_SILENCE_WINDOW));
         let lane = leg.render_lane.clone().expect("QUIC legs carry a lane");

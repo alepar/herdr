@@ -51,6 +51,8 @@ type Teardown = Box<dyn FnOnce(bool, Instant) -> (Option<ExitStatus>, Option<Str
 
 /// The transport's own RTT estimate, polled by the bridge (QUIC: `Connection::rtt()`).
 pub(super) type RttProbe = Box<dyn Fn() -> Option<Duration> + Send>;
+/// The transport's own counters as a trace payload (QUIC path stats).
+pub(super) type StatsProbe = Box<dyn Fn() -> serde_json::Value + Send>;
 
 /// One live connection to the keeper side (transport-neutral).
 ///
@@ -74,6 +76,8 @@ pub(super) struct Leg {
     stderr_gate: Option<Arc<AtomicBool>>,
     /// The transport's RTT estimate; `None` when it has none (ssh).
     rtt_probe: Option<RttProbe>,
+    /// The transport's trace counters; `None` on ssh legs.
+    stats_probe: Option<StatsProbe>,
     /// Opaque admission token the bridge copies into `HELLO.quic_token`; `None` for ssh legs.
     admission_token: Option<String>,
     /// Filled by the transport when it closes (QUIC close reason); copied into the end report.
@@ -102,6 +106,7 @@ impl Leg {
             pre_welcome_end: None,
             stderr_gate: None,
             rtt_probe: None,
+            stats_probe: None,
             admission_token: None,
             close_reason: None,
             #[cfg(unix)]
@@ -170,6 +175,15 @@ impl Leg {
     pub(super) fn with_rtt_probe(mut self, probe: RttProbe) -> Leg {
         self.rtt_probe = Some(probe);
         self
+    }
+
+    pub(super) fn with_stats_probe(mut self, probe: StatsProbe) -> Leg {
+        self.stats_probe = Some(probe);
+        self
+    }
+
+    pub(super) fn stats(&self) -> Option<serde_json::Value> {
+        self.stats_probe.as_ref().map(|probe| probe())
     }
 
     /// The transport's own RTT estimate now; `None` for ssh legs and while the transport has none.
@@ -360,6 +374,7 @@ fn spawn_leg(
         pre_welcome_end: None,
         stderr_gate,
         rtt_probe: None,
+        stats_probe: None,
         admission_token: None,
         close_reason: None,
         #[cfg(unix)]

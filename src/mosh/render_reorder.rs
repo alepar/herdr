@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 /// SRTT assumed while the process-local read is unknown.
 pub(super) const UNKNOWN_SRTT: Duration = Duration::from_millis(250);
-/// Floor of the overdue threshold.
-pub(super) const MIN_OVERDUE: Duration = Duration::from_millis(50);
+/// Floor of the SRTT the overdue threshold is a multiple of: the estimate lags a path whose
+/// latency has just risen (a roam, the first seconds of a leg), and a threshold built on the
+/// stale value declares gaps that cost a full-surface resync.
+pub(super) const MIN_OVERDUE: Duration = Duration::from_millis(250);
 
 /// What the bridge's lane reader saw for one render stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,13 +64,20 @@ pub(super) struct RenderReorder {
     held: BTreeMap<u64, Held>,
     /// Seqs whose self-contained header was seen and which are not yet delivered.
     sc_headers: BTreeSet<u64>,
+    /// Seqs whose stream header (any class) was seen and which are not yet delivered.
+    headers: BTreeSet<u64>,
     in_gap: bool,
     /// The current gap's resync is sent, or deliberately skipped.
     requested: bool,
 }
 
+/// A lost packet is recovered about a round trip and a half after it was sent, and the
+/// recovery can itself be lost: the wait for a stream that has not shown its header covers
+/// three round trips.
+const OVERDUE_ROUND_TRIPS: u32 = 3;
+
 fn threshold(srtt: Option<Duration>) -> Duration {
-    srtt.unwrap_or(UNKNOWN_SRTT).max(MIN_OVERDUE)
+    srtt.unwrap_or(UNKNOWN_SRTT).max(MIN_OVERDUE) * OVERDUE_ROUND_TRIPS
 }
 
 impl RenderReorder {
@@ -79,6 +88,7 @@ impl RenderReorder {
             next: 0,
             held: BTreeMap::new(),
             sc_headers: BTreeSet::new(),
+            headers: BTreeSet::new(),
             in_gap: true,
             requested: true,
         }
@@ -93,12 +103,16 @@ impl RenderReorder {
         let mut out = ReorderOutput::default();
         match arrival {
             RenderArrival::Header { seq, class } => {
-                if seq >= self.next && class == FrameClass::SelfContained {
-                    self.sc_headers.insert(seq);
+                if seq >= self.next {
+                    self.headers.insert(seq);
+                    if class == FrameClass::SelfContained {
+                        self.sc_headers.insert(seq);
+                    }
                 }
             }
             RenderArrival::Complete { seq, class, bytes } => {
                 if seq >= self.next {
+                    self.headers.insert(seq);
                     if class == FrameClass::SelfContained {
                         self.sc_headers.insert(seq);
                     }
@@ -136,8 +150,11 @@ impl RenderReorder {
     }
 
     /// The instant at which the missing `next` becomes overdue, if a later completion is held.
+    /// Never for a stream whose header arrived: it is alive and ends in a completion or a
+    /// reset, and a frame of many packets on a lossy link takes several round trips to finish
+    /// (declaring it overdue costs a full-surface resync that is far slower than waiting).
     pub(super) fn next_deadline(&self, srtt: Option<Duration>) -> Option<Instant> {
-        if self.in_gap {
+        if self.in_gap || self.headers.contains(&self.next) {
             return None;
         }
         self.held
@@ -145,6 +162,11 @@ impl RenderReorder {
             .map(|h| h.at)
             .min()
             .map(|at| at + threshold(srtt))
+    }
+
+    /// The lowest seq neither delivered nor dropped (the one a gap is waiting on).
+    pub(super) fn next_seq(&self) -> u64 {
+        self.next
     }
 
     fn declare_gap(&mut self, cause: GapCause, out: &mut ReorderOutput) {
@@ -160,6 +182,12 @@ impl RenderReorder {
         self.next = seq + 1;
         self.held = self.held.split_off(&self.next);
         self.sc_headers = self.sc_headers.split_off(&self.next);
+        self.headers = self.headers.split_off(&self.next);
+    }
+
+    /// The stream header of `seq` was seen (it is streaming or complete, not unknown).
+    pub(super) fn header_seen(&self, seq: u64) -> bool {
+        self.headers.contains(&seq)
     }
 
     fn settle(&mut self, now: Instant, srtt: Option<Duration>, out: &mut ReorderOutput) {
@@ -282,18 +310,18 @@ mod tests {
     }
 
     #[test]
-    fn overdue_gap_uses_unknown_srtt_250ms() {
-        overdue_gap_at(None, ms(250));
+    fn overdue_gap_uses_three_unknown_srtts() {
+        overdue_gap_at(None, ms(750));
     }
 
     #[test]
-    fn overdue_gap_respects_50ms_floor() {
-        overdue_gap_at(Some(ms(20)), ms(50));
+    fn overdue_gap_respects_the_floor() {
+        overdue_gap_at(Some(ms(20)), ms(750));
     }
 
     #[test]
-    fn overdue_gap_uses_srtt() {
-        overdue_gap_at(Some(ms(400)), ms(400));
+    fn overdue_gap_uses_three_srtts() {
+        overdue_gap_at(Some(ms(400)), ms(1200));
     }
 
     #[test]
@@ -317,11 +345,11 @@ mod tests {
         let mut r = live(t0);
         let o = r.on_arrival(complete(2, SelfContained), t0, None);
         assert!(o.deliver.is_empty() && o.gap.is_none() && !o.request_resync);
-        let o = r.poll(t0 + ms(249), None);
+        let o = r.poll(t0 + ms(749), None);
         assert_eq!(o, ReorderOutput::default());
         // Overdue: the held SC releases at once, and since it closes the gap in the same
         // call there is nothing left to resync.
-        let o = r.poll(t0 + ms(250), None);
+        let o = r.poll(t0 + ms(750), None);
         assert_eq!(o.deliver, vec![vec![2]]);
         assert_eq!(o.gap, Some(GapCause::Overdue));
         assert!(!o.request_resync);
@@ -400,6 +428,35 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_is_never_overdue() {
+        // Seq 1's header arrived: the stream is alive and ends in a completion or a reset, both
+        // reliable. Seq 2 completing first (a loss on seq 1 needs a retransmission round) is not
+        // a gap, however long seq 1 takes.
+        let t0 = Instant::now();
+        let mut r = live(t0);
+        r.on_arrival(header(1, Chained), t0, Some(ms(300)));
+        let o = r.on_arrival(complete(2, Chained), t0 + ms(5), Some(ms(300)));
+        assert!(o.deliver.is_empty());
+        assert_eq!(r.next_deadline(Some(ms(300))), None);
+        let o = r.poll(t0 + ms(60_000), Some(ms(300)));
+        assert_eq!(o, ReorderOutput::default());
+        let o = r.on_arrival(complete(1, Chained), t0 + ms(61_000), Some(ms(300)));
+        assert_eq!(o.deliver, vec![vec![1], vec![2]]);
+        assert_eq!(o.gap, None);
+    }
+
+    #[test]
+    fn streaming_frame_reset_still_declares_the_gap() {
+        let t0 = Instant::now();
+        let mut r = live(t0);
+        r.on_arrival(header(1, Chained), t0, None);
+        r.on_arrival(complete(2, Chained), t0, None);
+        let o = r.on_arrival(RenderArrival::Reset { seq: 1 }, t0 + ms(10), None);
+        assert_eq!(o.gap, Some(GapCause::Reset));
+        assert!(o.request_resync);
+    }
+
+    #[test]
     fn next_deadline_tracks_overdue() {
         let t0 = Instant::now();
         let mut r = live(t0);
@@ -408,11 +465,11 @@ mod tests {
         r.on_arrival(complete(2, Chained), t0 + ms(20), None);
         r.on_arrival(complete(5, Chained), t0 + ms(30), None);
         // Measured from the earliest held completion.
-        assert_eq!(r.next_deadline(None), Some(t0 + ms(10) + ms(250)));
-        assert_eq!(r.next_deadline(Some(ms(400))), Some(t0 + ms(10) + ms(400)));
+        assert_eq!(r.next_deadline(None), Some(t0 + ms(10) + ms(750)));
+        assert_eq!(r.next_deadline(Some(ms(400))), Some(t0 + ms(10) + ms(1200)));
         // Delivering seq 1 releases 2 and 3; seq 4 is now missing behind 5 (from t0+30).
         r.on_arrival(complete(1, Chained), t0 + ms(40), None);
-        assert_eq!(r.next_deadline(None), Some(t0 + ms(30) + ms(250)));
+        assert_eq!(r.next_deadline(None), Some(t0 + ms(30) + ms(750)));
         r.on_arrival(complete(4, Chained), t0 + ms(50), None);
         assert_eq!(r.next_deadline(None), None);
     }

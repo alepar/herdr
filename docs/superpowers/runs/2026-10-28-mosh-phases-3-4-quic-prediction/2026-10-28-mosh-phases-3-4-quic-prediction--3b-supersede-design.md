@@ -299,3 +299,86 @@ delivered. Comparison, no loss possible on the leg: a Phase 1 ssh-only leg (150 
 1.3 MB/s) showed the marker after 0.6 s and no stalled second at 400 x 100. Follow-up needed:
 either relax the 2 s / 1 s bounds for lossy links or improve recovery (for example resync
 without waiting for overdue, a smaller render rate under loss).
+
+### 2026-10-28: render recovery under 10 % loss (mosh-19g.2.19)
+
+The miss recorded above was four defects stacked on one scenario, found by tracing the lane at
+10 % loss / 150 ms one-way, 400 x 100 dense flood (new trace events: keeper `route`,
+`lane_frame`, `lane_stream`, `lane_supersede`, `lane_stats`; bridge `lane_in`, `surface_delivered`,
+`quic_stats`, and `missing_seq` / `header_seen` on `render_gap`). Numbers are from `keeper.jsonl`
+and `local.jsonl`, not inferred.
+
+**What the load is.** herdr sent 58 chained `PaneSurfacePatch` frames per second of about 54 KB
+each (3.3 MB/s offered; every row changes in every frame, so a "patch" is a fifth of the 260 KB
+full surface). The leg can carry far less, so every cause below is a way the lane handled the
+excess.
+
+**Causes, confirmed or ruled out (before = HEAD, Cubic, no read backpressure):**
+
+| candidate | verdict | measurement |
+|---|---|---|
+| cwnd collapse (loss-based CC) | confirmed | cwnd 86 KB at 1 s, 42 KB at 2 s, 5 to 12 KB from 4 s on; 20 to 50 KB/s delivered (a 260 KB surface took 5.4 s with top priority); about 10 loss events per second, each halving or cutting 30 %. quinn's BBR did no better (cwnd 9 KB, 104 congestion events in 27 s) |
+| lane stalls, surface cannot be sent | confirmed (new) | the lane task awaited `open_uni()` at the peer's 64-stream limit (streams 46 to 109 open, acks 5 to 20 s apart); the SC the resync produced at 25 s sat in the queue behind it until the connection died at 30 s (`leg_down silence`). Lane `stats` stop at 2 s |
+| no backpressure: production unbounded | confirmed (new) | the keeper drained 3.3 MB/s from the server and fed it to a link carrying 0.05 MB/s; 41 streams reset by the first SC, 64 queued, rejections and resyncs every second |
+| overdue declared while a large frame is still streaming | confirmed | 4 of 4 overdue gaps in a 20 s run had `header_seen: true` for the missing seq (the stream was alive, 54 KB at 10 % loss needs 2 to 3 retransmit rounds); each cost a 260 KB resync that took 2 to 4 s |
+| overdue on a stale SRTT | confirmed (new) | in the first seconds after the path RTT rises, quinn's smoothed RTT lags (1 ms to 300 ms over about 2 s); a threshold of `max(SRTT, 50 ms)` fired on a 1-packet frame whose first packet was lost |
+| resync storm (one per gap) | ruled out as primary | one resync per gap as designed; the storm was the consequence of the overdue defects, not independent |
+| full surface supersede loop (each SC reset by a newer one) | ruled out | SC 46 completed in 5.4 s; no SC was reset by a later SC in any run |
+| surface too large for the window | partly | 260 KB over 50 KB/s is 5 s; over a 500 KB/s window it is 0.5 s. Not the cause once cwnd held |
+| lane-queue rejection (`lane_rejected`) | seen only as a consequence | 1 rejection per second in the stalled state, 0 after backpressure |
+
+**Fix (smallest set; each is a decision of this note):**
+
+1. *Congestion control* (`congestion.rs`, `quic::transport_config`): `LossTolerantReno`, NewReno
+   whose loss event removes 1 % of the window, and halves only when more than 30 % of the bytes
+   resolved since the last event were lost; slow start goes on through light loss; window capped
+   at 1 MiB; persistent congestion still goes to the minimum. Replaces quinn's Cubic default for
+   both ends. New dependency edge `quinn-proto` (already in the lock; needed to name `RttEstimator`
+   in the trait). **Spec decision changed**: section 6 "quinn default congestion controller".
+2. *Read backpressure* (`LaneQueue::saturated`, `server_reader`): the keeper stops reading the
+   server while the unsettled bytes of the lane (queued, streaming or unacknowledged) reach the
+   congestion window (between 64 KiB and 1 MiB) or 24 frames, so herdr backs up and coalesces its
+   own renders instead of the keeper queueing frames the link cannot carry. Bounds the concurrent
+   streams below the peer's 64. **New rule** (the spec had only the 64-frame queue, which a lane
+   that empties itself into streams never fills).
+3. *Overdue* (`render_reorder`): no overdue deadline for a seq whose stream header arrived (the
+   stream ends in a completion or a reset, both reliable); unseen-header threshold is three times
+   `max(SRTT, 250 ms)` (was `max(SRTT, 50 ms)`, 250 ms unknown). **Spec decision changed**: section
+   3 overdue rule.
+4. *Doubled chained frames on a lossy leg* (`render_lane`): when 3 % or more of the leg's packets
+   were lost in the last second (back to single under 1 %), each chained frame is sent on two
+   streams with the same sequence number; the bridge already keeps the first completion. Frames
+   are delivered in order, so one frame that needs a fourth retransmit round stalls the screen for
+   the length of its tail; two independent copies make that rare. Without it the same build showed
+   one stalled second in about two of three 20 s runs. **New rule.**
+
+**After (this build, same scenario, trace numbers from one run of each test):**
+
+| | before (HEAD) | after |
+|---|---|---|
+| typed marker visible | not within 20 s | 1.03 to 1.72 s over 12 runs of this build (1.03, 1.21, 1.21, 1.27, 1.29, 1.30, 1.38, 1.41, 1.58, 1.65, 1.72, 1.72); the three acceptance runs, 1.72 / 1.58 / 1.72 s, are the slowest, so the margin to the 2 s bound is about 0.3 s |
+| seconds of 20 with no screen change | 18 | 0 in 8 of 8 runs |
+| overdue / reset gaps, gap resyncs | 1 to 2 gaps + resyncs per 10 s, lane dead after 2 s | 0 / 0 |
+| server frames read vs lane streams vs bridge completions (20 s flood) | 3.3 MB/s read, lane stalled at 110 frames | 262 frames (14.9 MB) read, 256 sent (243 doubled), 246 unique completions seen at the bridge before the test ended, 466 streams all acked |
+| leg `cwnd` / RTT | 5 to 12 KB / 300 ms | 230 KB at 1 s, 540 KB at 5 s, up to 880 KB / 300 ms |
+| first full surface after a gap (2.7 trace) | 5.4 s | not needed in these runs; 1.7 to 2.0 s when the first-second gap still occurred |
+| `leg_down` | `silence` at 30 s | none |
+
+Cost: a doubled frame uses twice the leg's bandwidth while loss is 3 % or more, and the congestion
+window no longer backs off for random loss (it still halves at over 30 % loss and at persistent
+congestion). Both are deliberate: at 10 % loss and 300 ms RTT any controller that reacts to each
+loss event carries under 50 KB/s, and the frame tails make the 1 s bound unreachable without the
+second copy. Not changed: FrameClass, the wire format (a duplicate stream is a stream the bridge
+already tolerates), the server hook, the chain gate, supersede-on-self-contained, resets.
+
+Acceptance (`cargo nextest run --test mosh_supersede --run-ignored all`, three consecutive runs,
+all 25 tests passing each time; log in `evidence/mosh-19g.2.19/accept-3-runs.log`):
+marker 1.72 / 1.58 / 1.72 s, stalled seconds 0 / 0 / 0, `zero_overdue_gaps_at_0pct_loss_over_20s`
+0 overdue gaps and 10.2 MB delivered each time, ssh-only comparison marker 1.69 / 1.48 / 0.61 s.
+What the numbers do not show: the 0.3 s margin on the marker bound is thin, and
+it is wall-clock on a shared host; a loaded CI machine can miss it. Levers if it does, in order of
+cost: a smaller doubling threshold (frames go twice from 2 % loss), a smaller `LANE_MAX_BUDGET`
+(less stale data ahead of the marker, lower peak throughput), compressing frame bodies.
+Known and left: the herdr server's own socket buffer (about 100 to 170 KB, one to three
+frames) sits in front of the keeper and is stale by the time ^C arrives; the keeper cannot shrink
+the server end of that socket, so it is a fixed part of the marker latency.

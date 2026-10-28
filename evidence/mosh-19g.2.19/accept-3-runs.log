@@ -1,0 +1,94 @@
+== run 1
+        PASS [   0.005s] ( 1/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::bootstrap_line_round_trips
+        PASS [   0.005s] ( 2/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::empty_reply_is_none
+        PASS [   0.005s] ( 3/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_lines_are_none
+        PASS [   0.005s] ( 4/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_reply_is_none
+        PASS [   0.005s] ( 5/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::none_line_parses_as_none
+        PASS [   0.005s] ( 6/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::reply_round_trips
+        PASS [   0.005s] ( 7/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::token_generate_is_random_and_round_trips
+        PASS [   0.005s] ( 8/25) herdr::mosh_supersede mosh_harness::terminal_screen::screen_text_reconstructs_partial_redraws
+        PASS [   0.752s] ( 9/25) herdr::mosh_supersede old_hello_without_render_split_admitted_as_non_split
+        PASS [   7.378s] (10/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_quic_no_disconnect
+        PASS [   7.516s] (11/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_ssh_no_disconnect
+        PASS [   8.676s] (12/25) herdr::mosh_supersede plain_client_receives_no_fork_frames
+        PASS [  54.863s] (13/25) herdr::mosh_supersede quic_ssh_quic_under_loss_one_resync_per_resume
+        PASS [   2.313s] (14/25) herdr::mosh_supersede resync_brings_a_full_surface
+TIMING screen changes, QUIC 10% loss / 150 ms one-way: 0 of 20 seconds without a change; resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 3454, forwarded_down: 23722, dropped_up: 395, dropped_down: 2686 }
+        PASS [  21.888s] (15/25) herdr::mosh_supersede screen_changes_every_second_over_20s
+TIMING ssh-only comparison (Phase 1 leg, 150 ms one-way, 1.3 MB/s): marker echo Some(1.690190001s); 0 of 20 seconds without a screen change
+        PASS [  29.969s] (16/25) herdr::mosh_supersede ssh_only_comparison_logged
+        PASS [  16.001s] (17/25) herdr::mosh_supersede stripped_supersede_capability_no_split
+        PASS [   0.005s] (18/25) herdr::mosh_supersede support::tests::test_binary_matcher_accepts_cargo_test_binary
+        PASS [   0.004s] (19/25) herdr::mosh_supersede support::tests::test_binary_matcher_rejects_other_binaries
+        PASS [   0.004s] (20/25) herdr::mosh_supersede support::tests::watchdog_scoping_does_not_terminate_missing_unregistered_runtime_dir
+        PASS [   0.004s] (21/25) herdr::mosh_supersede support::tests::watchdog_scoping_preserves_registered_live_owner
+        PASS [   0.004s] (22/25) herdr::mosh_supersede support::tests::watchdog_scoping_terminates_missing_registered_runtime_dir
+TIMING marker echo under flood, QUIC 10% loss / 150 ms one-way: Some(1.722846536s) (bound 2 s); resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 539, forwarded_down: 3342, dropped_up: 50, dropped_down: 360 }
+        PASS [   8.694s] (23/25) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        PASS [   0.909s] (24/25) herdr::mosh_supersede wire_resync_frame_yields_a_pane_surface
+TIMING 0% loss flood over QUIC, 20 s: 10248724 bytes; overdue gaps 0; render_gap 0 (resync gap 0, resume 0); relay RelayStats { forwarded_up: 5777, forwarded_down: 43547, dropped_up: 0, dropped_down: 0 }
+        PASS [  21.373s] (25/25) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+     Summary [ 180.394s] 25 tests run: 25 passed, 0 skipped
+== run 2
+        PASS [   0.004s] ( 1/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::bootstrap_line_round_trips
+        PASS [   0.003s] ( 2/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::empty_reply_is_none
+        PASS [   0.003s] ( 3/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_lines_are_none
+        PASS [   0.003s] ( 4/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_reply_is_none
+        PASS [   0.003s] ( 5/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::none_line_parses_as_none
+        PASS [   0.003s] ( 6/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::reply_round_trips
+        PASS [   0.003s] ( 7/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::token_generate_is_random_and_round_trips
+        PASS [   0.003s] ( 8/25) herdr::mosh_supersede mosh_harness::terminal_screen::screen_text_reconstructs_partial_redraws
+        PASS [   0.552s] ( 9/25) herdr::mosh_supersede old_hello_without_render_split_admitted_as_non_split
+        PASS [   7.293s] (10/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_quic_no_disconnect
+        PASS [   7.201s] (11/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_ssh_no_disconnect
+        PASS [   8.779s] (12/25) herdr::mosh_supersede plain_client_receives_no_fork_frames
+        PASS [  55.349s] (13/25) herdr::mosh_supersede quic_ssh_quic_under_loss_one_resync_per_resume
+        PASS [   2.125s] (14/25) herdr::mosh_supersede resync_brings_a_full_surface
+TIMING screen changes, QUIC 10% loss / 150 ms one-way: 0 of 20 seconds without a change; resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 3335, forwarded_down: 22006, dropped_up: 378, dropped_down: 2517 }
+        PASS [  22.332s] (15/25) herdr::mosh_supersede screen_changes_every_second_over_20s
+TIMING ssh-only comparison (Phase 1 leg, 150 ms one-way, 1.3 MB/s): marker echo Some(1.483769744s); 0 of 20 seconds without a screen change
+        PASS [  29.881s] (16/25) herdr::mosh_supersede ssh_only_comparison_logged
+        PASS [  16.178s] (17/25) herdr::mosh_supersede stripped_supersede_capability_no_split
+        PASS [   0.004s] (18/25) herdr::mosh_supersede support::tests::test_binary_matcher_accepts_cargo_test_binary
+        PASS [   0.004s] (19/25) herdr::mosh_supersede support::tests::test_binary_matcher_rejects_other_binaries
+        PASS [   0.004s] (20/25) herdr::mosh_supersede support::tests::watchdog_scoping_does_not_terminate_missing_unregistered_runtime_dir
+        PASS [   0.004s] (21/25) herdr::mosh_supersede support::tests::watchdog_scoping_preserves_registered_live_owner
+        PASS [   0.005s] (22/25) herdr::mosh_supersede support::tests::watchdog_scoping_terminates_missing_registered_runtime_dir
+TIMING marker echo under flood, QUIC 10% loss / 150 ms one-way: Some(1.583786864s) (bound 2 s); resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 484, forwarded_down: 3248, dropped_up: 46, dropped_down: 348 }
+        PASS [   8.703s] (23/25) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        PASS [   0.779s] (24/25) herdr::mosh_supersede wire_resync_frame_yields_a_pane_surface
+TIMING 0% loss flood over QUIC, 20 s: 10266965 bytes; overdue gaps 0; render_gap 0 (resync gap 0, resume 0); relay RelayStats { forwarded_up: 5482, forwarded_down: 43631, dropped_up: 0, dropped_down: 0 }
+        PASS [  21.247s] (25/25) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+     Summary [ 180.472s] 25 tests run: 25 passed, 0 skipped
+== run 3
+        PASS [   0.003s] ( 1/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::bootstrap_line_round_trips
+        PASS [   0.003s] ( 2/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::empty_reply_is_none
+        PASS [   0.003s] ( 3/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_lines_are_none
+        PASS [   0.003s] ( 4/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::malformed_reply_is_none
+        PASS [   0.003s] ( 5/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::none_line_parses_as_none
+        PASS [   0.003s] ( 6/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::reply_round_trips
+        PASS [   0.003s] ( 7/25) herdr::mosh_supersede mosh_harness::quic_bootstrap::tests::token_generate_is_random_and_round_trips
+        PASS [   0.003s] ( 8/25) herdr::mosh_supersede mosh_harness::terminal_screen::screen_text_reconstructs_partial_redraws
+        PASS [   0.599s] ( 9/25) herdr::mosh_supersede old_hello_without_render_split_admitted_as_non_split
+        PASS [   7.606s] (10/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_quic_no_disconnect
+        PASS [   7.313s] (11/25) herdr::mosh_supersede patch_burst_under_20pct_loss_on_ssh_no_disconnect
+        PASS [   8.540s] (12/25) herdr::mosh_supersede plain_client_receives_no_fork_frames
+        PASS [  54.770s] (13/25) herdr::mosh_supersede quic_ssh_quic_under_loss_one_resync_per_resume
+        PASS [   2.340s] (14/25) herdr::mosh_supersede resync_brings_a_full_surface
+TIMING screen changes, QUIC 10% loss / 150 ms one-way: 0 of 20 seconds without a change; resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 3996, forwarded_down: 23528, dropped_up: 435, dropped_down: 2670 }
+        PASS [  22.436s] (15/25) herdr::mosh_supersede screen_changes_every_second_over_20s
+TIMING ssh-only comparison (Phase 1 leg, 150 ms one-way, 1.3 MB/s): marker echo Some(612.299899ms); 0 of 20 seconds without a screen change
+        PASS [  29.702s] (16/25) herdr::mosh_supersede ssh_only_comparison_logged
+        PASS [  15.855s] (17/25) herdr::mosh_supersede stripped_supersede_capability_no_split
+        PASS [   0.004s] (18/25) herdr::mosh_supersede support::tests::test_binary_matcher_accepts_cargo_test_binary
+        PASS [   0.004s] (19/25) herdr::mosh_supersede support::tests::test_binary_matcher_rejects_other_binaries
+        PASS [   0.004s] (20/25) herdr::mosh_supersede support::tests::watchdog_scoping_does_not_terminate_missing_unregistered_runtime_dir
+        PASS [   0.004s] (21/25) herdr::mosh_supersede support::tests::watchdog_scoping_preserves_registered_live_owner
+        PASS [   0.004s] (22/25) herdr::mosh_supersede support::tests::watchdog_scoping_terminates_missing_registered_runtime_dir
+TIMING marker echo under flood, QUIC 10% loss / 150 ms one-way: Some(1.718503044s) (bound 2 s); resync gap 0, resume 0, render_gap 0; relay RelayStats { forwarded_up: 463, forwarded_down: 3013, dropped_up: 44, dropped_down: 330 }
+        PASS [   8.980s] (23/25) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        PASS [   0.765s] (24/25) herdr::mosh_supersede wire_resync_frame_yields_a_pane_surface
+TIMING 0% loss flood over QUIC, 20 s: 10224896 bytes; overdue gaps 0; render_gap 0 (resync gap 0, resume 0); relay RelayStats { forwarded_up: 6659, forwarded_down: 43453, dropped_up: 0, dropped_down: 0 }
+        PASS [  21.107s] (25/25) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+     Summary [ 180.058s] 25 tests run: 25 passed, 0 skipped
+DONE

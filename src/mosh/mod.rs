@@ -9,6 +9,8 @@
 
 mod link_frames;
 #[cfg(unix)]
+mod congestion;
+#[cfg(unix)]
 mod local_bridge;
 pub(in crate::remote) mod remote;
 #[cfg(unix)]

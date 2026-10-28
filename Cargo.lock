@@ -847,6 +847,7 @@ dependencies = [
  "png",
  "portable-pty",
  "quinn",
+ "quinn-proto",
  "ratatui",
  "rcgen",
  "regex",

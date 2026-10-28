@@ -1,0 +1,21 @@
+== mosh_resume
+        FAIL [  31.795s] (24/24) herdr::mosh_resume a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume
+    test a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 31.79s
+     Summary [  31.807s] 24 tests run: 23 passed, 1 failed, 1 skipped
+        FAIL [  31.795s] (24/24) herdr::mosh_resume a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume
+== mosh_fallback
+     Summary [  34.157s] 26 tests run: 26 passed, 0 skipped
+== mosh_integration
+     Summary [   9.323s] 16 tests run: 16 passed, 0 skipped
+== mosh_multi_client
+     Summary [  68.651s] 22 tests run: 22 passed (1 slow), 0 skipped
+== mosh_pacing
+     Summary [   8.137s] 12 tests run: 12 passed, 9 skipped
+== mosh_status
+     Summary [   0.010s] 1 test run: 1 passed, 0 skipped
+== mosh_udp_relay
+     Summary [   3.509s] 11 tests run: 11 passed, 0 skipped
+== predict unit
+     Summary [   0.033s] 28 tests run: 28 passed, 4154 skipped
+DONE

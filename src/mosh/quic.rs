@@ -7,6 +7,7 @@
 // Unused in non-test builds until mosh-19g.1.3, 1.4 and 1.6 consume it; they remove this.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use super::congestion::LossTolerantRenoConfig;
 use super::link_frames::FrameClass;
 use super::quic_bootstrap::Fingerprint;
 use super::render_reorder::RenderArrival;
@@ -256,6 +257,7 @@ pub(super) fn transport_config(
     // Render streams are prioritised oldest-first (3b); round-robin among equal-priority
     // streams would let later small frames overtake a large older one.
     transport.send_fairness(false);
+    transport.congestion_controller_factory(Arc::new(LossTolerantRenoConfig));
     Ok(transport)
 }
 
