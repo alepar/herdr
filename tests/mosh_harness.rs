@@ -952,6 +952,13 @@ impl Client {
         terminal_screen::text(&self.output_bytes(), self.size.0, self.size.1)
     }
 
+    /// The emulated visible screen after only the first `len` output bytes (a stopwatch can
+    /// find the first output prefix that shows something without paying parse time per poll).
+    pub fn screen_prefix(&self, len: usize) -> String {
+        let output = self.output_bytes();
+        terminal_screen::text(&output[..len.min(output.len())], self.size.0, self.size.1)
+    }
+
     /// Everything the client wrote to its terminal, lossily decoded (includes text printed
     /// after the TUI left the alternate screen).
     pub fn output_text(&self) -> String {
