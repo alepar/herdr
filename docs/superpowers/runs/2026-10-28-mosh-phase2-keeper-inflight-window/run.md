@@ -42,10 +42,12 @@ codeBuckets:
   parked:
   stalled: false
   review: not ready (unreviewed: whole-epic coverage and omission provenance remain incomplete)
-  sweep: SWEEP DEFERRED (caller-owned)
+  sweep: 09b05438 — 4386 passed, 0 failed, 0 errors, 26 skipped; failing: none; command: cargo nextest run --locked --no-fail-fast && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check; mosh-diff-budget 12/20 @ 09b05438
   slowness: round 1 graph-bound (depth 4, width 1); edge audit left mosh-hex.4 <- mosh-hex.3 drop for an operator (same as parked graph change cov-21)
   worktreesKept: .worktrees/ task worktrees mosh-hex.1-.5 and /tmp/sp-fd54fa48 — process cleanup incomplete (exit 4: uninspectable sshd-session pids, not run-owned)
   processSweep: stopped 0 · survived 0 · unknown 2 · kept 0 — unknown: sshd-session 1097853, 403694 (LAN client sessions, cwd/exe inspection failed)
+
+friction: 12 events
 
 agentChecks:
 - pacing wall-clock tests under host load · mosh-hex.13 implementer (agent) · unmet on a loaded host (load 9-29: resume Ctrl-C 2705 ms > 2500 ms); 3/3 pass on a quiet host; tests gated behind HERDR_MOSH_PACING_TESTS=1

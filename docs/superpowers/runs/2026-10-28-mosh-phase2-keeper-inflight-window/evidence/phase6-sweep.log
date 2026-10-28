@@ -1,0 +1,89 @@
+sweep @ 09b05438ed6cd01154bc199e51d13b2e21de2310 2026-10-28T13:30:18Z
+        PASS [   0.017s] (4310/4386) herdr::bin/herdr workspace::git::discovery::tests::bare_source_and_linked_checkout_share_repo_name_but_not_auto_label
+        PASS [   0.006s] (4311/4386) herdr::bin/herdr workspace::git::discovery::tests::ref_path_through_a_file_still_reads_packed_refs
+        PASS [   0.005s] (4312/4386) herdr::bin/herdr workspace::git::discovery::tests::symlink_loop_loose_ref_is_unavailable_not_absent
+        PASS [   0.011s] (4313/4386) herdr::bin/herdr workspace::git::discovery::tests::git_rev_parse_verify_reads_reftable_refs
+        PASS [   0.008s] (4314/4386) herdr::bin/herdr workspace::git::discovery::tests::git_space_metadata_supports_standalone_bare_repo
+        PASS [   0.005s] (4315/4386) herdr::bin/herdr workspace::git::status::tests::branch_only_refresh_skips_ahead_behind_cache_work
+        PASS [   0.005s] (4316/4386) herdr::bin/herdr workspace::git::status::tests::cache_key_from_space_preserves_non_utf8_checkout_path
+        PASS [   0.017s] (4317/4386) herdr::bin/herdr workspace::git::discovery::tests::embedded_dot_bare_source_and_checkout_use_container_repo_name
+        PASS [   0.005s] (4318/4386) herdr::bin/herdr workspace::git::status::tests::cached_repo_identity_clears_when_head_disappears
+        PASS [   0.005s] (4319/4386) herdr::bin/herdr workspace::git::status::tests::expired_non_git_cache_detects_repository_created_in_place
+        PASS [   0.005s] (4320/4386) herdr::bin/herdr workspace::git::status::tests::git_status_cache_key_ignores_invalid_git_marker
+        PASS [   0.005s] (4321/4386) herdr::bin/herdr workspace::git::status::tests::git_status_cache_key_is_per_linked_worktree_checkout
+        PASS [   0.005s] (4322/4386) herdr::bin/herdr workspace::git::status::tests::git_status_fingerprint_reads_packed_refs
+        PASS [   0.007s] (4323/4386) herdr::bin/herdr workspace::git::status::tests::git_status_clears_ahead_behind_when_upstream_is_unset
+        PASS [   0.007s] (4324/4386) herdr::bin/herdr workspace::git::status::tests::git_status_does_not_reuse_cache_when_branch_changes_at_same_oid
+        PASS [   0.004s] (4325/4386) herdr::bin/herdr workspace::git::status::tests::non_git_refresh_reuses_cached_miss_without_rechecking_filesystem
+        PASS [   0.006s] (4326/4386) herdr::bin/herdr workspace::git::status::tests::git_status_rebuilds_config_when_missing_include_appears
+        PASS [   0.006s] (4327/4386) herdr::bin/herdr workspace::git::status::tests::git_status_reuses_cached_ahead_behind_when_fingerprint_matches
+        PASS [   0.004s] (4328/4386) herdr::bin/herdr workspace::tests::adversarial_identity_state_satisfies_workspace_invariants_after_mutation
+        PASS [   0.004s] (4329/4386) herdr::bin/herdr workspace::tests::failed_moved_pane_insert_returns_pane_for_recovery
+        PASS [   0.003s] (4330/4386) herdr::bin/herdr workspace::tests::generated_workspace_ids_are_short_base32_handles
+        PASS [   0.006s] (4331/4386) herdr::bin/herdr workspace::tests::display_name_reads_cached_identity_without_rechecking_filesystem
+        PASS [   0.012s] (4332/4386) herdr::bin/herdr workspace::git::status::tests::git_status_fingerprint_reads_reftable_branch_identity
+        PASS [   0.004s] (4333/4386) herdr::bin/herdr workspace::tests::public_numbers_round_trip_readable_base32_handles
+        PASS [   0.004s] (4334/4386) herdr::bin/herdr workspace::tests::reserving_restored_workspace_ids_prevents_reuse
+        PASS [   0.006s] (4335/4386) herdr::bin/herdr workspace::tests::moving_tab_keeps_active_identity_and_stable_tab_numbers
+        PASS [   0.005s] (4336/4386) herdr::bin/herdr workspace::tests::pane_public_numbers_are_stable_and_not_reused_after_close
+        PASS [   0.004s] (4337/4386) herdr::bin/herdr workspace::tests::tab_public_numbers_are_stable_and_not_reused_after_close
+        PASS [   0.004s] (4338/4386) herdr::bin/herdr workspace::tests::terminal_aware_display_name_uses_latest_admitted_identity_cache
+        PASS [   0.015s] (4339/4386) herdr::bin/herdr workspace::git::status::tests::linked_worktree_refresh_keeps_checkout_name_as_auto_label
+        PASS [   0.004s] (4340/4386) herdr::bin/herdr worktree::tests::branch_to_path_slug_makes_branch_safe_folder_name
+        PASS [   0.005s] (4341/4386) herdr::bin/herdr workspace::tests::workspace_identity_follows_first_tab_root_pane_cwd
+        PASS [   0.005s] (4342/4386) herdr::bin/herdr worktree::tests::default_checkout_path_appends_repo_and_branch_slug
+        PASS [   0.005s] (4343/4386) herdr::bin/herdr worktree::tests::dirty_remove_error_detection_matches_git_force_hint
+        PASS [   0.004s] (4344/4386) herdr::bin/herdr worktree::tests::expand_tilde_path_uses_home_when_available
+        PASS [   0.015s] (4345/4386) herdr::bin/herdr workspace::tests::linked_worktree_auto_label_uses_checkout_name_not_repo_name
+        PASS [   0.006s] (4346/4386) herdr::bin/herdr worktree::tests::forced_worktree_remove_command_uses_git_force_flag
+        PASS [   0.004s] (4347/4386) herdr::bin/herdr worktree::tests::home_dir_uses_windows_drive_and_path_when_profile_is_missing
+        PASS [   0.006s] (4348/4386) herdr::bin/herdr worktree::tests::generated_branch_slug_is_worktree_namespaced_and_stable
+        PASS [   0.005s] (4349/4386) herdr::bin/herdr worktree::tests::home_dir_rejects_incomplete_windows_drive_and_path
+        PASS [   0.005s] (4350/4386) herdr::bin/herdr worktree::tests::non_windows_tilde_expansion_keeps_windows_separator_literal
+        PASS [   0.006s] (4351/4386) herdr::bin/herdr worktree::tests::home_dir_uses_windows_profile_before_literal_home
+        PASS [   0.003s] (4352/4386) herdr::bin/herdr worktree::tests::submodule_remove_error_requires_force_confirmation
+        PASS [   0.005s] (4353/4386) herdr::bin/herdr worktree::tests::parses_git_worktree_list_porcelain
+        PASS [   0.016s] (4354/4386) herdr::bin/herdr worktree::tests::checkout_dirty_detection_reports_clean_and_dirty_worktrees
+        PASS [   0.029s] (4355/4386) herdr::bin/herdr workspace::git::status::tests::git_status_recomputes_ahead_behind_when_head_moves
+        PASS [   0.004s] (4356/4386) herdr::bin/herdr worktree::tests::worktree_add_command_creates_new_branch_from_base
+        PASS [   0.003s] (4357/4386) herdr::bin/herdr worktree::tests::worktree_remove_command_preserves_branch_by_not_deleting_it
+        PASS [   0.005s] (4358/4386) herdr::bin/herdr worktree::tests::trusted_repository_git_args_are_request_scoped
+        PASS [   0.016s] (4359/4386) herdr::bin/herdr worktree::tests::forced_worktree_remove_recovery_keeps_unrelated_replacement_directory
+        PASS [   0.005s] (4360/4386) herdr::bin/herdr worktree::tests::worktree_add_command_checks_out_existing_branch
+        PASS [   0.018s] (4361/4386) herdr::bin/herdr worktree::tests::forced_worktree_remove_recovers_leftover_unregistered_checkout
+        PASS [   0.020s] (4362/4386) herdr::bin/herdr worktree::tests::run_worktree_add_and_remove_create_and_delete_checkout
+        PASS [   0.104s] (4363/4386) herdr::bin/herdr update::tests::wait_for_server_shutdown_succeeds_once_socket_stops_accepting
+        PASS [   0.095s] (4364/4386) herdr::bin/herdr worktree::tests::submodule_worktree_removal_requires_explicit_force
+        PASS [   0.205s] (4365/4386) herdr::bin/herdr update::tests::stop_server_via_api_times_out_when_server_never_replies
+        PASS [   0.205s] (4366/4386) herdr::bin/herdr update::tests::wait_for_server_shutdown_times_out_while_socket_keeps_responding
+        PASS [   3.235s] (4367/4386) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::first_resuming_at_dead_verdict_then_every_second_then_linked
+        PASS [   3.114s] (4368/4386) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::slow_client_does_not_block_leg
+        PASS [   1.925s] (4369/4386) herdr::bin/herdr remote::attach::mosh::session::tests::a_grown_window_resets_to_initial_on_leg_down_and_down_reads_stop_there
+        PASS [  11.877s] (4370/4386) herdr::mosh_resume idle_healthy_link_keeps_its_leg
+        PASS [   9.951s] (4371/4386) herdr::mosh_resume stopped_leg_is_detected_and_resumed
+        PASS [   1.634s] (4372/4386) herdr::bin/herdr server::client_transport::tests::observer_write_timeout_resets_when_sending_makes_progress
+        PASS [   3.471s] (4373/4386) herdr::bin/herdr remote::attach::mosh::session::tests::a_flood_grows_the_window_on_either_side_and_sparse_input_keeps_initial
+        PASS [   5.036s] (4374/4386) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::transient_spawn_failures_back_off_until_give_up
+        PASS [  16.323s] (4375/4386) herdr::machine_api machine_api_recovers_a_ping_timeout_without_child_exit_before_one_mutation
+        PASS [  16.114s] (4376/4386) herdr::mosh_multi_client saved_reconnect_through_the_same_path_evicts_the_parked_session
+        PASS [  15.564s] (4377/4386) herdr::mosh_resume a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume
+        PASS [  17.190s] (4378/4386) herdr::mosh_multi_client saved_outage_past_the_health_timeout_keeps_the_endpoint
+        PASS [   8.092s] (4379/4386) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::health_margin_stall_after_ping
+        PASS [  21.406s] (4380/4386) herdr::mosh_resume slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session
+        PASS [  24.084s] (4381/4386) herdr::mosh_resume reconnect_leg_that_stalls_before_welcome_is_retried
+        PASS [  20.231s] (4382/4386) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::reconnect_bound_before_welcome_is_retried
+        PASS [  31.282s] (4383/4386) herdr::mosh_fallback keeper_exits_about_thirty_seconds_after_its_last_session_ends
+        PASS [  33.349s] (4384/4386) herdr::mosh_fallback stale_keeper_socket_is_recovered_after_kill_nine
+        PASS [  42.461s] (4385/4386) herdr::mosh_multi_client saved_leg_stalling_right_after_a_health_ping_does_not_expire_the_endpoint
+        SLOW [> 60.000s] (─────────) herdr::mosh_multi_client saved_request_buffered_past_the_command_timeout_executes_once_on_resume
+        PASS [  68.415s] (4386/4386) herdr::mosh_multi_client saved_request_buffered_past_the_command_timeout_executes_once_on_resume
+────────────
+     Summary [  73.624s] 4386 tests run: 4386 passed (1 slow), 26 skipped
+nextest-exit=0
+   Compiling ghostty-vt v0.0.0 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase2-keeper-inflight-window/crates/ghostty-vt)
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Checking herdr v0.9.5 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phase2-keeper-inflight-window)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.57s
+clippy-exit=0
+fmt-exit=0
+mosh-diff-budget: 12 inserted upstream lines (budget 20), 0 untagged hunks
