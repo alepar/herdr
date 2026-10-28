@@ -302,6 +302,7 @@ fn client_status_json() -> ClientStatusJson {
             #[cfg(unix)] // mosh-fork hook
             "x-mosh-resume-bridge-v1", // mosh-fork hook
             "x-mosh-supersede-v1", // mosh-fork hook
+            "x-mosh-echo-v1",      // mosh-fork hook
             #[cfg(unix)] // mosh-fork hook
             "x-mosh-quic-v1", // mosh-fork hook
         ],

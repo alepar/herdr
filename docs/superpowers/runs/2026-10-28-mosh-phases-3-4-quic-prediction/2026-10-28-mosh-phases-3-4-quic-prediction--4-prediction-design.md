@@ -217,3 +217,18 @@ Hook deviation: the tap needs the retained surface, and `ClientShellState` has n
 `client::shell`. One extra tagged accessor line (`mosh_surface`, `shell/state.rs`) was added, so
 this task adds three upstream lines (accessor, tap, fast-path guard) plus two edited hook lines;
 the script reports 15 of 30.
+
+### 2026-10-28: echo_due cannot read all render-pending state (mosh-19g.3.3)
+
+Verify-first result. From the single `echo_due(&self.clients, now)` hook, `server_hooks` can read
+`ClientConnection::render_pending` (deferred render under backpressure) and
+`ClientRenderState::requires_recompute()`, plus `last_pane_surface()`. It cannot read the writer's
+render slot occupancy (`ClientWriterQueue` is private to `client_transport.rs`) or the headless
+loop's local `needs_render` (pane dirty / throttled). Reading them would take new upstream hook
+lines, so the design-roast r2 rule is applied in part: the ack is withheld while `render_pending` or
+a recompute is set. A queued render in the slot is harmless, because its revision is already the
+committed one and the client holds the ack until its surface catches up (3.1). For the unreadable
+dirty/throttled case, the fallback is used with a bound so input that renders nothing
+(`stty -echo`) is still acked: an entry records the committed `surface_revision` when an echo pass
+first sees it, and the ack is sent once the revision has advanced past that value, or 50 ms after
+the 50 ms deadline if it has not. Worst-case ack latency without a render is 100 ms.

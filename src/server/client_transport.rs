@@ -1196,6 +1196,7 @@ fn client_read_loop_with_endpoint_controls(
                 ServerEvent::ClientShellMouseCapture { client_id, enabled }
             }
             ClientMessage::ClientShellPaneInput { pane_id, events } => {
+                #[rustfmt::skip] let () = crate::client::mosh_outage::server_hooks::on_pane_input(client_id, &pane_id, events.len()); // mosh-fork hook
                 match pane_input_event_limit(&events) {
                     InputEventLimit::WithinLimits => ServerEvent::ClientShellPaneInput {
                         client_id,
