@@ -103,6 +103,12 @@ impl InflightWindow {
         self.window
     }
 
+    /// Qualifying RTT samples taken since the last reset.
+    #[cfg(test)]
+    pub fn samples(&self) -> u64 {
+        self.samples
+    }
+
     /// A leg came up or went down: the path may differ, so start over.
     pub fn reset(&mut self, acked: u64) {
         *self = InflightWindow::new(acked);

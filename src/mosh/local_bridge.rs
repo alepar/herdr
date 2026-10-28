@@ -381,7 +381,7 @@ impl LegIo {
 }
 
 struct ClientIo {
-    go_tx: mpsc::Sender<()>,
+    go_tx: mpsc::Sender<usize>,
     out_tx: mpsc::Sender<ClientOut>,
     written: Arc<AtomicU64>,
     /// A handle on the socket used only to shut it down.
@@ -832,14 +832,14 @@ impl Conn<'_> {
         let shutdown = stream.try_clone()?;
         let written = Arc::new(AtomicU64::new(0));
 
-        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<usize>();
         let events = self.tx.clone();
         let reader = thread::spawn(move || {
             let mut read_half = read_half;
             let mut buf = vec![0u8; MAX_DATA_CHUNK];
-            while go_rx.recv().is_ok() {
+            while let Ok(size) = go_rx.recv() {
                 loop {
-                    match read_half.read(&mut buf) {
+                    match read_half.read(&mut buf[..size.min(MAX_DATA_CHUNK)]) {
                         Ok(0) => {
                             let _ = events.send(Event::ClientEof);
                             return;
@@ -881,7 +881,7 @@ impl Conn<'_> {
             shutdown_client(&stream);
         });
 
-        let _ = go_tx.send(());
+        let _ = go_tx.send(MAX_DATA_CHUNK);
         self.client = Some(ClientIo {
             go_tx,
             out_tx,
@@ -994,8 +994,14 @@ impl Conn<'_> {
         if !self.endpoint.may_read_source() && self.endpoint.is_up() {
             return;
         }
+        // Down with a full ring: still read a whole chunk, so a client writing past the cap
+        // overflows and ends the session (the ring-cap rule).
+        let size = match self.endpoint.source_read_size() {
+            0 => MAX_DATA_CHUNK,
+            n => n,
+        };
         if let Some(client) = &self.client {
-            if client.go_tx.send(()).is_ok() {
+            if client.go_tx.send(size).is_ok() {
                 self.client_idle = false;
             }
         }
@@ -2719,7 +2725,9 @@ mod tests {
         let trace = fresh_dir();
         let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
         dialer.keeper(&keeper, KLeg::new(Answer::New));
-        for _ in 0..20 {
+        // Four frames: the keeper's initial window (256 KiB) must hold them all, or the END
+        // would wait for ACKs the paused client never lets the bridge send.
+        for _ in 0..4 {
             keeper.push_down(frame_with("big", 60_000));
         }
         keeper.push_down(shutdown_frame());
@@ -2765,10 +2773,11 @@ mod tests {
         for _ in 0..48 {
             keeper.push_down(frame_with("big", 60_000));
         }
-        // A full window is in flight, so the bridge's client writer is blocked on the stalled
+        // The keeper's whole window is in flight (its endpoint now runs the adaptive controller,
+        // so INITIAL, not the hard cap), so the bridge's client writer is blocked on the stalled
         // socket with frames queued behind it.
         wait_until("a window of downstream bytes", WAIT, || {
-            keeper.st().down_sent >= session::WINDOW
+            keeper.st().down_sent >= super::super::window::INITIAL
         });
         let stop_at = Instant::now();
         let took = harness.shutdown();
