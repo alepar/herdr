@@ -10,7 +10,9 @@
 //! blocking client-socket write.
 
 use super::super::{bridge_connection, ManagedSshOptions, SshStdioBridge};
-use super::link_frames::{encode_link_frame, encode_resync_frame, FrameClass, FrameSplitter};
+use super::link_frames::{
+    encode_echo_subscribe_frame, encode_link_frame, encode_resync_frame, FrameClass, FrameSplitter,
+};
 use super::render_reorder::{GapCause, RenderArrival, RenderReorder, ReorderOutput};
 use super::session::{
     self, end_reason, Decoder, LinkVerdict, Role, SessionEndpoint, SessionEvent, SessionMsg, Token,
@@ -113,6 +115,9 @@ pub(super) struct BridgeParams {
     /// The remote advertised `x-mosh-supersede-v1`: HELLO asks for the render split and QUIC
     /// legs carrying a render lane host a `RenderReorder`.
     pub render_split: bool,
+    /// The remote advertised `x-mosh-echo-v1` and prediction is enabled: the bridge subscribes
+    /// to echo acknowledgements once per session and reports `echo` in `Linked`.
+    pub echo: bool,
 }
 
 /// Bind the user-facing socket exactly like `SshStdioBridge::start_command` and serve one
@@ -258,6 +263,17 @@ enum InjectAt {
     NextBoundary,
     /// At the first boundary after the client's first frame (its HELLO) has gone through.
     AfterFirstFrame,
+}
+
+/// What `Conn::inject_upstream` did with a frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Injection {
+    /// Pushed to the session stream.
+    Written,
+    /// Waiting for the client frame in flight to complete.
+    Queued,
+    /// Refused or lost.
+    Dropped,
 }
 
 enum ClientOut {
@@ -443,6 +459,12 @@ struct Conn<'a> {
     upstream_untracked: bool,
     /// Frames waiting for the next client frame boundary (see `inject_upstream`).
     pending_inject: VecDeque<Vec<u8>>,
+    /// The echo subscribe was requested this session (once).
+    echo_requested: bool,
+    /// The echo subscribe frame was written to the session stream: `Linked` carries `echo`.
+    echo_injected: bool,
+    /// A `Linked` carrying `echo` is owed to the client.
+    echo_report_due: bool,
     /// WELCOMEs received this connection (the resume rule fires on every one after the first).
     welcomes: u32,
     /// The client stream until the client threads take it (and for the leg-0 fallback).
@@ -503,6 +525,9 @@ impl<'a> Conn<'a> {
             upstream: FrameSplitter::new(),
             upstream_untracked: false,
             pending_inject: VecDeque::new(),
+            echo_requested: false,
+            echo_injected: false,
+            echo_report_due: false,
             welcomes: 0,
             stream,
             client: None,
@@ -964,7 +989,7 @@ impl Conn<'_> {
                         let srtt = self.srtt();
                         self.inject(LinkStatus::Linked {
                             srtt_ms: srtt.map(as_ms),
-                            echo: false,
+                            echo: self.echo_injected,
                         });
                         self.srtt_report.reported(srtt);
                     }
@@ -1053,6 +1078,7 @@ impl Conn<'_> {
             writer,
         });
         self.client_idle = false;
+        self.request_echo_subscribe();
         Ok(())
     }
 
@@ -1071,6 +1097,14 @@ impl Conn<'_> {
             self.client_gone();
             self.end_deadline = Some(Instant::now() + OVERFLOW_END_LINGER);
         } else {
+            if self.echo_requested
+                && !self.echo_injected
+                && !self.upstream_untracked
+                && self.pending_inject.is_empty()
+            {
+                // The push completed the client's HELLO and flushed the queued subscribe.
+                self.echo_subscribed();
+            }
             if self.stage == Stage::Linked {
                 self.pump_sends(Instant::now());
             }
@@ -1131,20 +1165,44 @@ impl Conn<'_> {
     /// written only at a client frame boundary. Pushes to the endpoint at once when the
     /// tracker is at a boundary (and, for `AfterFirstFrame`, a client frame was seen);
     /// otherwise the frame waits for the push that completes the client frame in flight.
-    fn inject_upstream(&mut self, frame: Vec<u8>, at: InjectAt) {
+    fn inject_upstream(&mut self, frame: Vec<u8>, at: InjectAt) -> Injection {
         if self.upstream_untracked || self.client_closed || self.closing.is_some() {
-            return;
+            return Injection::Dropped;
         }
         let ready = self.pending_inject.is_empty()
             && self.upstream.at_boundary()
             && (at == InjectAt::NextBoundary || self.upstream.frames_seen() >= 1);
         if !ready {
             self.pending_inject.push_back(frame);
+            Injection::Queued
         } else if self.endpoint.push_source(&frame).is_err() {
             // Only possible while no leg is up and the ring is full; the next client write
             // ends the session on overflow.
             tracing::debug!("mosh injected frame dropped: ring full");
+            Injection::Dropped
+        } else {
+            Injection::Written
         }
+    }
+
+    /// Subscribe to echo acknowledgements, once per session, right after the client's HELLO.
+    /// Called when the client starts; the frame waits for HELLO to go through.
+    fn request_echo_subscribe(&mut self) {
+        if !self.params.echo || self.echo_requested {
+            return;
+        }
+        self.echo_requested = true;
+        match self.inject_upstream(encode_echo_subscribe_frame(), InjectAt::AfterFirstFrame) {
+            Injection::Written => self.echo_subscribed(),
+            Injection::Queued | Injection::Dropped => {}
+        }
+    }
+
+    /// The subscribe frame is on the session stream (and so replayed on every new leg).
+    fn echo_subscribed(&mut self) {
+        self.echo_injected = true;
+        self.echo_report_due = true;
+        self.trace.emit("echo_subscribe", serde_json::json!({}));
     }
 
     /// The one resync path: a gap on the lane, or a resume. Only render-split sessions have a
@@ -1343,10 +1401,19 @@ impl Conn<'_> {
         // link frame may precede it. A leg with its own RTT probe (QUIC) knows its SRTT at
         // once, before the server has answered.
         if self.client.is_some() && !self.client_closed && self.frames_end > 0 {
-            if let Some(ms) = self.srtt_report.update(self.srtt()) {
+            if self.echo_report_due {
+                // The subscribe is on the stream: tell the client now, SRTT known or not.
+                self.echo_report_due = false;
+                let srtt = self.srtt();
+                self.inject(LinkStatus::Linked {
+                    srtt_ms: srtt.map(as_ms),
+                    echo: true,
+                });
+                self.srtt_report.reported(srtt);
+            } else if let Some(ms) = self.srtt_report.update(self.srtt()) {
                 self.inject(LinkStatus::Linked {
                     srtt_ms: Some(ms),
-                    echo: false,
+                    echo: self.echo_injected,
                 });
             }
         }
@@ -2485,6 +2552,22 @@ mod tests {
             path: Option<(PathBuf, PathBuf)>,
             render_split: bool,
         ) -> Harness {
+            Harness::start_params(dialer, grace, plain, trace_dir, path, render_split, false)
+        }
+
+        fn start_echo(dialer: &MemDialer, grace: Duration, echo: bool) -> Harness {
+            Harness::start_params(dialer, grace, unused_plain(), None, None, false, echo)
+        }
+
+        fn start_params(
+            dialer: &MemDialer,
+            grace: Duration,
+            plain: PlainFallback,
+            trace_dir: Option<PathBuf>,
+            path: Option<(PathBuf, PathBuf)>,
+            render_split: bool,
+            echo: bool,
+        ) -> Harness {
             let (dir, path) = path.unwrap_or_else(|| {
                 let dir = fresh_dir();
                 let path = dir.join("s");
@@ -2499,6 +2582,7 @@ mod tests {
                     plain,
                     trace_dir,
                     render_split,
+                    echo,
                 },
                 Box::new(dialer.clone()),
                 Arc::clone(&stop),
@@ -3623,6 +3707,137 @@ mod tests {
         assert_eq!(kinds(&keeper.upstream()), ["c1", "c2"], "no resync without the split");
     }
 
+    // ---- echo subscribe -------------------------------------------------------------------------
+
+    use crate::client::mosh_outage::predict::ECHO_SUBSCRIBE_KIND;
+
+    fn subscribe_kind() -> String {
+        ECHO_SUBSCRIBE_KIND.to_owned()
+    }
+
+    /// A linked, established session with a leg RTT probe (so `Linked` is injected without
+    /// waiting for heartbeats); the client has seen `first`.
+    fn echo_established(
+        dialer: &MemDialer,
+        keeper: &FakeKeeper,
+        echo: bool,
+    ) -> (Harness, Client) {
+        dialer.script(decorated(
+            LegScript::Keeper(keeper.clone(), KLeg::new(Answer::New)),
+            |leg| leg.with_rtt_probe(Box::new(|| Some(Duration::from_millis(5)))),
+        ));
+        keeper.push_down(frame("first"));
+        let harness = Harness::start_echo(dialer, secs(30), echo);
+        let client = harness.connect();
+        client.expect_data("first");
+        (harness, client)
+    }
+
+    /// The `echo` field of the next `Linked` the client receives.
+    fn next_linked_echo(client: &Client) -> bool {
+        loop {
+            if let Seen::Link(LinkStatus::Linked { echo, .. }) = client.next_seen(WAIT).1 {
+                return echo;
+            }
+        }
+    }
+
+    #[test]
+    fn subscribe_appears_once_right_after_hello_and_is_replayed_after_resume() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, mut client) = echo_established(&dialer, &keeper, true);
+        // The bytes of the first leg never reach the keeper; the new leg must replay them.
+        keeper.set_stall(true);
+        client.write(&[client_frame("hello"), client_frame("c2")].concat());
+        thread::sleep(Duration::from_millis(300));
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        keeper.kill_leg();
+        wait_until("second leg", WAIT, || keeper.hellos().len() == 2);
+        keeper.set_stall(false);
+        wait_until("the replay", WAIT, || kinds(&keeper.upstream()).len() == 3);
+        client.write(&client_frame("c3"));
+        wait_until("c3", WAIT, || kinds(&keeper.upstream()).len() == 4);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            kinds(&keeper.upstream()),
+            ["hello", &subscribe_kind(), "c2", "c3"],
+            "the subscribe sits right after HELLO, exactly once, offsets intact"
+        );
+    }
+
+    #[test]
+    fn subscribe_waits_for_the_client_frame_in_flight() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, mut client) = echo_established(&dialer, &keeper, true);
+        let hello = client_frame("hello");
+        client.write(&hello[..3]);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(keeper.upstream().len(), 3, "nothing injected inside HELLO");
+        client.write(&hello[3..]);
+        wait_until("hello and the subscribe", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        assert_eq!(kinds(&keeper.upstream()), ["hello", &subscribe_kind()]);
+    }
+
+    #[test]
+    fn no_subscribe_without_capability_or_with_mode_off() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        // `echo` is false when the probe lacks `x-mosh-echo-v1` or the mode is off.
+        let (_harness, mut client) = echo_established(&dialer, &keeper, false);
+        client.write(&[client_frame("hello"), client_frame("c2")].concat());
+        wait_until("both frames", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(kinds(&keeper.upstream()), ["hello", "c2"]);
+        // SRTT keeps being reported, never with echo; the JSON has no echo field.
+        let mut linked = 0;
+        while linked < 2 {
+            match client.next_seen(WAIT).1 {
+                Seen::Link(LinkStatus::Linked { echo, .. }) => {
+                    assert!(!echo);
+                    linked += 1;
+                }
+                Seen::Link(other) => panic!("unexpected {other:?}"),
+                Seen::Data(_) => {}
+            }
+            if linked == 1 {
+                keeper.push_down(frame("poke"));
+                linked += 1;
+            }
+        }
+        let json = serde_json::to_string(&LinkStatus::Linked { srtt_ms: Some(5), echo: false })
+            .unwrap();
+        assert!(!json.contains("echo"), "{json}");
+    }
+
+    #[test]
+    fn linked_carries_echo_only_after_subscribe_injected() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, mut client) = echo_established(&dialer, &keeper, true);
+        // Before the client's HELLO the subscribe is not on the stream: echo is false.
+        assert!(!next_linked_echo(&client));
+        client.write(&client_frame("hello"));
+        // The subscribe is injected right behind HELLO and the client is told at once.
+        assert!(next_linked_echo(&client));
+        wait_until("hello and the subscribe", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        assert_eq!(kinds(&keeper.upstream()), ["hello", &subscribe_kind()]);
+    }
+
+    #[test]
+    fn resume_linked_keeps_echo_after_subscribe() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, mut client) = echo_established(&dialer, &keeper, true);
+        client.write(&client_frame("hello"));
+        // Skip the pre-HELLO `Linked` (no echo yet) still queued for the client.
+        while !next_linked_echo(&client) {}
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        keeper.kill_leg();
+        loop {
+            if matches!(client.next_seen(WAIT).1, Seen::Link(LinkStatus::Resuming { .. })) {
+                break;
+            }
+        }
+        assert!(next_linked_echo(&client), "the Linked after the resume still says echo");
+    }
+
     #[test]
     fn render_frames_on_session_stream_of_lane_leg_are_not_forwarded() {
         let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
@@ -3708,6 +3923,7 @@ mod tests {
                     plain: unused_plain(),
                     trace_dir: None,
                     render_split: true,
+                    echo: false,
                 },
                 dialer: Arc::new(Mutex::new(Box::new(MemDialer::new()))),
                 stop: Arc::new(AtomicBool::new(false)),

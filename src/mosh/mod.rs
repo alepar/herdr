@@ -27,6 +27,8 @@ mod ssh_leg;
 mod window;
 
 use super::{ManagedSshOptions, RemoteHerdr, RemoteSsh, SshStdioBridge};
+#[cfg(unix)]
+use crate::client::mosh_outage::predict::{PredictMode, ECHO_CAPABILITY};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -224,6 +226,7 @@ pub(in crate::remote) fn start_ui_bridge(
                 },
                 trace_dir: std::env::var_os(MOSH_TRACE_ENV).map(PathBuf::from),
                 render_split: supersede_advertised(&candidate.capabilities),
+                echo: echo_wanted(&candidate.capabilities, PredictMode::get()),
             },
             dialer,
             should_stop,
@@ -237,6 +240,12 @@ fn supersede_advertised(capabilities: &[String]) -> bool {
     capabilities
         .iter()
         .any(|c| c == link_frames::SUPERSEDE_CAPABILITY)
+}
+
+/// The remote advertises echo acknowledgement (`x-mosh-echo-v1`) and prediction is enabled.
+#[cfg(unix)]
+fn echo_wanted(capabilities: &[String], mode: PredictMode) -> bool {
+    mode != PredictMode::Off && capabilities.iter().any(|c| c == ECHO_CAPABILITY)
 }
 
 /// Which `LegDialer` `start_ui_bridge` registers.
@@ -339,6 +348,16 @@ mod tests {
         assert!(MoshConfig::parse(None, None, None).quic_enabled);
         assert!(MoshConfig::parse(None, None, Some("1")).quic_enabled);
         assert!(MoshConfig::parse(None, None, Some("")).quic_enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn echo_flag_needs_the_capability_and_a_prediction_mode() {
+        let with = vec![STATUS_CAPABILITY.to_string(), ECHO_CAPABILITY.to_string()];
+        assert!(echo_wanted(&with, PredictMode::On));
+        assert!(echo_wanted(&with, PredictMode::Adaptive));
+        assert!(!echo_wanted(&with, PredictMode::Off));
+        assert!(!echo_wanted(&[STATUS_CAPABILITY.to_string()], PredictMode::On));
     }
 
     #[cfg(unix)]
