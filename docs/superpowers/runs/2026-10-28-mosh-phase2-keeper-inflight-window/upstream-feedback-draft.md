@@ -206,8 +206,8 @@ If upstream decides otherwise, please state the position explicitly so downstrea
 ## Doc gaps
 none (the cap-round step-back question was already raised in the prior run's feedback)
 
-## Already fixed — do not re-litigate
-- Prior-run triage already covers: super-plan-2s3 (review report producer/extractor contract), super-plan-1s3 (context-preflight 200K vs profiler 1M), super-plan-tco (callers omit evidence-backed reviewReadiness). Defect 1 sits next to super-plan-tco; check both before filing.
+## Already triaged upstream (open follow-ups, not fixed)
+- Open follow-ups from the prior run's triage, not yet fixed or released: super-plan-2s3 (review report producer/extractor contract), super-plan-1s3 (context-preflight 200K vs profiler 1M), super-plan-tco (callers omit evidence-backed reviewReadiness). Defect 1 sits next to super-plan-tco; check both before filing.
 
 ## Not established
 - By default: the coordinator's ledger-append path is fire-and-forget and can lose a line without the coordinator noticing, so every ledger-derived count in `## Run metrics` (Fix loop, Merge-back) is a lower bound. The `Metrics: ledger-check` line is the one cross-check that exists.
