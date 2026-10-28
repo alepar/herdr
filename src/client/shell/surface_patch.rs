@@ -58,6 +58,7 @@ fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> Option<&'static str> {
+    #[rustfmt::skip] let () = if crate::client::mosh_outage::blocks_fast_path(&state.active_endpoint_id) { return Some("client_surface_patch.fallback.mosh_prediction"); }; // mosh-fork hook
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
     } else if state.overlay.is_some() {

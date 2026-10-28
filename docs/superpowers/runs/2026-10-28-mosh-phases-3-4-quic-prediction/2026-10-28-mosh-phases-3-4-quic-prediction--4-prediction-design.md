@@ -201,3 +201,19 @@ Digest:
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-10-28: pane_surface_generation matches connection.generation (mosh-19g.3.2)
+
+Verified read-only: `ClientShellState::pane_surface_generation` is copied from
+`active_snapshot_generation` when a surface is installed, and that value is the
+`connection.generation` that `install_client_shell_snapshot` passes to
+`set_endpoint_snapshot_for_generation` (registry numbering, `Option<u64>`). The generation `observe`
+receives at `client/mod.rs` (the `EndpointControl` arm) is the same registry value. So the
+predictor is keyed by one number everywhere: `observe` and `tap` use the registry's
+`connection.generation`, `paint` uses `pane_surface_generation`, and `paint` skips predictions
+when the retained surface's generation is `None` or stale. No translation layer needed.
+
+Hook deviation: the tap needs the retained surface, and `ClientShellState` has no accessor outside
+`client::shell`. One extra tagged accessor line (`mosh_surface`, `shell/state.rs`) was added, so
+this task adds three upstream lines (accessor, tap, fast-path guard) plus two edited hook lines;
+the script reports 15 of 30.

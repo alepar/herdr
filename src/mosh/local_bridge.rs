@@ -853,6 +853,7 @@ impl Conn<'_> {
                         let srtt = self.srtt();
                         self.inject(LinkStatus::Linked {
                             srtt_ms: srtt.map(as_ms),
+                            echo: false,
                         });
                         self.srtt_report.reported(srtt);
                     }
@@ -986,7 +987,7 @@ impl Conn<'_> {
             LinkStatus::Linked { .. } => "linked",
         };
         let srtt_ms = match status {
-            LinkStatus::Linked { srtt_ms } => srtt_ms,
+            LinkStatus::Linked { srtt_ms, .. } => srtt_ms,
             LinkStatus::Resuming { .. } => None,
         };
         self.trace
@@ -1097,7 +1098,10 @@ impl Conn<'_> {
         self.pump_sends(now);
         if self.client.is_some() && !self.client_closed {
             if let Some(ms) = self.srtt_report.update(self.srtt()) {
-                self.inject(LinkStatus::Linked { srtt_ms: Some(ms) });
+                self.inject(LinkStatus::Linked {
+                    srtt_ms: Some(ms),
+                    echo: false,
+                });
             }
         }
     }
@@ -2350,7 +2354,7 @@ mod tests {
         // session endpoint answers it with an ACK.
         loop {
             let (_, got) = client.next_seen(WAIT);
-            if matches!(got, Seen::Link(LinkStatus::Linked { srtt_ms: Some(_) })) {
+            if matches!(got, Seen::Link(LinkStatus::Linked { srtt_ms: Some(_), .. })) {
                 break;
             }
             assert!(
