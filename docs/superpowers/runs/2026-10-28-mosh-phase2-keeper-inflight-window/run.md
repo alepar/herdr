@@ -12,6 +12,8 @@ epic: mosh-hex
 branch: super-auto/mosh-phase2-keeper-inflight-window
 base: mosh
 roastDesignRound: 1
+findingsLedgerDesign: findings-ledger-design.md
+roast-design: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1.md
 
 approvals:
 - top-split · auto · mosh-hex.1 LEAF, mosh-hex.2 LEAF, mosh-hex.3 LEAF, mosh-hex.4 LEAF, mosh-hex.5 LEAF
