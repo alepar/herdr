@@ -308,3 +308,28 @@ Digest:
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-10-28: acceptance tests over the UDP relay (mosh-19g.1.5)
+
+`tests/mosh_quic.rs` runs the QUIC leg end to end through `UdpRelay` at 150 ms one-way (RTT 300 ms)
+on a loopback host, with the bootstrap port rewritten by the fake ssh. Measured values:
+
+- Short idle gap (20 s blackhole, same QUIC leg): restore to first echo 0.91 to 0.94 s over four
+  runs, against the 2 RTT bound of 0.6 s. The excess over 2 RTT is 0.31 to 0.34 s. This is the
+  parked escalation (QUIC PTO backoff after 20 s of lost heartbeats): it is not a miss against
+  "2 RTT + one render" while a render is allowed 0.5 s, but it is about three RTTs rather than
+  two. The test asserts 2 RTT + 0.5 s and logs the measured time.
+- Address change (`rebind`): first echo 0.51 to 0.53 s, same connection, no new leg.
+- Long idle gap (60 s blackhole, `rebind` during the gap, ssh unreachable throughout): restore to
+  first echo 6.2 s with a new QUIC leg admitted; the bound is 3 RTT + 8 s backoff + 3 s + render.
+- Fallback at 100 % loss: session up in 3.26 s against 0.30 s over plain ssh (+2.96 s, bound +3.5 s).
+
+Two defects found by these tests and fixed with them:
+
+- `LocalBridge` injected the QUIC leg's SRTT as an `x-mosh.link.v1` frame before the server's first
+  frame, so the client handshake failed with "expected endpoint welcome". The SRTT report now waits
+  for the first server frame.
+- `QuicLegDialer.token_bound` was only set by `classify`, which the bridge calls for legs that end
+  before WELCOME. After a QUIC leg that welcomed and then died, the ssh fallback refresh replaced
+  the bound token, and the next QUIC redial was refused with `quic-token` (the "returns to QUIC with
+  the bound token" case). The dialer now treats a QUIC leg the keeper answered on as bound.

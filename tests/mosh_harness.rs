@@ -9,6 +9,12 @@
 #[path = "support/terminal_screen.rs"]
 mod terminal_screen;
 
+// The crate is bin-only, so the bootstrap line parser is included by path (the file is
+// self-contained on purpose). Its own unit tests ride along in every harness user.
+#[allow(dead_code)]
+#[path = "../src/mosh/quic_bootstrap.rs"]
+mod quic_bootstrap;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -193,7 +199,121 @@ pub mod knob {
     /// delay line (`<one-way delay ms> <rate bytes/s>`); see `Remote::set_link`. Checked
     /// before `THROTTLE`.
     pub const LINK: &str = "link";
+    /// The fake `ssh -G` also reports `hostname 127.0.0.1`, so `start_ui_bridge` registers the
+    /// QUIC leg dialer. Without it existing suites keep plain ssh legs.
+    pub const QUIC: &str = "quic";
+    /// Space-separated capability names the fake `herdr` wrapper removes from
+    /// `status client --json`, like `STRIP_CAPABILITY` does for the resume capability.
+    pub const STRIP_CAPS: &str = "strip-caps";
+    /// A UDP port. Session legs started while it is set pass their stdout through
+    /// [`QUIC_PORT_FILTER`], which rewrites the port field of the attacher's bootstrap line.
+    pub const QUIC_PORT: &str = "quic-port";
+    /// Every session leg ends like an unreachable host (`ssh` exit 255, "Connection timed
+    /// out": retryable on a reconnect leg), as a network that drops all traffic does.
+    pub const SSH_DOWN: &str = "ssh-down";
 }
+
+/// Perl filter the fake `ssh` puts on a session leg's stdout while the `quic-port` knob is set
+/// (`perl <path> <port> <command...>`): runs the command, rewrites the port field of the first
+/// `herdr-mosh-quic:1 <port> ...` line to `<port>` (a `none` line passes untouched), and then
+/// copies bytes raw. Production code gets no address override; this is the test-only seam.
+/// Bytes up to and including the ready marker pass at once (the dialer waits for it); when no
+/// bootstrap line follows the marker the stream is copied raw from the first non-matching byte.
+const QUIC_PORT_FILTER: &str = r##"use strict;
+use warnings;
+
+my ($port, @cmd) = @ARGV;
+my $MARK = "herdr-remote-output-ready:1\n";
+my $PFX = "herdr-mosh-quic:1";
+pipe(my $r, my $w) or die "pipe: $!";
+my $pid = fork();
+die "fork: $!" unless defined $pid;
+if (!$pid) {
+    close $r;
+    open(STDOUT, '>&', $w) or die "dup: $!";
+    close $w;
+    exec @cmd or die "exec: $!";
+}
+close $w;
+for my $sig (qw(TERM HUP INT)) {
+    $SIG{$sig} = sub { kill 'KILL', $pid; exit 143 };
+}
+binmode STDOUT;
+binmode $r;
+
+sub out {
+    my ($data) = @_;
+    while (length $data) {
+        my $n = syswrite(STDOUT, $data);
+        if (!defined $n) {
+            next if $!{EINTR};
+            kill 'KILL', $pid;
+            exit 0;
+        }
+        substr($data, 0, $n, '');
+    }
+}
+
+sub rewrite {
+    my ($line) = @_;
+    $line =~ s/^(\Q$PFX\E )\d+ /$1$port /;
+    return $line;
+}
+
+my $buf = '';
+my $state = 0;    # 0: preamble lines, 1: after the marker, 2: raw
+while (1) {
+    my $n = sysread($r, my $chunk, 65536);
+    if (!defined $n) {
+        next if $!{EINTR};
+        last;
+    }
+    last if $n == 0;
+    if ($state == 2) {
+        out($chunk);
+        next;
+    }
+    $buf .= $chunk;
+    while ($state < 2) {
+        if ($state == 0) {
+            my $i = index($buf, "\n");
+            last if $i < 0;
+            my $line = substr($buf, 0, $i + 1, '');
+            if (index($line, $PFX) == 0) {
+                out(rewrite($line));
+                $state = 2;
+            } else {
+                out($line);
+                $state = 1 if $line eq $MARK;
+            }
+        } else {
+            my $len = length $buf;
+            last if $len == 0;
+            my $cmp = $len < length($PFX) ? $len : length($PFX);
+            if (substr($buf, 0, $cmp) ne substr($PFX, 0, $cmp)) {
+                $state = 2;
+            } elsif ($len < length($PFX)) {
+                last;
+            } else {
+                my $i = index($buf, "\n");
+                if ($i < 0) {
+                    $state = 2 if $len > 4096;
+                    last;
+                }
+                out(rewrite(substr($buf, 0, $i + 1, '')));
+                $state = 2;
+            }
+        }
+    }
+    if ($state == 2 && length $buf) {
+        out($buf);
+        $buf = '';
+    }
+}
+out($buf) if length $buf;
+waitpid($pid, 0);
+exit($? >> 8);
+"##;
 
 /// Perl delay line the fake `ssh` puts on both directions of a leg while the `link` knob is
 /// set: a serializing bottleneck plus propagation delay. Each chunk read at `t` departs at
@@ -266,6 +386,25 @@ pub fn write_delay_line(dir: &Path) -> PathBuf {
     let path = dir.join("delay-line.pl");
     fs::write(&path, DELAY_LINE).unwrap();
     path
+}
+
+/// Write the bootstrap-port filter into `dir` and return its path; run it as
+/// `perl <path> <port> <command...>`.
+pub fn write_quic_port_filter(dir: &Path) -> PathBuf {
+    let path = dir.join("quic-port-filter.pl");
+    fs::write(&path, QUIC_PORT_FILTER).unwrap();
+    path
+}
+
+/// The port field of a `herdr-mosh-quic:1 <port> <fingerprint> <token>` line (`None` for the
+/// `none` line and anything malformed), parsed with the production parser.
+pub fn bootstrap_line_port(line: &str) -> Option<u16> {
+    quic_bootstrap::QuicBootstrap::parse_line(line).map(|b| b.port)
+}
+
+/// The fingerprint field of a bootstrap line, as lowercase hex.
+pub fn bootstrap_line_fingerprint(line: &str) -> Option<String> {
+    quic_bootstrap::QuicBootstrap::parse_line(line).map(|b| b.fingerprint.to_string())
 }
 
 /// A disposable remote herdr server plus the fake `ssh` that reaches it.
@@ -410,6 +549,7 @@ impl Remote {
         let legs = sh_quote(&base.join("legs.log"));
         let delay_line = sh_quote(&write_delay_line(&base.join("bin")));
         let links = sh_quote(&base.join("links.log"));
+        let port_filter = sh_quote(&write_quic_port_filter(&base.join("bin")));
         let marker = "printf '\\nherdr-remote-output-ready:1\\n'";
         let throttle = "perl -e '$|=1; while (my $n = sysread(STDIN,$b,65536)) { syswrite(STDOUT,$b); select(undef,undef,undef,$n/1300000); }'";
         write_executable(
@@ -432,7 +572,11 @@ for arg do
   if [ "$arg" = -G ]; then configuration=yes; fi
   previous=$arg; last=$arg
 done
-if [ -n "$configuration" ]; then printf 'controlpath %s\n' "$control"; exit 0; fi
+if [ -n "$configuration" ]; then
+  printf 'controlpath %s\n' "$control"
+  if [ -e "$K/quic" ]; then printf 'hostname 127.0.0.1\n'; fi
+  exit 0
+fi
 printf '%s %s\n' "$FAKE_SSH_CLIENT" "$(printf '%s' "$*" | tr '\n' ' ')" >> {argv}
 kind=other
 case "$last" in
@@ -441,6 +585,7 @@ case "$last" in
 esac
 if [ "$kind" = session ]; then
   printf '%s %s\n' "$FAKE_SSH_CLIENT" "$$" >> {legs}
+  if [ -e "$K/ssh-down" ]; then echo 'ssh: connect to host test-only port 22: Connection timed out' >&2; exit 255; fi
   if take fail255; then echo 'Permission denied (publickey).' >&2; exit 255; fi
   if take hostkey255; then echo 'Host key verification failed.' >&2; exit 255; fi
   if take hang; then exec sleep 600; fi
@@ -450,6 +595,9 @@ if [ "$kind" = session ]; then
     *ControlPath=none*) if take eof-reconnect; then {marker}; exit 0; fi ;;
   esac
   if take fake-end; then {marker}; cat "$K/fake-end.bytes"; exit 0; fi
+fi
+if [ "$kind" = session ] && [ -e "$K/quic-port" ]; then
+  exec perl {port_filter} "$(cat "$K/quic-port")" /bin/sh -c "$last"
 fi
 if [ "$kind" != other ] && [ -e "$K/link" ]; then
   read -r delay rate < "$K/link"
@@ -476,6 +624,7 @@ exec /bin/sh -c "$last"
                 throttle = throttle,
                 delay_line = delay_line,
                 links = links,
+                port_filter = port_filter,
             ),
         );
         write_executable(
@@ -486,6 +635,12 @@ K={knobs}
 REAL={real}
 case "$*" in
   *status\ client*--json*)
+    if [ -e "$K/strip-caps" ]; then
+      script=
+      for cap in $(cat "$K/strip-caps"); do script="$script;s/$cap/x-herdr-test-removed/g"; done
+      "$REAL" "$@" | sed "${{script#;}}"
+      exit $?
+    fi
     if [ -e "$K/strip-capability" ]; then
       "$REAL" "$@" | sed 's/x-mosh-resume-bridge-v1/x-herdr-test-removed/g'
       exit $?
@@ -1141,6 +1296,81 @@ impl Remote {
     pub fn arm_fake_end(&self, reason: &str) {
         fs::write(self.base.join("knobs/fake-end.bytes"), encode_end(reason)).unwrap();
         self.set_knob(knob::FAKE_END, "");
+    }
+}
+
+fn pid_alive(pid: libc::pid_t) -> bool {
+    if cfg!(target_os = "linux") {
+        // A zombie still answers kill(pid, 0); its state letter says it is gone.
+        return fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim().chars().next())
+                .is_some_and(|state| state != 'Z' && state != 'X')
+        });
+    }
+    // SAFETY: signal 0 only checks that the pid exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+impl Remote {
+    /// Number of session-leg ssh processes of `client` (from `legs.log`) still alive: the
+    /// attacher the fake ssh `exec`s into, or the port filter wrapping it.
+    pub fn ssh_session_children_alive(&self, client: &str) -> usize {
+        self.leg_pids(client)
+            .into_iter()
+            .filter(|pid| pid_alive(*pid))
+            .count()
+    }
+
+    /// Run the remote attacher once with the QUIC flag through the fake ssh (stdin closed, so
+    /// it exits without opening a session connection) and return its bootstrap line
+    /// (`herdr-mosh-quic:1 ...`, without the newline). The line goes through the port filter
+    /// while the `quic-port` knob is set. Starts the keeper if none runs, and its acceptor.
+    pub fn quic_bootstrap_line(&self) -> String {
+        use std::process::{Command, Stdio};
+        let herdr = sh_quote(&self.base.join("bin/herdr"));
+        let mut child = Command::new(self.base.join("bin/ssh"))
+            .args(["-T", "test-only"])
+            .arg(format!(
+                "exec {herdr} remote-client-bridge --x-mosh-quic-v1 --x-mosh-session-v1"
+            ))
+            .env("FAKE_SSH_CLIENT", "prime")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the priming attacher");
+        let stdout = child.stdout.take().expect("attacher stdout");
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.starts_with("herdr-mosh-quic:1") {
+                    let _ = tx.send(line);
+                    return;
+                }
+            }
+        });
+        let line = rx.recv_timeout(Duration::from_secs(15));
+        let _ = child.kill();
+        let _ = child.wait();
+        line.expect("the priming attacher printed no bootstrap line")
+    }
+
+    /// Prime the keeper's acceptor and route QUIC through a [`UdpRelay`]: marks the remote as
+    /// QUIC-capable for `ssh -G` (`knob::QUIC`), reads the keeper's real bootstrap line, starts
+    /// a relay to that UDP port, and sets `knob::QUIC_PORT` to the relay's client-facing port,
+    /// so every session leg started from now on reports the relay as the keeper's address. A
+    /// keeper with no session exits after 30 s idle, so start the client right after.
+    pub fn start_quic_relay(&self, seed: u64) -> UdpRelay {
+        self.clear_knob(knob::QUIC_PORT);
+        self.set_knob(knob::QUIC, "");
+        let line = self.quic_bootstrap_line();
+        let port = bootstrap_line_port(&line)
+            .unwrap_or_else(|| panic!("the keeper offered no QUIC bootstrap: {line:?}"));
+        let relay = UdpRelay::start(std::net::SocketAddr::from(([127, 0, 0, 1], port)), seed);
+        self.set_knob(knob::QUIC_PORT, &relay.local_addr().port().to_string());
+        relay
     }
 }
 
