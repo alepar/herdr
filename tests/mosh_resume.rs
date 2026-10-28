@@ -1,7 +1,8 @@
 //! End-to-end resume behaviour of `herdr --remote` over a fake ssh (mosh-dqw.9).
 //!
 //! Each test starts its own remote server and fake ssh (see `mosh_harness`), so they run in
-//! parallel. Every wait is bounded.
+//! parallel. Every wait is bounded. The Linux-only `ss` backlog observation prints a `SKIP:`
+//! line to stderr when `ss` is missing (see `mosh_pacing`), never a silent pass.
 
 #![cfg(unix)]
 
@@ -11,9 +12,25 @@ pub mod support;
 
 use std::time::{Duration, Instant};
 
-use mosh_harness::{knob, Client, ClientOptions, Remote};
+use mosh_harness::{knob, timing_lock, Client, ClientOptions, Remote};
 
 const READY: Duration = Duration::from_secs(30);
+
+/// window::INITIAL (src/mosh/window.rs).
+const KEEPER_RESET_WINDOW: u64 = 256 * 1024;
+
+/// Mirror of tests/mosh_pacing.rs `DENSE_SIZE`: wide enough that herdr's screen diffs
+/// saturate the link (about 508 KiB/s on the LAN harness).
+const DENSE_SIZE: (u16, u16) = (400, 100);
+/// Mirror of tests/mosh_pacing.rs `SATURATING_FLOOD`: a content-dense flood until Ctrl-C;
+/// the split `MA RKER` keeps the echoed command line from matching. `base64` reads stdin, not a
+/// file argument: portable to BSD/macOS `base64`.
+const SATURATING_FLOOD: &str =
+    r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 < /dev/urandom)"#;
+/// One `session::MAX_DATA_CHUNK`: slack for a blip leg repacking the server socket.
+#[cfg(target_os = "linux")]
+const CHUNK: u64 = 64 * 1024;
+const MARKER: &str = "MARKER";
 
 fn attached(remote: &Remote, opts: &ClientOptions) -> Client {
     let client = remote.spawn_remote_client(opts);
@@ -48,6 +65,25 @@ fn fail_context(remote: &Remote, client: &Client) -> String {
         remote.keeper_events(),
         remote.session_legs(&client.id)
     )
+}
+
+/// Wait (up to `READY`) until two `keeper_server_backlog` samples 500 ms apart are equal and
+/// non-zero: the server socket is full and the server is blocked. Returns that value.
+#[cfg(target_os = "linux")]
+fn backlog_plateau(keepers: &[libc::pid_t]) -> Option<u64> {
+    let mut last = None;
+    let mut plateau = None;
+    mosh_harness::wait_for(READY, || {
+        let now = mosh_harness::keeper_server_backlog(keepers);
+        let hit = matches!((last, now), (Some(a), Some(b)) if a == b && b > 0);
+        if hit {
+            plateau = now;
+        }
+        last = now;
+        thread_sleep(500);
+        hit
+    });
+    plateau
 }
 
 #[test]
@@ -441,42 +477,109 @@ fn slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session() {
     );
 }
 
+/// Linux-only observation of the outage test: the keeper stops reading at the reset window,
+/// so the server socket fills to its cap and stays there (`ss -xpn` Recv-Q of the keeper's
+/// server stream). Prints a `SKIP:` line to stderr and returns when `ss` cannot be run.
+#[cfg(target_os = "linux")]
+fn assert_server_backlog_plateaus(remote: &Remote, client: &Client) {
+    if std::process::Command::new("ss").arg("-V").output().is_err() {
+        eprintln!("SKIP: server-backlog plateau check: `ss` is not available");
+        return;
+    }
+    let keepers = remote.keeper_pids();
+    let first = backlog_plateau(&keepers);
+    assert!(
+        first.is_some(),
+        "no server backlog plateau while down\n{}",
+        fail_context(remote, client)
+    );
+    thread_sleep(1000);
+    let second = backlog_plateau(&keepers);
+    let (first, second) = (first.unwrap_or(0), second.unwrap_or(0));
+    assert!(
+        second > 0 && second <= first + CHUNK,
+        "server backlog grew while down: {first} -> {second}\n{}",
+        fail_context(remote, client)
+    );
+}
+
+/// A dense flood through a real outage: the session survives, the ring holds at most the reset
+/// window, after resume the latest output arrives and Ctrl-C answers. These checks run on every
+/// unix target; the server-socket plateau (the backlog stays in the bounded server socket) is
+/// observed on Linux only (`ss`).
 #[test]
-fn ring_overflow_during_an_outage_ends_the_session_without_a_hang() {
-    // Slow (about 100 s) and CPU heavy: the keeper's 16 MiB ring has to fill with rendered frames.
+fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume() {
+    let _lock = timing_lock();
     let remote = Remote::start();
-    // A big terminal makes each rendered frame (and so the keeper's backlog) big.
-    let mut opts = ClientOptions::grace(600);
-    opts.size = (240, 70);
-    let mut client = attached(&remote, &opts);
+    let mut client = attached(
+        &remote,
+        &ClientOptions {
+            size: DENSE_SIZE,
+            ..ClientOptions::grace(600)
+        },
+    );
     remote.set_knob(knob::EOF_WELCOME, "");
     remote.signal_leg(&client.id, libc::SIGKILL);
     assert!(client.wait_event("leg_down", 1, READY));
 
-    // Output the keeper must hold for a client that is not there until its 16 MiB ring fills.
-    remote.pane_run("while :; do seq 1 100000; done");
+    // The flood starts during the outage, so nothing was queued past INITIAL beforehand.
+    let flood_started = Instant::now();
+    remote.pane_run(SATURATING_FLOOD);
+
+    // Linux only: the keeper stops at INITIAL and the server socket fills to its cap.
+    #[cfg(target_os = "linux")]
+    assert_server_backlog_plateaus(&remote, &client);
+    // Hold the outage at least 3 s of flood (well over 1 MiB of output at about 508 KiB/s,
+    // so a keeper draining to its ring cap would exceed INITIAL many times over).
+    let floor = Duration::from_secs(3);
+    if let Some(rest) = floor.checked_sub(flood_started.elapsed()) {
+        std::thread::sleep(rest);
+    }
+    let ended: Vec<_> = remote
+        .keeper_events()
+        .into_iter()
+        .filter(|e| e["event"] == "session_end")
+        .collect();
     assert!(
-        mosh_harness::wait_for(Duration::from_secs(170), || {
-            remote
-                .keeper_events()
-                .iter()
-                .any(|e| e["event"] == "session_end" && e["reason"] == "ring-overflow")
-        }),
-        "keeper never overflowed its ring: {}",
+        ended.is_empty(),
+        "{ended:?}\n{}",
         fail_context(&remote, &client)
     );
-    assert!(!client.exited(), "client ended before the leg returned");
+    assert!(!client.exited(), "{}", fail_context(&remote, &client));
 
-    // Today's disconnect path: the client learns of the end once a leg reaches the keeper.
     remote.clear_knob(knob::EOF_WELCOME);
     assert!(
-        client.wait_exit(Duration::from_secs(60)),
-        "client hung after the overflow: {}",
+        wait(|| client.has_welcome("resumed")),
+        "{}",
         fail_context(&remote, &client)
     );
+    // Ring bound: at most the reset window queued while down (the slack covers the up-rule
+    // read rounding on blip legs that came up and died under the EOF_WELCOME knob).
+    let resumes: Vec<u64> = remote
+        .keeper_events()
+        .into_iter()
+        .filter(|e| e["event"] == "resume")
+        .map(|e| e["replayed_down"].as_u64().unwrap_or(u64::MAX))
+        .collect();
+    assert!(!resumes.is_empty(), "{}", fail_context(&remote, &client));
     assert!(
-        client.output_text().contains("to reattach"),
-        "{}",
-        client.output_text()
+        resumes.iter().all(|&r| r <= KEEPER_RESET_WINDOW + 4096),
+        "ring held {resumes:?} while down\n{}",
+        fail_context(&remote, &client)
     );
+
+    // The server stream survived (no write timeout): the flood reaches the client.
+    let before = client.output_len();
+    assert!(
+        wait(|| client.output_len() >= before + 64 * 1024),
+        "{}",
+        fail_context(&remote, &client)
+    );
+    client.type_bytes(b"\x03");
+    assert!(
+        client.wait_screen(MARKER, READY),
+        "{}",
+        fail_context(&remote, &client)
+    );
+    assert!(!client.exited(), "{}", fail_context(&remote, &client));
 }

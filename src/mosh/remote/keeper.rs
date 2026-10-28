@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -25,6 +26,17 @@ use crate::remote::attach::mosh::session::{
     Token, Welcome, WelcomeStatus, MAX_CONTROL_PAYLOAD, MAX_DATA_CHUNK, PRE_WELCOME_BOUND,
     SESSION_PROTOCOL_VERSION,
 };
+use crate::remote::attach::mosh::window::WindowSnapshot;
+
+/// Bytes the server wrote that the keeper has not read: FIONREAD on the server stream, the
+/// same quantity as `ss` Recv-Q. Saturates near the server socket's send buffer. `None` if
+/// the ioctl fails.
+fn server_backlog(server: &UnixStream) -> Option<u64> {
+    let mut queued: libc::c_int = 0;
+    // SAFETY: FIONREAD stores one c_int through the pointer; the fd is open for the borrow.
+    let rc = unsafe { libc::ioctl(server.as_raw_fd(), libc::FIONREAD, &mut queued) };
+    (rc == 0).then(|| u64::try_from(queued).unwrap_or(0))
+}
 
 /// Outbound (server to client) replay ring capacity.
 const KEEPER_RING_CAP: usize = 16 * 1024 * 1024;
@@ -123,6 +135,32 @@ impl Shared {
 
     fn trace(&self, event: &str, token: Token, fields: Value) {
         self.write_trace(json!({"event": event, "token": token.to_string()}), fields);
+    }
+
+    /// One `window` line: the controller's state at an epoch close (or its reset value on
+    /// leg up) and the server stream's backlog. Measures nothing without a trace dir.
+    fn trace_window(
+        &self,
+        token: Token,
+        leg: u64,
+        snapshot: WindowSnapshot,
+        server: &UnixStream,
+    ) {
+        if self.trace_dir.is_none() {
+            return;
+        }
+        let ms = |rtt: Option<Duration>| rtt.map(|d| d.as_secs_f64() * 1000.0);
+        self.trace(
+            "window",
+            token,
+            json!({
+                "leg": leg,
+                "window": snapshot.window,
+                "base_rtt": ms(snapshot.base_rtt),
+                "epoch_min": ms(snapshot.epoch_min),
+                "server_backlog": server_backlog(server),
+            }),
+        );
     }
 
     /// A trace line that belongs to the keeper, not to a session: no `token`.
@@ -571,6 +609,21 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
     let status_name = if status == WelcomeStatus::New { "new" } else { "resumed" };
     shared.trace("welcome", token, json!({"status": status_name}));
     shared.trace("leg_up", token, json!({}));
+    {
+        let table = shared.lock();
+        if let Some(session) = table
+            .sessions
+            .get(&token)
+            .filter(|s| s.leg.as_ref().map(|leg| leg.id) == Some(id))
+        {
+            let reset = WindowSnapshot {
+                window: session.endpoint.window(),
+                base_rtt: None,
+                epoch_min: None,
+            };
+            shared.trace_window(token, id, reset, &session.server);
+        }
+    }
     if let Ok(writer) = stream.try_clone() {
         let shared = Arc::clone(shared);
         thread::spawn(move || leg_writer(&shared, token, id, writer));
@@ -598,6 +651,9 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
             // Deliver what decoded before the error: recv_offset already counts it.
             Err(err) => (err.delivered, true),
         };
+        if let Some(snapshot) = session.endpoint.take_window_snapshot() {
+            shared.trace_window(token, id, snapshot, &session.server);
+        }
         let mut ended = None;
         for event in events {
             match event {
@@ -670,25 +726,27 @@ fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
     }
 }
 
-/// Reads the server into the ring whenever the endpoint's reading rule allows.
+/// Reads the server into the ring whenever the endpoint's reading rule allows, sized to the
+/// endpoint's room.
 fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream) {
     let mut buf = vec![0u8; MAX_DATA_CHUNK];
     loop {
-        {
+        let want = {
             let mut table = shared.lock();
             loop {
                 match table.sessions.get(&token) {
                     Some(session) if session.gen == gen => {
-                        if session.endpoint.may_read_source() {
-                            break;
+                        let size = session.endpoint.source_read_size();
+                        if size > 0 {
+                            break size;
                         }
                     }
                     _ => return,
                 }
                 table = shared.kick.wait(table).unwrap_or_else(|e| e.into_inner());
             }
-        }
-        let n = match server.read(&mut buf) {
+        };
+        let n = match server.read(&mut buf[..want]) {
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => 0,
@@ -737,7 +795,7 @@ fn server_writer(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::remote::attach::mosh::session::WINDOW;
+    use crate::remote::attach::mosh::window::{CAP, FLOOR, INITIAL};
     use std::sync::atomic::AtomicBool;
 
     fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -1194,10 +1252,11 @@ mod tests {
     fn peer_end_drains_to_server_before_shutdown() {
         let h = Harness::new();
         let mut local = new_session(&h);
+        // The endpoint's window is smaller than the payload: the final END is queued behind the
+        // ring and goes out only as ACKs reopen the window (pumped by `wait`).
+        local.endpoint.queue_final_end(end_reason::CLIENT_GONE);
         local.send_data(&pattern(1 << 20));
-        let end = local.endpoint.end_now(end_reason::CLIENT_GONE);
-        local.stream.write_all(&end).unwrap();
-        assert!(wait_until(Duration::from_secs(10), || {
+        assert!(local.wait(Duration::from_secs(10), |_| {
             h.server().conn(0).received().len() == 1 << 20 && h.server().conn(0).saw_eof()
         }));
         assert!(h.server().conn(0).received() == pattern(1 << 20));
@@ -1488,14 +1547,19 @@ mod tests {
         local.auto_ack = false;
         let conn = h.server().conn(0);
         conn.write_async(pattern(8 << 20));
-        local.pump(Duration::from_millis(700));
-        // With no acks the keeper may hold WINDOW (+ one chunk) in its ring. The rest sits in
-        // socket buffers on the server side (a few hundred KiB each way; 1 MiB of slack is
-        // generous) and the server's writer is blocked well short of 8 MiB.
+        // Lower bound: wait for the keeper to read (pumping the leg, never acking).
+        let read = local.wait(Duration::from_secs(10), |_| {
+            conn.written.load(Ordering::SeqCst) >= INITIAL / 2
+        });
+        assert!(read, "keeper did not read: {}", conn.written.load(Ordering::SeqCst));
+        // Upper bound: settle, then with no acks the keeper holds at most the window plus a
+        // sub-4 KiB read rounding in its ring. The rest sits in socket buffers on the server side
+        // (a few hundred KiB each way; 1 MiB of slack is generous) and the server's writer is
+        // blocked well short of 8 MiB.
+        local.pump(Duration::from_millis(500));
         let written = conn.written.load(Ordering::SeqCst);
-        assert!(written >= WINDOW / 2, "keeper did not read: {written}");
         assert!(
-            written <= WINDOW + MAX_DATA_CHUNK + (1 << 20) + 200_000,
+            written <= INITIAL + 4096 + (1 << 20) + 200_000,
             "keeper read past the window: {written}"
         );
         // Acking releases the rest.
@@ -1506,7 +1570,37 @@ mod tests {
     }
 
     #[test]
-    fn drain_while_down_captures_server_output() {
+    fn window_trace_on_leg_up_and_per_epoch_under_flood() {
+        let h = Harness::new();
+        let mut local = new_session(&h);
+        h.wait_trace("window", "", "");
+        let windows = |h: &Harness| -> Vec<Value> {
+            h.trace().into_iter().filter(|l| l["event"] == "window").collect()
+        };
+        let first = windows(&h).remove(0);
+        assert_eq!(first["window"], INITIAL as u64, "{first}");
+        assert!(first["base_rtt"].is_null() && first["epoch_min"].is_null(), "{first}");
+        assert!(first["leg"].is_u64() && first["server_backlog"].is_u64(), "{first}");
+        let conn = h.server().conn(0);
+        conn.write_async(pattern(8 << 20));
+        local.wait_received(8 << 20);
+        let epochs: Vec<Value> = windows(&h)
+            .into_iter()
+            .filter(|l| !l["epoch_min"].is_null())
+            .collect();
+        assert!(!epochs.is_empty(), "no epoch closed under the flood: {:?}", h.trace());
+        for line in &epochs {
+            for field in ["leg", "window", "base_rtt", "epoch_min", "server_backlog"] {
+                assert!(!line[field].is_null(), "{field} missing: {line}");
+            }
+            let w = line["window"].as_u64().unwrap() as usize;
+            assert!((FLOOR..=CAP).contains(&w), "{line}");
+            assert_eq!(line["leg"], first["leg"]);
+        }
+    }
+
+    #[test]
+    fn reads_stop_at_initial_while_down_and_replay_in_order() {
         let h = Harness::new();
         let mut local = new_session(&h);
         let conn = h.server().conn(0);
@@ -1514,29 +1608,67 @@ mod tests {
         h.wait_trace("leg_down", "", "");
         let data = pattern(4 << 20);
         conn.write_async(data.clone());
-        assert!(wait_until(Duration::from_secs(20), || conn
-            .written
-            .load(Ordering::SeqCst)
-            == data.len()));
+        // Lower bound: wait for the keeper to read while down.
+        assert!(
+            wait_until(Duration::from_secs(10), || conn.written.load(Ordering::SeqCst)
+                >= INITIAL / 2),
+            "keeper did not read while down: {}",
+            conn.written.load(Ordering::SeqCst)
+        );
+        // Upper bound: settle, then the keeper must have stopped at the reset window; the rest
+        // sits in socket buffers on the server side (same slack as
+        // `window_limits_server_reads_with_leg_up`).
+        thread::sleep(Duration::from_millis(500));
+        let written = conn.written.load(Ordering::SeqCst);
+        assert!(
+            written <= INITIAL + (1 << 20) + 200_000 && written < data.len(),
+            "keeper read past the reset window while down: {written}"
+        );
+        assert!(!h.trace_has("session_end", "", ""), "{:?}", h.trace());
         local.start_leg(60_000, None);
         local.wait_welcomed(WelcomeStatus::Resumed);
         local.wait_received(data.len());
         assert_eq!(local.received, data);
+        let resume = h
+            .trace()
+            .into_iter()
+            .find(|l| l["event"] == "resume")
+            .expect("resume trace");
+        let replayed = resume["replayed_down"].as_u64().unwrap_or(u64::MAX);
+        assert!(replayed <= INITIAL as u64, "{resume}");
     }
 
     #[test]
-    fn overflow_ends_session_next_resume_unknown() {
+    fn outage_past_the_ring_cap_keeps_the_session_and_replays_in_order() {
         let h = Harness::new();
         let mut local = new_session(&h);
         let conn = h.server().conn(0);
         local.drop_leg();
         h.wait_trace("leg_down", "", "");
-        // 17 MiB against a 16 MiB ring. Block size 100_003 avoids landing exactly on the cap.
-        conn.write_async(pattern(17 << 20));
-        h.wait_trace("session_end", "reason", end_reason::RING_OVERFLOW);
-        assert!(wait_until(Duration::from_secs(5), || conn.saw_eof()));
+        // 17 MiB against a 16 MiB ring: the ring never fills while down.
+        let data = pattern(17 << 20);
+        conn.write_async(data.clone());
+        // Lower bound: wait for the keeper to read while down.
+        assert!(
+            wait_until(Duration::from_secs(10), || conn.written.load(Ordering::SeqCst)
+                >= INITIAL / 2),
+            "keeper did not read while down: {}",
+            conn.written.load(Ordering::SeqCst)
+        );
+        // Upper bound: settle, then the keeper must have stopped at the reset window.
+        thread::sleep(Duration::from_millis(500));
+        let written = conn.written.load(Ordering::SeqCst);
+        assert!(
+            written <= INITIAL + (1 << 20) + 200_000 && written < data.len(),
+            "keeper read past the reset window while down: {written}"
+        );
+        assert!(!h.trace_has("session_end", "reason", end_reason::RING_OVERFLOW));
+        assert!(!conn.saw_eof());
         local.start_leg(60_000, None);
-        assert!(local.wait(Duration::from_secs(5), |l| l.refused));
+        local.wait_welcomed(WelcomeStatus::Resumed);
+        let got = local.wait(Duration::from_secs(60), |l| l.received.len() >= data.len());
+        assert!(got, "received {} of {} bytes", local.received.len(), data.len());
+        assert_eq!(local.received, data);
     }
 
     #[test]

@@ -1,0 +1,282 @@
+[
+  {
+    "id": "mosh-hex.6",
+    "title": "Integration sweep: Phase 2 adaptive window end to end",
+    "description": "Root integration sweep. Verify the goal's main flow end to end over the combined tree: flood at 150 ms one-way delay and rate R with the adaptive window, Ctrl-C answered within 1.5 s, resume mid-flood, LAN throughput; add integration tests no per-leaf bead covers (e.g. window trace across multiple clients from Phase 1's multi-client support; upstream-direction controller stays at INITIAL with interactive input); sweep for unwired constants, trace fields, or harness knobs; fix small gaps inline, file blockers for big ones.\nblocked-by mosh-hex.1: consumes all leaves (integration sweep)\nblocked-by mosh-hex.2: consumes all leaves (integration sweep)\nblocked-by mosh-hex.3: consumes all leaves (integration sweep)\nblocked-by mosh-hex.4: consumes all leaves (integration sweep)\nblocked-by mosh-hex.5: consumes all leaves (integration sweep)\nFiles: tests/mosh_pacing.rs, tests/mosh_integration.rs, src/mosh/** (small fixes only).\nAcceptance:\n- [ ] The main flow passes end to end on the combined tree, and each per-leaf acceptance test still passes after all merges.\n- [ ] At least one integration test covers a path no single leaf's tests cover (named in the commit message).\n- [ ] No unwired constant, trace field or knob remains (grep evidence in the commit message).\n- [ ] Existing tests/mosh_* suites green; clippy and fmt clean; mosh-diff-budget 12.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:56:53Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:56:53Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:56:53Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:54Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:55Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:57Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:57Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.6",
+        "depends_on_id": "mosh-hex.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:56Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 5,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex.5",
+    "title": "Acceptance: Ctrl-C under flood at 300 ms RTT, LAN throughput, convergence; D3 evidence",
+    "description": "Spec §5 and §6. tests/mosh_pacing.rs (non-ignored tests): (1) Ctrl-C under flood: set_link(150, R) with R and terminal size from evidence/phase2-baseline.md; pane runs `yes; echo \u003cmarker\u003e`; wait for 2 s of flood growth; write \\x03 to the client pty; assert the marker appears on the client screen within 1.5 s. (2) No throughput regression: no link knob, same flood; keeper trace shows the window reaching \u003e= 1 MiB. (3) Convergence: under the slow profile the traced window settles to \u003c= max(FLOOR, 2*R*0.3 s) + one chunk. Then write evidence/phase2-acceptance.md: Ctrl-C latency over \u003e= 3 runs before (from the baseline file) and after, and server_backlog from the keeper trace with staleness = backlog/R; if its p95 exceeds 250 ms, the file states that D3's evidence for server pacing is met and parks server pacing (and the SO_SNDBUF option) as a measured follow-up — not built here.\nowns: evidence/phase2-acceptance.md (same sections and units as phase2-baseline.md) and the D3 decision entry in it.\nconsumes: link knob + Remote::set_link/clear_link; the existing Phase 1 harness leg control (Remote::signal_leg / wait_leg_count) for the resume case; INITIAL from mosh-hex.2; profile constants, backlog metric definition and the measurement helper from mosh-hex.3; window trace events.\nblocked-by mosh-hex.1: consumes link knob + Remote::set_link/clear_link\nblocked-by mosh-hex.3: consumes chosen profile constants (R, terminal size) in evidence/phase2-baseline.md\nblocked-by mosh-hex.4: consumes adaptive window + keeper `window` trace events\nFiles: tests/mosh_pacing.rs, docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/evidence/phase2-acceptance.md (git add -f).\nAcceptance:\n- [ ] Test (1) passes: marker within 1.5 s at 150 ms one-way delay and rate R.\n- [ ] Test (2) passes: window reaches \u003e= 1 MiB on the undelayed path.\n- [ ] Test (3) passes: converged window within the bound.\n- [ ] evidence/phase2-acceptance.md records before/after latencies, backlog staleness p95 and the D3 conclusion.\n- [ ] Resume under flood: killing the leg mid-flood resumes, the traced window restarts at INITIAL on the new leg, and the Ctrl-C bound holds after the resume.\n- [ ] If test (1) misses 1.5 s while the window has converged, the evidence file attributes the residual latency (server backlog staleness vs window vs link), records the D3 decision as pacing needed with numbers (stating the FIONREAD cap from mosh-hex.3), and the bead is reported failed rather than the bound being relaxed; the follow-up is filed as a parked item for the human, not built here.\n- [ ] Protocol check recorded: the branch diff changes no SessionMsg variant, encode/decode, or session constant (SESSION_PROTOCOL_VERSION, ACK_EVERY_BYTES, ACK_EVERY, MAX_DATA_CHUNK, WINDOW), and the Phase 1 session codec/wire tests pass with their expectations unmodified.\n- [ ] Closing check recorded in the evidence file: the branch diff touches only src/mosh/**, tests/mosh_* and the run directory; scripts/mosh-diff-budget.sh reports 12 lines; Cargo.toml and Cargo.lock are unchanged.\n- [ ] The tests are not flaky under a quiet host: 5 consecutive runs pass (recorded in the evidence file).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:49:14Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:56:33Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.5",
+        "depends_on_id": "mosh-hex.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:49:17Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.5",
+        "depends_on_id": "mosh-hex.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:49:19Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.5",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:49:14Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.5",
+        "depends_on_id": "mosh-hex.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:49:18Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 1,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex.4",
+    "title": "Wire InflightWindow into SessionEndpoint; size source reads; keeper window trace",
+    "description": "Spec §2, §3, §7 and the ## Key abstractions SessionEndpoint/Keeper/LocalBridge entries. SessionEndpoint owns one InflightWindow and is the only place that feeds it: poll_send reports fresh (non-replay) DATA sends; the ACK path reports the new acked offset; set_up and leg_down reset it; may_read_source, poll_send's room and a new source_room() use the controller's window while up and the ring cap while down; WINDOW becomes the hard cap and push_source's debug assertion is restated against it. The endpoint marks the epoch window-limited when it had bytes to send and no room OR when the source was refused room (occupancy reached the window) — the gap noted in the spec's Key abstractions. It passes the epoch snapshot to its owner unchanged. Keeper server_reader reads min(MAX_DATA_CHUNK, source_room()) rounded up to 4 KiB; on each epoch snapshot the keeper reads FIONREAD on that session's server stream and emits one `window` trace event {window, base_rtt, epoch_min, server_backlog} under HERDR_MOSH_TRACE. The local bridge's client reader sizes reads with source_room(); no trace there. Rewrite the session unit tests that assert in-flight == WINDOW to assert the controller's window.\nowns: SessionEndpoint::source_room() and the keeper `window` trace event schema {leg, window, base_rtt, epoch_min, server_backlog}, emitted through the existing keeper trace file (HERDR_MOSH_TRACE, the same channel as the Phase 1 keeper events) and read by tests via Remote::keeper_events, where `leg` identifies the leg (the keeper's leg generation) and a `window` event with the reset value is emitted when a new leg comes up.\nconsumes: InflightWindow; the backlog metric definition from mosh-hex.3 (server_backlog = FIONREAD on the keeper's server stream, the same quantity as ss Recv-Q).\nRTT comes only from existing DATA/ACK traffic: no session message, field or constant is added or changed.\nblocked-by mosh-hex.2: consumes InflightWindow\nblocked-by mosh-hex.3: consumes fixed-window baseline recorded in evidence/phase2-baseline.md (the baseline must be measured before the window changes)\nFiles: src/mosh/session.rs, src/mosh/remote/keeper.rs, src/mosh/local_bridge.rs.\nAcceptance:\n- [ ] Unit tests: in-flight and ring occupancy never exceed the controller's window while up (the keeper stops reading the server when source_room() is 0, so backpressure stays in the server socket and the server's latest-wins slot); ring cap rule unchanged while down; replay after reconnect respects the (reset) window; source_room() is 0 when occupancy \u003e= window.\n- [ ] Keeper unit/integration test: a `window` trace event appears under flood with all four fields.\n- [ ] Session protocol unchanged: SESSION_PROTOCOL_VERSION, ACK_EVERY_BYTES, ACK_EVERY, MAX_DATA_CHUNK and WINDOW values unchanged; a receiver built from the base code still interoperates (existing tests/mosh_* suites green).\n- [ ] No role check disables the controller on the upstream direction (spec §2).\n- [ ] cargo clippy --all-targets -D warnings and fmt clean; mosh-diff-budget still 12 lines.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:49:13Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:56:32Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.4",
+        "depends_on_id": "mosh-hex.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:49:16Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.4",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:49:13Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.4",
+        "depends_on_id": "mosh-hex.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:56:08Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex.3",
+    "title": "Measure the fixed-window baseline: flood rate, Ctrl-C latency, server backlog",
+    "description": "Spec §5 and §6. Evidence leaf, against the current (fixed 2 MiB window) code, using the link harness. Writes docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/evidence/phase2-baseline.md (force-add with git add -f; docs/* is upstream-gitignored) recording: (a) the server's flood output rate (`yes` in a pane) at the test terminal size, measured as client-side output bytes/s with no link knob; (b) the chosen profile: R = the largest of 256 KiB/s and 1 MiB/s that is \u003c= half of (a), terminal size raised from 80x24 if needed to reach a usable flood rate, one-way delay 150 ms; (c) Ctrl-C latency under flood at that profile (time from writing \\x03 to the client pty until the client screen shows the `echo \u003cmarker\u003e` that follows `yes`), at least 3 runs; (d) the server-socket backlog during the flood, sampled externally (e.g. `ss -xp` Recv-Q of the keeper's server-side unix socket) since the keeper trace does not exist yet. The measuring test may live in tests/mosh_pacing.rs marked #[ignore] (evidence-only, run manually).\nowns: profile constants (R, terminal size, one-way delay) in evidence/phase2-baseline.md; the backlog metric definition (bytes queued in the receive queue of the keeper's server-side Unix socket: ss Recv-Q == FIONREAD on that stream), which mosh-hex.4's trace must measure identically; the reusable measurement helper in tests/mosh_pacing.rs (flood command `yes; echo \u003cmarker\u003e`, Ctrl-C injection into the client pty, stopwatch until the marker is on the client screen) that mosh-hex.5 reuses unchanged.\nconsumes: link knob + Remote::set_link/clear_link.\nblocked-by mosh-hex.1: consumes link knob + Remote::set_link/clear_link\nAcceptance:\n- [ ] evidence/phase2-baseline.md exists with (a)-(d), the exact commands, the commit SHA measured, and the chosen R and terminal size stated as constants the acceptance test will use.\n- [ ] The baseline Ctrl-C latency at the chosen profile is reported; if it is \u003c= 1.5 s (so the acceptance test could not discriminate), the file says so and picks a lower R within the spec's rule or records why none exists.\n- [ ] The measurement helper lives in tests/mosh_pacing.rs as a reusable function, and the backlog metric definition is written in the evidence file.\n- [ ] The evidence file records herdr server slow-client behaviour when its client stops reading (bounded or unbounded userland queue, coalescing, disconnect), with the source file:line it relies on; if the server keeps a userland queue beyond the socket, the backlog metric and the latency attribution say so.\n- [ ] Latency budget predicted from the measured numbers (150 ms up + server/socket backlog / R + about one window drain + 150 ms down) is written down; the chosen profile is one where the budget fits 1.5 s with the adaptive window, or the file says no such profile exists within the spec's R rule (then the R1-miss path in mosh-hex.5 applies and the D3 entry is pre-filled).\n- [ ] The file records that FIONREAD/Recv-Q saturates at the server socket's buffer size, and what that cap means for reading the D3 decision.\n- [ ] No product code changed.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:49:12Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:56:31Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.3",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:49:12Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-hex.3",
+        "depends_on_id": "mosh-hex.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T07:49:15Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex.2",
+    "title": "InflightWindow controller in src/mosh/window.rs",
+    "description": "Spec §1 and ## Key abstractions (InflightWindow entry, carried verbatim in the root epic digest). Pure sans-IO struct, mounted in src/mosh/mod.rs. Records first-transmission instants of fresh DATA chunk end offsets (bounded deque, \u003c= WINDOW/MAX_DATA_CHUNK entries); samples RTT only on ACKs advancing \u003e= ACK_EVERY_BYTES, never on replayed bytes (Karn); base_rtt = min on the current leg; per-epoch epoch_min; epoch ends at the first ACK covering the first byte sent after the epoch began; once per epoch: q = epoch_min - base_rtt; q \u003e 50 ms -\u003e window = max(FLOOR, window*3/4); else if window-limited this epoch -\u003e window = min(CAP, window + MAX_DATA_CHUNK); else hold. Constants FLOOR = 2*ACK_EVERY_BYTES (128 KiB), INITIAL = 256 KiB, CAP = WINDOW (2 MiB), TARGET_QUEUE_DELAY = 50 ms. Reset -\u003e INITIAL, no samples. Window-limited is an input reported by its owner. Epoch close yields a snapshot (window, base_rtt, epoch_min) the owner can take.\nowns: InflightWindow (type, constants, control law, responsibility comment).\nFiles: src/mosh/window.rs (new), src/mosh/mod.rs (one mod line, fork file).\nAcceptance:\n- [ ] The type carries its responsibility comment: what it owns, what it doesn't, where new control behaviour goes, its role (sans-IO delay-based controller).\n- [ ] Unit tests with a synthetic clock: queueing delay above 50 ms shrinks by 3/4 per epoch down to FLOOR; window-limited epochs with no queueing grow by one chunk up to CAP; an idle (not window-limited) link never grows; reset returns to INITIAL with no samples.\n- [ ] Unit tests: ACKs advancing \u003c ACK_EVERY_BYTES produce no sample; replayed bytes (after reset) are never sampled; implausible inputs (ACK below oldest record, empty deque) are ignored without panic.\n- [ ] No IO, no clock reads, no tracing inside window.rs.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:49:11Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:49:11Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.2",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:49:11Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex.1",
+    "title": "Link-emulation harness: delay-and-rate link knob for the fake ssh",
+    "description": "Spec §4. Add a `link` knob to tests/mosh_harness.rs holding `\u003cone-way delay ms\u003e \u003crate bytes/s\u003e`; when present the fake ssh pipes both directions of a session or plain leg through a Perl delay line the harness writes beside the fake ssh (each chunk read at t released at max(t+delay, prev_release + len/rate); single-threaded select loop, in-memory queue; same pattern as the existing `throttle` knob). Add Remote::set_link(delay, rate) and Remote::clear_link(). No loss emulation.\nowns: link knob + Remote::set_link/clear_link (harness API consumed by the measurement and acceptance tests).\nFiles: tests/mosh_harness.rs (and a small self-test in tests/mosh_pacing.rs or an existing tests/mosh_*.rs file).\nAcceptance:\n- [ ] With set_link(150, R) a session attaches and works (existing resume-style smoke passes through the delay line).\n- [ ] A self-test measures a round trip through the delay line of \u003e= 300 ms and a sustained rate within 20% of R (e.g. 1 MiB/s).\n- [ ] clear_link restores the undelayed path; no knob present = byte-identical behaviour to today.\n- [ ] No root, tc or new Cargo dependency; perl only, as the throttle knob already requires.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:49:10Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:53:06Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-hex.1",
+        "depends_on_id": "mosh-hex",
+        "type": "parent-child",
+        "created_at": "2026-10-28T07:49:10Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-hex"
+  },
+  {
+    "id": "mosh-hex",
+    "title": "Mosh Phase 2: adaptive keeper in-flight window",
+    "description": "Phase 2 of HERDR_MOSH_VISION.md: an adaptive, delay-based sender window keeps about one link of output in flight, so Ctrl-C under an output flood answers within 1.5 s at 300 ms RTT. Spec: docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-design.md\n\n## Global Constraints\n- All new code under src/mosh/ (mounted already) and tests/mosh_*.rs. Every edit to an upstream file is a one-statement hook tagged `// mosh-fork hook`; upstream diff budget \u003c= 20 lines (scripts/mosh-diff-budget.sh, currently 12; this phase plans 0 new hook lines).\n- No change to the herdr wire, PROTOCOL_VERSION or hello fields; no change to the session protocol (SESSION_PROTOCOL_VERSION stays 1; receiver ack policy ACK_EVERY_BYTES/ACK_EVERY untouched).\n- No new Cargo dependencies (libc is already present).\n- Tests only in fork files (src/mosh #[cfg(test)] modules and tests/mosh_*.rs).\n- Conventional-commit messages without AI co-author lines (repo AGENTS.md). Rust: no unwrap() in production code; tracing for logging.\n- Build needs zig 0.16.0 (~/.local/bin/zig). Sweep: cargo nextest run --locked --no-fail-fast \u0026\u0026 cargo clippy --all-targets --locked -- -D warnings \u0026\u0026 cargo fmt --check.\n\u003c!-- key-abstractions digest: begin --\u003e\n- InflightWindow: owns the in-flight window value, RTT sampling (Karn, ack-quantum gating), epochs and the delay-based grow/shrink law;\n  new control behaviour and constants are added in `src/mosh/window.rs` only;\n  callers never compare RTTs, apply window arithmetic or emit traces from it; they feed send/ACK/reset events through `SessionEndpoint` and read the current window or epoch snapshot.\n\u003c!-- key-abstractions digest: end --\u003e",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T07:48:32Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T07:48:32Z",
+    "labels": [
+      "sp:mosh-hex"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

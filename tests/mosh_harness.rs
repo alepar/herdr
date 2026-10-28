@@ -46,6 +46,71 @@ pub fn wait_for<F: FnMut() -> bool>(timeout: Duration, predicate: F) -> bool {
     wait_until(timeout, Duration::from_millis(50), predicate)
 }
 
+// ---- host-wide timing lock and socket probes ----
+
+/// Host-wide lock of every flood and link-emulation test (nextest runs each test in its own
+/// process, so concurrent floods would skew each other's clocks). One owner, one lock file:
+/// tests/mosh_pacing.rs and tests/mosh_resume.rs both take this. Held until dropped.
+pub struct TimingLock(#[allow(dead_code)] fs::File); // held only for its flock
+
+pub fn timing_lock() -> TimingLock {
+    use std::os::unix::io::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("herdr-mosh-pacing.lock"))
+        .expect("open the timing lock");
+    // SAFETY: flock(2) on a file descriptor this function owns.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "flock failed");
+    TimingLock(file)
+}
+
+/// `ss -xpn` rows of the `keepers` processes: (state, recv_q, send_q, local address).
+/// Empty when `ss` cannot be run (it is Linux-only).
+fn keeper_unix_sockets(keepers: &[libc::pid_t]) -> Vec<(String, u64, u64, String)> {
+    let tags: Vec<String> = keepers.iter().map(|pid| format!("pid={pid},")).collect();
+    let Ok(out) = std::process::Command::new("ss").arg("-xpn").output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| tags.iter().any(|tag| line.contains(tag.as_str())))
+        .filter_map(|line| {
+            // Netid State Recv-Q Send-Q Local-Address Local-Inode Peer-Address Peer-Inode Process
+            let f: Vec<&str> = line.split_whitespace().collect();
+            Some((
+                f.get(1)?.to_string(),
+                f.get(2)?.parse().ok()?,
+                f.get(3)?.parse().ok()?,
+                f.get(4)?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The backlog metric: Recv-Q of the keeper's server stream (its connected, unbound `*`
+/// socket to the herdr server; the keeper's leg sockets are accepted on its rendezvous path):
+/// bytes the server wrote that the keeper has not read, the same quantity as FIONREAD.
+/// `None` when `ss` fails or the stream is gone.
+pub fn keeper_server_backlog(keepers: &[libc::pid_t]) -> Option<u64> {
+    keeper_unix_sockets(keepers)
+        .into_iter()
+        .filter(|(state, _, _, local)| state == "ESTAB" && local == "*")
+        .map(|(_, recv_q, _, _)| recv_q)
+        .max()
+}
+
+/// Send-Q of the keeper's leg sockets: bytes the keeper wrote that the attacher has not read
+/// (a lower bound on the downstream bytes the keeper holds unacked).
+pub fn keeper_leg_send_q(keepers: &[libc::pid_t]) -> Option<u64> {
+    keeper_unix_sockets(keepers)
+        .into_iter()
+        .filter(|(state, _, _, local)| state == "ESTAB" && local != "*")
+        .map(|(_, _, send_q, _)| send_q)
+        .max()
+}
+
 fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
         "herdr-dev"
@@ -124,6 +189,83 @@ pub mod knob {
     pub const SPAWN_FAIL: &str = "spawn-fail";
     /// Session legs and plain bridges run through a ~1.3 MB/s throttle in both directions.
     pub const THROTTLE: &str = "throttle";
+    /// Session legs and plain bridges started while set run both directions through the
+    /// delay line (`<one-way delay ms> <rate bytes/s>`); see `Remote::set_link`. Checked
+    /// before `THROTTLE`.
+    pub const LINK: &str = "link";
+}
+
+/// Perl delay line the fake `ssh` puts on both directions of a leg while the `link` knob is
+/// set: a serializing bottleneck plus propagation delay. Each chunk read at `t` departs at
+/// `max(t, previous departure) + len / rate` and is written at `departure + delay`, so every
+/// chunk pays serialization, idle line or not. Single threaded (`select`), in-memory queue,
+/// no loss.
+const DELAY_LINE: &str = r##"use strict;
+use warnings;
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Time::HiRes qw(time);
+
+my ($delay_ms, $rate) = @ARGV;
+die "usage: delay-line.pl <one-way delay ms> <rate bytes/s>\n"
+    unless defined $rate && $rate > 0;
+my $delay = $delay_ms / 1000;
+binmode STDIN;
+binmode STDOUT;
+my $flags = fcntl(STDOUT, F_GETFL, 0) or die "fcntl: $!";
+fcntl(STDOUT, F_SETFL, $flags | O_NONBLOCK) or die "fcntl: $!";
+
+my @queue;            # [deliver_at, bytes], in departure order
+my $prev_depart = 0;
+my $pending = '';     # due bytes STDOUT has not taken yet
+my $eof = 0;
+while (1) {
+    my $now = time;
+    while (@queue && $queue[0][0] <= $now) {
+        $pending .= (shift @queue)->[1];
+    }
+    if (length $pending) {
+        my $n = syswrite(STDOUT, $pending);
+        if (defined $n) {
+            substr($pending, 0, $n, '');
+        } elsif (!$!{EAGAIN} && !$!{EINTR}) {
+            exit 0;    # the reader is gone
+        }
+    }
+    last if $eof && !@queue && !length $pending;
+    my ($rin, $win) = ('', '');
+    vec($rin, fileno(STDIN), 1) = 1 unless $eof;
+    vec($win, fileno(STDOUT), 1) = 1 if length $pending;
+    my $timeout;
+    if (@queue) {
+        $timeout = $queue[0][0] - time;
+        $timeout = 0 if $timeout < 0;
+    }
+    my ($rout, $wout) = ($rin, $win);
+    my $ready = select($rout, $wout, undef, $timeout);
+    next if $ready <= 0;
+    if (!$eof && vec($rout, fileno(STDIN), 1)) {
+        my $n = sysread(STDIN, my $buf, 16384);
+        if (!defined $n) {
+            $eof = 1 unless $!{EINTR} || $!{EAGAIN};
+        } elsif ($n == 0) {
+            $eof = 1;
+        } else {
+            my $t = time;
+            my $start = $t > $prev_depart ? $t : $prev_depart;
+            $prev_depart = $start + $n / $rate;
+            push @queue, [$prev_depart + $delay, $buf];
+        }
+    }
+}
+close STDOUT;
+"##;
+
+/// Write the delay-line script into `dir` and return its path; run it as
+/// `perl <path> <one-way delay ms> <rate bytes/s>`.
+pub fn write_delay_line(dir: &Path) -> PathBuf {
+    let path = dir.join("delay-line.pl");
+    fs::write(&path, DELAY_LINE).unwrap();
+    path
 }
 
 /// A disposable remote herdr server plus the fake `ssh` that reaches it.
@@ -266,6 +408,8 @@ impl Remote {
         let knobs = sh_quote(&base.join("knobs"));
         let argv = sh_quote(&base.join("ssh-argv"));
         let legs = sh_quote(&base.join("legs.log"));
+        let delay_line = sh_quote(&write_delay_line(&base.join("bin")));
+        let links = sh_quote(&base.join("links.log"));
         let marker = "printf '\\nherdr-remote-output-ready:1\\n'";
         let throttle = "perl -e '$|=1; while (my $n = sysread(STDIN,$b,65536)) { syswrite(STDOUT,$b); select(undef,undef,undef,$n/1300000); }'";
         write_executable(
@@ -307,6 +451,12 @@ if [ "$kind" = session ]; then
   esac
   if take fake-end; then {marker}; cat "$K/fake-end.bytes"; exit 0; fi
 fi
+if [ "$kind" != other ] && [ -e "$K/link" ]; then
+  read -r delay rate < "$K/link"
+  printf '%s %s %s %s %s\n' "$FAKE_SSH_CLIENT" "$kind" "$$" "$delay" "$rate" >> {links}
+  perl {delay_line} "$delay" "$rate" | /bin/sh -c "$last" | perl {delay_line} "$delay" "$rate"
+  exit $?
+fi
 if [ "$kind" != other ] && [ -e "$K/throttle" ]; then
   {throttle} | /bin/sh -c "$last" | {throttle}
   exit $?
@@ -324,6 +474,8 @@ exec /bin/sh -c "$last"
                 legs = legs,
                 marker = marker,
                 throttle = throttle,
+                delay_line = delay_line,
+                links = links,
             ),
         );
         write_executable(
@@ -438,6 +590,31 @@ exec "$REAL" "$@"
 
     pub fn clear_knob(&self, name: &str) {
         let _ = fs::remove_file(self.base.join("knobs").join(name));
+    }
+
+    /// Route session legs and plain bridges started from now on through the delay line:
+    /// `one_way_delay_ms` each way and `rate` bytes/s of serialization. Running legs keep
+    /// their path.
+    pub fn set_link(&self, one_way_delay_ms: u64, rate: u64) {
+        assert!(rate > 0, "link rate must be positive");
+        self.set_knob(knob::LINK, &format!("{one_way_delay_ms} {rate}\n"));
+    }
+
+    /// Legs started from now on go direct again.
+    pub fn clear_link(&self) {
+        self.clear_knob(knob::LINK);
+    }
+
+    /// `<kind> <ssh pid> <delay ms> <rate>` for every leg or bridge of `client` that went
+    /// through the delay line (`kind` is `session` or `plain`), in start order.
+    pub fn linked_legs(&self, client: &str) -> Vec<String> {
+        let prefix = format!("{client} ");
+        fs::read_to_string(self.base.join("links.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Argument lines (`$*`) of every ssh the given client ran, in order.
@@ -838,6 +1015,13 @@ impl Client {
     /// The emulated visible screen.
     pub fn screen(&self) -> String {
         terminal_screen::text(&self.output_bytes(), self.size.0, self.size.1)
+    }
+
+    /// The emulated visible screen after only the first `len` output bytes (a stopwatch can
+    /// find the first output prefix that shows something without paying parse time per poll).
+    pub fn screen_prefix(&self, len: usize) -> String {
+        let output = self.output_bytes();
+        terminal_screen::text(&output[..len.min(output.len())], self.size.0, self.size.1)
     }
 
     /// Everything the client wrote to its terminal, lossily decoded (includes text printed

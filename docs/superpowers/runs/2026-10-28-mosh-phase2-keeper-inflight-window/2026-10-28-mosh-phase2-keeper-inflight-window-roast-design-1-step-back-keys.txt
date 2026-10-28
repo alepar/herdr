@@ -1,0 +1,7 @@
+r1 [Should-fix] §5 Acceptance test 'Ctrl-C under flood' (`yes; echo <marker>`)
+r1 [Should-fix] §5 'No throughput regression' (LAN window grows to >= 1 MiB) with §1 grow rule and Key abstractions 'Gap settled here'
+r1 [Should-fix] §1 RTT sampling gate ('takes an RTT sample on each ACK that advances the acked offset by at least ACK_EVERY_BYTES')
+r1 [Should-fix] §1 'a bounded deque, at most WINDOW / MAX_DATA_CHUNK entries' with §3 reads 'rounded up to 4 KiB'
+r1 [Should-fix] §4 'Each chunk read at time t is released at max(t + delay, previous release + len / rate)'
+r1 [Nit] §1 'base_rtt, the minimum sample on the current leg'; reset only on leg up/down
+r1 [Should-fix] §1 Constants 'FLOOR = 2 * ACK_EVERY_BYTES (128 KiB)' vs §1 Considered 'too large for a 128 KiB/s link'; §5 R rule

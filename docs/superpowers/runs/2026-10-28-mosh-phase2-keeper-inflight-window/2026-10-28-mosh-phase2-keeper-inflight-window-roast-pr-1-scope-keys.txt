@@ -1,0 +1,4 @@
+[Nit] tests/mosh_resume.rs:452; tests/mosh_resume.rs:461
+[Nit] tests/mosh_pacing.rs:522; tests/mosh_pacing.rs:656; tests/mosh_pacing.rs:511
+[Nit] src/mosh/remote/keeper.rs:1606; src/mosh/remote/keeper.rs:1620
+[Nit] tests/mosh_pacing.rs:263; tests/mosh_pacing.rs:294; tests/mosh_pacing.rs:57

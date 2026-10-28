@@ -14,6 +14,7 @@ pub(in crate::remote) mod remote;
 mod ring;
 mod session;
 mod ssh_leg;
+mod window;
 
 use super::{ManagedSshOptions, RemoteHerdr, RemoteSsh, SshStdioBridge};
 use std::io;

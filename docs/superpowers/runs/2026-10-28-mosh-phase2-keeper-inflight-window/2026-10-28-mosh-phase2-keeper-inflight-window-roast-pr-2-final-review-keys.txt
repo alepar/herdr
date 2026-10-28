@@ -1,0 +1,11 @@
+review: not ready
+[Must-fix] Human decision: accept closing Phase 2 on the amended bounds (Ctrl-C <= 2.5 s, goodput >= 0.6 R) instead of the epic's 1.5 s and 0.8 R, with server pacing / SO_SNDBUF and goodput at FLOOR parked.
+[Must-fix] Human decision: accept the reversal of Phase 1's drain-while-down policy (keeper reads capped at INITIAL while down, keeper ring overflow unreachable) recorded only as an orchestrator decision.
+[Must-fix] Remove the Co-Authored-By trailers from the six Phase 2 commits (rewrite or squash) per AGENTS.md and the epic constraint.
+[Must-fix] Make the opt-in and tool-missing skips in tests/mosh_pacing.rs and tests/mosh_resume.rs visible (for example #[ignore] with a documented opt-in run) or have the human explicitly accept silent-pass skips.
+[Must-fix] untested: whole-epic review incomplete; bounded inspected hunks only; all remaining hunks and provenance gaps remain unreviewed
+[Must-fix] untested: Whole-range review outstanding: bounded route; provenance gaps for Phase 1 run.md:43 inv-c723b6b8 and run.md:56 inv-ed080a9e (collection, final report, failed assembly archive, digest.md) unresolved.
+[Must-fix] untested: Phase 1 product code (session.rs, keeper.rs, local_bridge.rs, ssh_leg.rs, attacher.rs, remote/mod.rs, ring.rs, outage.rs, link_frames.rs, mosh/mod.rs) not reviewed as whole hunks in this invocation.
+[Must-fix] untested: Phase 2 acceptance tests do not run in the default suite (HERDR_MOSH_PACING_TESTS opt-in); opt-in run logs are not retained in the repo.
+[Must-fix] untested: Long outage behaviour after the drain-while-down reversal: unbounded server control-lane growth and any server-side send timeout on a stalled keeper reader are untested.
+[Must-fix] untested: No full-suite measurement of this branch exists yet (deferred to the caller).
