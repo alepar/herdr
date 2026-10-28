@@ -17,7 +17,7 @@ use super::quic::{
 };
 use super::quic_bootstrap::QuicBootstrap;
 use super::ssh_leg::{classify_leg, Leg, LegDialer, LegEndReport, LegError, LegKind, SshLegDialer};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +36,26 @@ struct QuicClient {
     // Endpoints first: they drop before the runtime.
     endpoints: Mutex<[Option<quinn::Endpoint>; 2]>,
     rt: Arc<QuicRuntime>,
+}
+
+/// Notes that the keeper answered on the stream. The keeper binds a QUIC token when its HELLO
+/// check admits it, before it replies with WELCOME or any other END, so an answer other than
+/// the `quic-token` refusal (which `classify` turns into a dropped cache) means the token is
+/// bound. The bridge never tells the dialer when WELCOME arrives, so this is the dialer's
+/// own evidence.
+struct HeardRecv {
+    inner: BlockingRecv,
+    heard: Arc<AtomicBool>,
+}
+
+impl io::Read for HeardRecv {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.heard.store(true, Ordering::SeqCst);
+        }
+        Ok(n)
+    }
 }
 
 type OpenedStream = (quinn::Connection, quinn::SendStream, quinn::RecvStream);
@@ -88,7 +108,12 @@ impl QuicClient {
 
     /// A `Leg` over one opened stream. Teardown closes the connection; the leg's end report
     /// carries the connection's close reason.
-    fn leg(self: &Arc<Self>, opened: OpenedStream, token: &QuicBootstrap) -> Leg {
+    fn leg(
+        self: &Arc<Self>,
+        opened: OpenedStream,
+        token: &QuicBootstrap,
+        heard: Arc<AtomicBool>,
+    ) -> Leg {
         let (conn, send, recv) = opened;
         let handle = self.rt.handle();
         let close_reason = Arc::new(Mutex::new(None));
@@ -101,7 +126,10 @@ impl QuicClient {
         let probe = conn.clone();
         let client = Arc::clone(self);
         Leg::new(
-            Box::new(BlockingRecv::new(handle.clone(), recv)),
+            Box::new(HeardRecv {
+                inner: BlockingRecv::new(handle.clone(), recv),
+                heard,
+            }),
             Box::new(BlockingSend::new(handle, send)),
             Box::new(move |_kill, _deadline| {
                 // Holding the client keeps the runtime alive until the leg is gone.
@@ -128,6 +156,9 @@ pub(super) struct QuicLegDialer {
     cache: Option<QuicBootstrap>,
     /// A QUIC leg reached WELCOME with the cached token (the keeper then keeps it for the session).
     token_bound: Cell<bool>,
+    /// Set once the last QUIC leg returned heard from the keeper; folded into `token_bound` at
+    /// the next dial.
+    last_heard: RefCell<Option<Arc<AtomicBool>>>,
     /// The last QUIC leg died before WELCOME: the next dial goes straight to ssh.
     skip_quic_next: Cell<bool>,
     /// A reconnect QUIC leg got `END quic-token`: drop the cache at the next dial.
@@ -149,6 +180,7 @@ impl QuicLegDialer {
             client: QuicClient::new()?,
             cache: None,
             token_bound: Cell::new(false),
+            last_heard: RefCell::new(None),
             skip_quic_next: Cell::new(false),
             clear_cache: Cell::new(false),
             last_leg_quic: Cell::new(false),
@@ -173,7 +205,9 @@ impl QuicLegDialer {
             .next()
             .ok_or_else(|| io::Error::other("dial host resolved to no address"))?;
         let opened = self.client.connect(addr, bootstrap, self.grace, bound)?;
-        Ok(self.client.leg(opened, bootstrap))
+        let heard = Arc::new(AtomicBool::new(false));
+        *self.last_heard.borrow_mut() = Some(Arc::clone(&heard));
+        Ok(self.client.leg(opened, bootstrap, heard))
     }
 
     /// The handshake bound, shortened to what the setup deadline leaves; `None` when none is left.
@@ -210,6 +244,12 @@ impl LegDialer for QuicLegDialer {
         setup_deadline: Option<Instant>,
         stop: &AtomicBool,
     ) -> Result<Leg, LegError> {
+        // Before the refusal check below: a refused token also "answered", and clearing the
+        // cache then resets the binding.
+        let heard = self.last_heard.borrow_mut().take();
+        if heard.is_some_and(|heard| heard.load(Ordering::SeqCst)) {
+            self.token_bound.set(true);
+        }
         if self.clear_cache.take() {
             self.cache = None;
             self.token_bound.set(false);
@@ -693,6 +733,56 @@ mod tests {
         assert_eq!(cached.token, stale.token, "a bound token is kept");
         assert_eq!(cached.fingerprint, fresh.fingerprint);
         assert_eq!(cached.port, fresh.port);
+    }
+
+    #[test]
+    fn answered_quic_leg_binds_the_token_for_the_next_refresh() {
+        let server = server(Serve::Echo);
+        let first = server.bootstrap(12);
+        let fresh = QuicBootstrap {
+            port: server.port,
+            fingerprint: Fingerprint([0x55; 32]),
+            token: QuicToken([13; 32]),
+        };
+        let mut d = dialer(Some(fresh));
+        d.cache = Some(first);
+        // A QUIC leg that the keeper answers, then ends without the bridge classifying it
+        // (the bridge only classifies legs that end before WELCOME).
+        let mut leg = dial(&mut d, LegKind::Reconnect);
+        assert_eq!(echo(&mut leg, "answered\n"), "answered\n");
+        drop(leg);
+        // The next dial cannot pin the server (wrong fingerprint), so ssh brings a refresh.
+        d.cache = Some(QuicBootstrap {
+            fingerprint: Fingerprint([0x66; 32]),
+            ..first
+        });
+        dial(&mut d, LegKind::Reconnect);
+        let cached = d.cache.expect("cache");
+        assert_eq!(cached.token, first.token, "the bound token is kept");
+        assert_eq!(cached.fingerprint, fresh.fingerprint);
+        assert_eq!(cached.port, fresh.port);
+    }
+
+    #[test]
+    fn silent_quic_leg_leaves_the_token_unbound() {
+        let server = server(Serve::Echo);
+        let first = server.bootstrap(14);
+        let fresh = QuicBootstrap {
+            port: server.port,
+            fingerprint: Fingerprint([0x77; 32]),
+            token: QuicToken([15; 32]),
+        };
+        let mut d = dialer(Some(fresh));
+        d.cache = Some(first);
+        // The leg is dialed but the keeper never answers on it.
+        let leg = dial(&mut d, LegKind::Reconnect);
+        drop(leg);
+        d.cache = Some(QuicBootstrap {
+            fingerprint: Fingerprint([0x88; 32]),
+            ..first
+        });
+        dial(&mut d, LegKind::Reconnect);
+        assert_eq!(d.cache, Some(fresh), "an unanswered token is replaced");
     }
 
     #[test]
