@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_while_down_captures_server_output() {
+    fn reads_stop_at_initial_while_down_and_replay_in_order() {
         let h = Harness::new();
         let mut local = new_session(&h);
         let conn = h.server().conn(0);
@@ -1603,29 +1603,52 @@ mod tests {
         h.wait_trace("leg_down", "", "");
         let data = pattern(4 << 20);
         conn.write_async(data.clone());
-        assert!(wait_until(Duration::from_secs(20), || conn
-            .written
-            .load(Ordering::SeqCst)
-            == data.len()));
+        thread::sleep(Duration::from_millis(700));
+        // The keeper reads the reset window and stops; the rest sits in socket buffers on the
+        // server side (same slack as `window_limits_server_reads_with_leg_up`).
+        let written = conn.written.load(Ordering::SeqCst);
+        assert!(written >= INITIAL / 2, "keeper did not read while down: {written}");
+        assert!(
+            written <= INITIAL + (1 << 20) + 200_000 && written < data.len(),
+            "keeper read past the reset window while down: {written}"
+        );
+        assert!(!h.trace_has("session_end", "", ""), "{:?}", h.trace());
         local.start_leg(60_000, None);
         local.wait_welcomed(WelcomeStatus::Resumed);
         local.wait_received(data.len());
         assert_eq!(local.received, data);
+        let resume = h
+            .trace()
+            .into_iter()
+            .find(|l| l["event"] == "resume")
+            .expect("resume trace");
+        let replayed = resume["replayed_down"].as_u64().unwrap_or(u64::MAX);
+        assert!(replayed <= INITIAL as u64, "{resume}");
     }
 
     #[test]
-    fn overflow_ends_session_next_resume_unknown() {
+    fn outage_past_the_ring_cap_keeps_the_session_and_replays_in_order() {
         let h = Harness::new();
         let mut local = new_session(&h);
         let conn = h.server().conn(0);
         local.drop_leg();
         h.wait_trace("leg_down", "", "");
-        // 17 MiB against a 16 MiB ring. Block size 100_003 avoids landing exactly on the cap.
-        conn.write_async(pattern(17 << 20));
-        h.wait_trace("session_end", "reason", end_reason::RING_OVERFLOW);
-        assert!(wait_until(Duration::from_secs(5), || conn.saw_eof()));
+        // 17 MiB against a 16 MiB ring: the ring never fills while down.
+        let data = pattern(17 << 20);
+        conn.write_async(data.clone());
+        thread::sleep(Duration::from_secs(1));
+        let written = conn.written.load(Ordering::SeqCst);
+        assert!(
+            (INITIAL / 2..=INITIAL + (1 << 20) + 200_000).contains(&written) && written < data.len(),
+            "keeper read past the reset window while down: {written}"
+        );
+        assert!(!h.trace_has("session_end", "reason", end_reason::RING_OVERFLOW));
+        assert!(!conn.saw_eof());
         local.start_leg(60_000, None);
-        assert!(local.wait(Duration::from_secs(5), |l| l.refused));
+        local.wait_welcomed(WelcomeStatus::Resumed);
+        let got = local.wait(Duration::from_secs(60), |l| l.received.len() >= data.len());
+        assert!(got, "received {} of {} bytes", local.received.len(), data.len());
+        assert_eq!(local.received, data);
     }
 
     #[test]
