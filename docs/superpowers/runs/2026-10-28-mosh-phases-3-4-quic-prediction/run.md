@@ -39,3 +39,7 @@ codeBuckets (invocation 2, inv-e338c8bb-cb3c-4e4e-a409-7e73406537a6, stopReason 
   sweep: SWEEP DEFERRED (caller-owned)
   runFailures: cli agent_start_waits_for_a_new_pane_shell / agent_start_stops_retrying_when_the_pane_shell — fail at base d04698e7 too (pre-existing; gap open)
   processSweep: unknown (cwd inspection failed for several pids); worktrees kept: task worktrees under .worktrees/
+codeBuckets (invocation 3, inv-a2e7e590-385f-46d8-877c-bbf1b6ffc341, stopReason ready-drained):
+  completed: invocation 2's set + mosh-19g.2.19 mosh-19g.2.7
+  escalated: mosh-19g.3.5 (blocker mosh-3t9 → product fix mosh-19g.3.10)
+  runFailures: mosh_resume a_dense_flood_through_an_outage… fails and slow_live_leg_carries_16_mib… hangs (also at in-run base c6dfa1f9; checking at run base 59f7d8fc); cli agent_start_* (pre-existing at d04698e7)
