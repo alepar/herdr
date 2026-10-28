@@ -86,12 +86,13 @@ New upstream lines, each one tagged statement:
 |---|---|
 | Input tap | 1 |
 | Fast-path guard | 1 |
-| Server input-applied | 1 |
-| Server render-sent | 1–2 |
-| Client disconnect | 1 |
+| Server input count (receipt, client_transport.rs:1196) | 1 |
+| `echo_due` in the headless main loop | 1 |
+| `echo_deadline` folded into `next_deadline` | 1 |
+| Client disconnect (`remove_client`) | 1 |
 | `x-mosh-echo-v1` status line | 1 |
 
-That is 7 added lines (the observe and paint lines are edits). Running total: 12 today + 3a 1 + 3b 4 + Phase 4 7 + the mosh-19g.5 mount line ≈ 25 of 30.
+That is 7 added lines (the observe and paint lines are edits; the render-sent hook was dropped for deadline-driven emission). Running total: 12 today + 3a 1 (status) + 3b 4 (status, dispatch, ServerEvent variant, headless arm) + Phase 4 7 + the mosh-19g.5 mount line ≈ 25 of 30. The -G parse and start_ui_bridge changes live in src/mosh and cost no upstream line.
 
 ### 5. Acceptance and tests
 

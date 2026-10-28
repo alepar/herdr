@@ -7,8 +7,8 @@ Research brief: `inputs/seam-brief.md`.
 ## Goal
 
 A remote session's leg runs over QUIC when the remote supports it and UDP gets through. It survives
-an address change and an idle gap within the session grace, resuming within about one RTT of the
-link returning, and it falls back to the ssh leg within 3 s when QUIC is unavailable.
+an address change and an idle gap under 30 s on the same connection (echo within 2 RTT of the link
+returning), redials QUIC after a longer gap within grace, and it falls back to the ssh leg within 3 s when QUIC is unavailable.
 
 ## Problem description
 
@@ -139,9 +139,19 @@ subepic owns.
 - Fallback: with the relay at 100 % loss, the session comes up on ssh within the ssh time plus 3.5 s.
 - Address change: `relay.rebind()` mid-session; the next keystroke's echo appears within 2 RTT plus
   one render after the rebind (150 ms one-way delay profile).
-- Idle gap: the relay blackholes for 20 s within a 60 s grace, then restores. The echo appears within
-  2 RTT plus one render after restore, with no new ssh process spawned. The 10-minute case from the
-  vision is the same code path, with grace ≥ 10 min (the idle timeout equals the grace).
+- Short idle gap: the relay blackholes for 20 s, then restores. The same QUIC leg survives (no new
+  leg, no ssh process) and the echo appears within 2 RTT plus one render after restore. This needs
+  the QUIC silence window below.
+- Long idle gap: the relay blackholes for 60 s within a 120 s grace and calls `rebind()` during the gap,
+  then restores. A new QUIC leg (not ssh) is admitted and the echo appears within 3 RTT plus one
+  reconnect backoff step plus one render after restore.
+- **QUIC silence window (coverage round 1):** Phase 1's bridge silence verdict would end a QUIC leg
+  during a 20 s gap. A `Leg` may carry a silence-timeout override that `LocalBridge` honours; QUIC
+  legs set 30 s (ssh legs keep Phase 1's value). Gaps under it ride QUIC migration on the same
+  connection; longer ones end the leg and reconnect QUIC-first.
+- **Bootstrap refresh (coverage round 1):** ssh reconnect legs run in bootstrap mode too, and a fresh
+  `QuicBootstrap` replaces the cache, so a transient UDP failure at leg 0 does not leave the session
+  ssh-only for life.
 - Mid-session UDP block: the relay goes to 100 % loss for longer than the silence timeout. The
   reconnect leg falls back to ssh and the session continues.
 - Old remote: with `strip-capability` the session is ssh-only.

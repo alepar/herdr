@@ -2,9 +2,11 @@
 
 ## Goal
 
-A herdr remote session can run over a QUIC leg that survives a network switch or a long suspend
-and resumes within about one RTT. Under 10 % packet loss, typing and output keep flowing instead of
-stalling behind lost render frames. With prediction enabled at 150 ms RTT, most printable keys
+A herdr remote session can run over a QUIC leg that survives a network switch or a long suspend:
+a switch or a gap under 30 s shows the next echo within 2 RTT of the link returning on the same
+connection, and a longer suspend within grace redials QUIC (not ssh) within 3 RTT plus one reconnect
+backoff step. Under 10 % packet loss, typing and output keep flowing instead of
+stalling behind lost render frames. With prediction enabled at 150 ms one-way delay, most printable keys
 appear locally within 5 ms, and wrong predictions are cleared within one RTT plus mosh's 50 ms echo delay and one render (refined in the Phase 4 design).
 
 Builds on Phases 1 and 2 (`docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/`,
@@ -173,8 +175,10 @@ the link.
 
 ### 6. Acceptance (agent-set bounds, measured not tuned)
 
-- **3a:** a relay rebind mid-session, and a 10 minute idle within grace, both resume and show the next
-  keystroke's echo within 2 RTT of the link returning. Fallback: with UDP blocked, the session comes
+- **3a:** a relay rebind mid-session, and an idle gap under the 30 s QUIC silence window, both resume on
+  the same QUIC connection and show the next keystroke's echo within 2 RTT of the link returning. A
+  longer gap within grace (up to 10 min) redials QUIC, never ssh, within 3 RTT plus one backoff step
+  (coverage round 1). Fallback: with UDP blocked, the session comes
   up over ssh within 3 s plus the ssh time.
 - **3b:** at 10 % loss and 150 ms one-way delay, typing produces visible output within 2 s, and
   `yes`-style output keeps advancing. Measured against the same profile over the ssh leg.

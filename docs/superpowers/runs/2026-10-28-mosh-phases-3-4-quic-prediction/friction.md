@@ -4,3 +4,4 @@
 - [2026-10-28 design/3b] 3b promotion review: SPLIT 2.3 → artifact mosh-19g.2.8; PROMOTE 2.6 (size) resolved by splitting into 2.6 (lane reader) + mosh-19g.2.9 (LocalBridge) instead of a nested brainstorm; RenderArrival pinned to 2.5; SRTT and probe plumbing pinned to mosh-19g.2.9
 - [2026-10-28 design/4] Phase 4 promotion review ISSUES: LinkStatus.echo moved to 3.2 (+dep 3.4←3.2), trace events moved to 3.2, budget recount ≈25/30 written into spec §4, root goal wrong-prediction bound loosened to 1 RTT + 50 ms + one render
 - [2026-10-28 design/coverage] coverage-inputs: header 'Bead: <id>.' (sentence-final period) is captured into the id → unmatched-spec; the Bead regex takes [^ \t]* so punctuation leaks in — moved Bead: to its own line
+- [2026-10-28 design/coverage r1] both reviewers used their NEEDS-SPEC re-run (only Goal sections + first sentences reach them, so owns/acceptance detail in long bead descriptions was invisible); reviewer 2's re-run asked again
