@@ -1,7 +1,8 @@
 //! End-to-end resume behaviour of `herdr --remote` over a fake ssh (mosh-dqw.9).
 //!
 //! Each test starts its own remote server and fake ssh (see `mosh_harness`), so they run in
-//! parallel. Every wait is bounded.
+//! parallel. Every wait is bounded. The Linux-only `ss` backlog observation prints a `SKIP:`
+//! line to stderr when `ss` is missing (see `mosh_pacing`), never a silent pass.
 
 #![cfg(unix)]
 
@@ -478,11 +479,11 @@ fn slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session() {
 
 /// Linux-only observation of the outage test: the keeper stops reading at the reset window,
 /// so the server socket fills to its cap and stays there (`ss -xpn` Recv-Q of the keeper's
-/// server stream). Skipped with a note when `ss` cannot be run.
+/// server stream). Prints a `SKIP:` line to stderr and returns when `ss` cannot be run.
 #[cfg(target_os = "linux")]
 fn assert_server_backlog_plateaus(remote: &Remote, client: &Client) {
     if std::process::Command::new("ss").arg("-V").output().is_err() {
-        eprintln!("skipped the server-backlog plateau check: `ss` is not available");
+        eprintln!("SKIP: server-backlog plateau check: `ss` is not available");
         return;
     }
     let keepers = remote.keeper_pids();
