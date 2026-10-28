@@ -1,0 +1,44 @@
+== run 1
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+────────────
+ Nextest run ID 22b25c2f-7a61-4b49-86c8-3d5e5db8ba2f with nextest profile: default
+    Starting 4 tests across 1 binary (21 tests skipped)
+        PASS [  21.099s] (1/4) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+        PASS [  29.555s] (2/4) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        PASS [  51.488s] (3/4) herdr::mosh_supersede screen_changes_every_second_over_20s
+        SLOW [> 60.000s] (───) herdr::mosh_supersede ssh_only_comparison_logged
+        PASS [  81.254s] (4/4) herdr::mosh_supersede ssh_only_comparison_logged
+────────────
+     Summary [  81.255s] 4 tests run: 4 passed (1 slow), 21 skipped
+run 1 exit 0
+== run 2
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+────────────
+ Nextest run ID b0602223-382f-45bc-ae73-45964b336585 with nextest profile: default
+    Starting 4 tests across 1 binary (21 tests skipped)
+        PASS [  22.528s] (1/4) herdr::mosh_supersede screen_changes_every_second_over_20s
+        PASS [  51.990s] (2/4) herdr::mosh_supersede ssh_only_comparison_logged
+        SLOW [> 60.000s] (───) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        SLOW [> 60.000s] (───) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+        PASS [  73.337s] (3/4) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+        PASS [  81.838s] (4/4) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+────────────
+     Summary [  81.838s] 4 tests run: 4 passed (2 slow), 21 skipped
+run 2 exit 0
+== run 3
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+────────────
+ Nextest run ID 0af61eab-4253-4e35-bfd7-1abb3a9c41d6 with nextest profile: default
+    Starting 4 tests across 1 binary (21 tests skipped)
+        PASS [   8.143s] (1/4) herdr::mosh_supersede typed_marker_visible_within_2s_while_flooding
+        PASS [  29.385s] (2/4) herdr::mosh_supersede zero_overdue_gaps_at_0pct_loss_over_20s
+        PASS [  57.928s] (3/4) herdr::mosh_supersede ssh_only_comparison_logged
+        SLOW [> 60.000s] (───) herdr::mosh_supersede screen_changes_every_second_over_20s
+        PASS [  79.553s] (4/4) herdr::mosh_supersede screen_changes_every_second_over_20s
+────────────
+     Summary [  79.553s] 4 tests run: 4 passed (1 slow), 21 skipped
+run 3 exit 0
+done
