@@ -118,3 +118,8 @@ Graph, cleanup and evidence gaps:
 - Design-roast r2 punch list. The smell: 3 Should-fix items were applied inline to the spec and beads with no re-roast (source: run.md `stepBackDesign-round-2`; findings-ledger-design.md).
 - Commit-message rewrite. The smell: every Phase 2 SHA changed after review and sweep, though trees are identical and the old head is tagged `p2-before-msg-rewrite` (source: friction.md [phase 6]).
 - Sweep fix pass, regression pass, task fix passes, parked task findings, DONE_WITH_CONCERNS: none (source: run.md has no `sweepFix:`/`regressionPass-round-<N>`; ledger `Metrics: fix-pass — entered 0`, `parked 0`; no DONE_WITH_CONCERNS in the implementer reports).
+
+## Phase-7 cleanup
+
+- Finish: merged into `mosh` @ a900f967 and pushed to `fork` (human choice: merge, accepted as is). Upstream-feedback draft sent to the laptop superpowers agent (herdr-threads message mnSGIFED8uqR), not filed on GitHub.
+- Retained (process-unknown, not removed): the 12 task worktrees under `.worktrees/super-auto-mosh-phase2-keeper-inflight-window/.worktrees/`, that parent, `/tmp/sp-fd54fa48`, and the run worktree itself. Reason: `remove-task-worktree --sweep` exit 4 on uninspectable sshd-session pids 1097853 and 403694 (LAN client sessions, not run-owned). Next safe check: confirm those pids are unrelated, then `git worktree remove` each kept path and delete the `task-mosh-hex.*` branches.
