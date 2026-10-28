@@ -241,6 +241,8 @@ fn serve_connection(
         stream: Some(stream),
         client: None,
         leg: None,
+        standby: None,
+        ghost: None,
         leg_gen: 0,
         stage: Stage::Dialing,
         kind: LegKind::Initial,
@@ -452,6 +454,12 @@ struct Conn<'a> {
     stream: Option<LocalStream>,
     client: Option<ClientIo>,
     leg: Option<LegIo>,
+    /// An ssh leg held in reserve while a QUIC leg 0 is tried: switched to if that leg ends
+    /// before `WELCOME`, dropped at `WELCOME`.
+    standby: Option<Leg>,
+    /// The token of an abandoned leg-0 attempt, named as `previous_token` in the next HELLO only
+    /// (the keeper may already have admitted that session).
+    ghost: Option<Token>,
     leg_gen: u64,
     stage: Stage,
     kind: LegKind,
@@ -592,6 +600,13 @@ impl Conn<'_> {
             );
             return;
         };
+        // The token and silence limit belong to the leg; the bridge only passes them on.
+        self.endpoint
+            .set_quic_token(leg.admission_token().map(str::to_owned));
+        self.endpoint.set_silence_timeout(leg.silence_timeout());
+        if let Some(standby) = leg.take_standby() {
+            self.standby = Some(standby);
+        }
         self.leg_gen += 1;
         let gen = self.leg_gen;
         let events = self.tx.clone();
@@ -638,10 +653,10 @@ impl Conn<'_> {
         });
 
         let now = Instant::now();
-        let previous = match self.kind {
+        let previous = self.ghost.take().or_else(|| match self.kind {
             LegKind::Initial => last_token(&self.params.local_socket),
             LegKind::Reconnect => None,
-        };
+        });
         let grace_ms = u32::try_from(self.params.grace.as_millis()).unwrap_or(u32::MAX);
         let hello = self.endpoint.hello(now, grace_ms, previous);
         let _ = leg_tx.try_send(hello);
@@ -681,9 +696,32 @@ impl Conn<'_> {
         let Some(report) = self.kill_leg(kill) else {
             return;
         };
+        if let Some(standby) = self.standby.take() {
+            self.switch_to_standby(standby);
+            return;
+        }
         self.endpoint.leg_down();
         let err = lock_dialer(self.dialer).classify(self.kind, &report);
         self.dial_failed(err);
+    }
+
+    /// Leg 0 (QUIC) ended before `WELCOME`: send a leg-0-style HELLO on the ssh standby, with a
+    /// fresh session token and the abandoned attempt's token as `previous_token`, so the keeper's
+    /// ghost eviction removes a session it may already have admitted. Nothing was read from the
+    /// client yet (the pre-`WELCOME` gate), so a fresh endpoint loses nothing. Phase 1's leg-0
+    /// table applies only if the standby also ends before `WELCOME`.
+    fn switch_to_standby(&mut self, standby: Leg) {
+        let token = match Token::generate() {
+            Ok(token) => token,
+            Err(err) => {
+                self.end_session("leg0-failed", Some(err));
+                return;
+            }
+        };
+        tracing::debug!("mosh leg 0 ended before WELCOME; switching to the ssh standby");
+        self.ghost = Some(self.endpoint.token());
+        self.endpoint = SessionEndpoint::new(Role::Local, token, LOCAL_RING_CAP);
+        self.begin_leg(standby);
     }
 
     // ---- inbound leg bytes ----------------------------------------------------------------
@@ -822,6 +860,9 @@ impl Conn<'_> {
     fn on_welcomed(&mut self, status: WelcomeStatus) {
         if let Some(io) = &mut self.leg {
             io.leg.mark_welcome();
+        }
+        if let Some(standby) = self.standby.take() {
+            reap_in_background(standby);
         }
         let status_name = match status {
             WelcomeStatus::New => "new",
@@ -2037,6 +2078,77 @@ mod tests {
         Keeper(FakeKeeper, KLeg),
         Fail(LegError),
         Exit { code: i32, stderr: &'static str },
+        /// A keeper leg whose bytes toward the bridge never arrive: the keeper reads HELLO and
+        /// answers, but the bridge's leg reads EOF (WELCOME lost with the leg).
+        LostWelcome(FakeKeeper, KLeg),
+        /// The inner script's leg, passed through a decorator (token, silence, standby).
+        Decorated(Box<LegScript>, Box<dyn FnOnce(Leg) -> Leg + Send>),
+    }
+
+    fn decorated(script: LegScript, f: impl FnOnce(Leg) -> Leg + Send + 'static) -> LegScript {
+        LegScript::Decorated(Box::new(script), Box::new(f))
+    }
+
+    /// Reads end of file, but only once the keeper has admitted the session, so the WELCOME is
+    /// lost deterministically after the keeper acted on HELLO.
+    struct LostWelcomeReader(FakeKeeper);
+
+    impl Read for LostWelcomeReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            let deadline = Instant::now() + WAIT;
+            while self.0.st().endpoint.is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(0)
+        }
+    }
+
+    fn build_leg(script: LegScript) -> Result<Leg, LegError> {
+        match script {
+            LegScript::Fail(err) => Err(err),
+            LegScript::Exit { code, stderr } => Ok(Leg::new(
+                Box::new(io::empty()),
+                Box::new(io::sink()),
+                Box::new(move |_, _| {
+                    (Some(ExitStatus::from_raw(code << 8)), Some(stderr.to_owned()))
+                }),
+            )),
+            LegScript::Decorated(inner, f) => build_leg(*inner).map(f),
+            LegScript::LostWelcome(keeper, script) => {
+                let (local, remote) = UnixStream::pair().unwrap();
+                keeper.spawn_leg(remote, script);
+                let writer = local.try_clone().unwrap();
+                Ok(Leg::new(
+                    Box::new(LostWelcomeReader(keeper)),
+                    Box::new(writer),
+                    Box::new(move |_, _| {
+                        let _ = local.shutdown(std::net::Shutdown::Both);
+                        (None, None)
+                    }),
+                ))
+            }
+            LegScript::Keeper(keeper, script) => {
+                let (local, remote) = UnixStream::pair().unwrap();
+                keeper.spawn_leg(remote, script);
+                let reader = local.try_clone().unwrap();
+                let writer: Box<dyn Write + Send> = if script.cut_on_end_write || script.fail_end_write {
+                    Box::new(CutOnEnd {
+                        inner: local.try_clone().unwrap(),
+                        cut: script.cut_on_end_write,
+                    })
+                } else {
+                    Box::new(local.try_clone().unwrap())
+                };
+                Ok(Leg::new(
+                    Box::new(reader),
+                    writer,
+                    Box::new(move |_, _| {
+                        let _ = local.shutdown(std::net::Shutdown::Both);
+                        (None, None)
+                    }),
+                ))
+            }
+        }
     }
 
     #[derive(Clone, Default)]
@@ -2098,35 +2210,7 @@ mod tests {
             self.dials.lock().unwrap().push((kind, setup_deadline.is_some()));
             match script {
                 None => Err(LegError::Retryable(io::Error::other("no scripted leg"))),
-                Some(LegScript::Fail(err)) => Err(err),
-                Some(LegScript::Exit { code, stderr }) => Ok(Leg::new(
-                    Box::new(io::empty()),
-                    Box::new(io::sink()),
-                    Box::new(move |_, _| {
-                        (Some(ExitStatus::from_raw(code << 8)), Some(stderr.to_owned()))
-                    }),
-                )),
-                Some(LegScript::Keeper(keeper, script)) => {
-                    let (local, remote) = UnixStream::pair().unwrap();
-                    keeper.spawn_leg(remote, script);
-                    let reader = local.try_clone().unwrap();
-                    let writer: Box<dyn Write + Send> = if script.cut_on_end_write || script.fail_end_write {
-                        Box::new(CutOnEnd {
-                            inner: local.try_clone().unwrap(),
-                            cut: script.cut_on_end_write,
-                        })
-                    } else {
-                        Box::new(local.try_clone().unwrap())
-                    };
-                    Ok(Leg::new(
-                        Box::new(reader),
-                        writer,
-                        Box::new(move |_, _| {
-                            let _ = local.shutdown(std::net::Shutdown::Both);
-                            (None, None)
-                        }),
-                    ))
-                }
+                Some(script) => build_leg(script),
             }
         }
 
@@ -2739,6 +2823,140 @@ mod tests {
         assert_eq!(keeper.pre_welcome_msgs(), 0, "no client byte before WELCOME");
         thread::sleep(Duration::from_millis(300));
         assert_eq!(keeper.upstream(), b"0123456789", "exactly once");
+    }
+
+    // ---- leg extensions: admission token, silence override, ssh standby ----------------------
+
+    #[test]
+    fn hello_carries_leg_admission_token() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let token = "ab".repeat(32);
+        let sent = token.clone();
+        dialer.script(decorated(LegScript::Keeper(keeper.clone(), KLeg::new(Answer::New)), move |leg| {
+            leg.with_admission_token(sent)
+        }));
+        let harness = Harness::start(&dialer, secs(30));
+        let _client = harness.connect();
+        wait_until("hello", WAIT, || keeper.hellos().len() == 1);
+        assert_eq!(keeper.hellos()[0].quic_token, Some(token));
+    }
+
+    #[test]
+    fn hello_omits_quic_token_without_one() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let harness = Harness::start(&dialer, secs(30));
+        let _client = harness.connect();
+        wait_until("hello", WAIT, || keeper.hellos().len() == 1);
+        assert_eq!(keeper.hellos()[0].quic_token, None);
+    }
+
+    #[test]
+    fn leg_silence_override_reaches_endpoint() {
+        // The real 8 s default and a 30 s override cannot be waited out here; the override is
+        // honoured through the same path with a short value. A heartbeat arrives every 2 s, so
+        // only the override can end the leg this early.
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.script(decorated(LegScript::Keeper(keeper.clone(), KLeg::new(Answer::New)), |leg| {
+            leg.with_silence_timeout(Duration::from_millis(300))
+        }));
+        keeper.push_down(frame("first"));
+        let harness = Harness::start(&dialer, secs(30));
+        let client = harness.connect();
+        client.expect_data("first");
+        wait_until("silence verdict redials", WAIT, || dialer.dial_count() == 2);
+        drop(harness);
+
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (harness, _client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(dialer.dial_count(), 1, "no override keeps the Phase 1 limit");
+        drop(harness);
+    }
+
+    /// A standby leg whose teardown sets the returned flag.
+    fn tracked_standby(keeper: &FakeKeeper, answer: Answer) -> (Leg, Arc<AtomicBool>) {
+        let torn_down = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&torn_down);
+        let (local, remote) = UnixStream::pair().unwrap();
+        keeper.spawn_leg(remote, KLeg::new(answer));
+        let leg = Leg::new(
+            Box::new(local.try_clone().unwrap()),
+            Box::new(local.try_clone().unwrap()),
+            Box::new(move |_, _| {
+                flag.store(true, Ordering::SeqCst);
+                let _ = local.shutdown(std::net::Shutdown::Both);
+                (None, None)
+            }),
+        );
+        (leg, torn_down)
+    }
+
+    #[test]
+    fn pre_welcome_end_switches_to_standby() {
+        let (dialer, quic_keeper, ssh_keeper) =
+            (MemDialer::new(), FakeKeeper::default(), FakeKeeper::default());
+        let (standby, _) = tracked_standby(&ssh_keeper, Answer::New);
+        dialer.script(decorated(
+            LegScript::Keeper(quic_keeper.clone(), KLeg::new(Answer::End("quic-token"))),
+            move |leg| leg.with_standby(standby),
+        ));
+        ssh_keeper.push_down(frame("first"));
+        let harness = Harness::start(&dialer, secs(30));
+        let client = harness.connect();
+        client.expect_data("first");
+        let first = quic_keeper.hellos();
+        let second = ssh_keeper.hellos();
+        assert_eq!((first.len(), second.len()), (1, 1));
+        assert!(!second[0].resume, "a leg-0-style HELLO");
+        assert_ne!(second[0].token, first[0].token, "a fresh session token");
+        assert_eq!(second[0].previous_token, Some(first[0].token));
+        assert_eq!(dialer.dial_count(), 1, "the standby is not redialed");
+        drop(harness);
+    }
+
+    #[test]
+    fn standby_hello_evicts_ghost() {
+        // The QUIC keeper answered HELLO (it admitted the session) but WELCOME never reached
+        // the bridge. The standby HELLO names that session; the keeper-side eviction itself is
+        // `keeper::tests::previous_token_evicts_session`.
+        let (dialer, quic_keeper, ssh_keeper) =
+            (MemDialer::new(), FakeKeeper::default(), FakeKeeper::default());
+        let (standby, _) = tracked_standby(&ssh_keeper, Answer::New);
+        dialer.script(decorated(
+            LegScript::LostWelcome(quic_keeper.clone(), KLeg::new(Answer::New)),
+            move |leg| leg.with_standby(standby),
+        ));
+        ssh_keeper.push_down(frame("first"));
+        let harness = Harness::start(&dialer, secs(30));
+        let client = harness.connect();
+        client.expect_data("first");
+        wait_until("the QUIC keeper admits the session", WAIT, || {
+            quic_keeper.st().endpoint.is_some()
+        });
+        let admitted = quic_keeper.hellos()[0].token;
+        let standby_hello = &ssh_keeper.hellos()[0];
+        assert_eq!(standby_hello.previous_token, Some(admitted));
+        assert_ne!(standby_hello.token, admitted);
+        drop(harness);
+    }
+
+    #[test]
+    fn welcome_drops_standby() {
+        let (dialer, keeper, ssh_keeper) =
+            (MemDialer::new(), FakeKeeper::default(), FakeKeeper::default());
+        let (standby, torn_down) = tracked_standby(&ssh_keeper, Answer::New);
+        dialer.script(decorated(
+            LegScript::Keeper(keeper.clone(), KLeg::new(Answer::New).delay(Duration::from_millis(600))),
+            move |leg| leg.with_standby(standby),
+        ));
+        let harness = Harness::start(&dialer, secs(30));
+        let _client = harness.connect();
+        wait_until("hello", WAIT, || keeper.hellos().len() == 1);
+        assert!(!torn_down.load(Ordering::SeqCst), "the standby lives until WELCOME");
+        wait_until("standby torn down", WAIT, || torn_down.load(Ordering::SeqCst));
+        assert!(ssh_keeper.hellos().is_empty(), "the standby never sent HELLO");
+        drop(harness);
     }
 
     #[test]
