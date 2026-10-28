@@ -11,7 +11,7 @@ pub mod support;
 
 use std::time::{Duration, Instant};
 
-use mosh_harness::{knob, Client, ClientOptions, Remote};
+use mosh_harness::{knob, timing_lock, Client, ClientOptions, Remote};
 
 const READY: Duration = Duration::from_secs(30);
 
@@ -20,12 +20,12 @@ const KEEPER_RESET_WINDOW: u64 = 256 * 1024;
 
 /// Mirror of tests/mosh_pacing.rs `DENSE_SIZE`: wide enough that herdr's screen diffs
 /// saturate the link (about 508 KiB/s on the LAN harness).
-#[cfg(target_os = "linux")]
 const DENSE_SIZE: (u16, u16) = (400, 100);
 /// Mirror of tests/mosh_pacing.rs `SATURATING_FLOOD`: a content-dense flood until Ctrl-C;
-/// the split `MA RKER` keeps the echoed command line from matching.
-#[cfg(target_os = "linux")]
-const SATURATING_FLOOD: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)"#;
+/// the split `MA RKER` keeps the echoed command line from matching. `base64` reads stdin, not a
+/// file argument: portable to BSD/macOS `base64`.
+const SATURATING_FLOOD: &str =
+    r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 < /dev/urandom)"#;
 /// One `session::MAX_DATA_CHUNK`: slack for a blip leg repacking the server socket.
 #[cfg(target_os = "linux")]
 const CHUNK: u64 = 64 * 1024;
@@ -66,53 +66,14 @@ fn fail_context(remote: &Remote, client: &Client) -> String {
     )
 }
 
-/// Mirror of tests/mosh_pacing.rs `timing_lock`: the same host-wide flock, so this flood
-/// never runs alongside the pacing measurements. Held until dropped.
-#[cfg(target_os = "linux")]
-struct TimingLock(#[allow(dead_code)] std::fs::File); // held only for its flock
-
-#[cfg(target_os = "linux")]
-fn timing_lock() -> TimingLock {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::env::temp_dir().join("herdr-mosh-pacing.lock"))
-        .expect("open the timing lock");
-    // SAFETY: flock(2) on a file descriptor this function owns.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(rc, 0, "flock failed");
-    TimingLock(file)
-}
-
-/// Recv-Q of the keepers' server stream (their `ESTAB` socket with local address `*`): bytes
-/// the server wrote that the keeper has not read, the same quantity as FIONREAD. Mirror of
-/// tests/mosh_pacing.rs `keeper_server_backlog`. `None` when `ss` fails or the stream is gone.
-#[cfg(target_os = "linux")]
-fn server_backlog(keepers: &[libc::pid_t]) -> Option<u64> {
-    let tags: Vec<String> = keepers.iter().map(|pid| format!("pid={pid},")).collect();
-    let out = std::process::Command::new("ss").arg("-xpn").output().ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|line| tags.iter().any(|tag| line.contains(tag.as_str())))
-        .filter_map(|line| {
-            // Netid State Recv-Q Send-Q Local-Address Local-Inode Peer-Address ...
-            let f: Vec<&str> = line.split_whitespace().collect();
-            (f.get(1) == Some(&"ESTAB") && f.get(4) == Some(&"*"))
-                .then(|| f.get(2)?.parse::<u64>().ok())
-                .flatten()
-        })
-        .max()
-}
-
-/// Wait (up to `READY`) until two `server_backlog` samples 500 ms apart are equal and
+/// Wait (up to `READY`) until two `keeper_server_backlog` samples 500 ms apart are equal and
 /// non-zero: the server socket is full and the server is blocked. Returns that value.
 #[cfg(target_os = "linux")]
 fn backlog_plateau(keepers: &[libc::pid_t]) -> Option<u64> {
     let mut last = None;
     let mut plateau = None;
     mosh_harness::wait_for(READY, || {
-        let now = server_backlog(keepers);
+        let now = mosh_harness::keeper_server_backlog(keepers);
         let hit = matches!((last, now), (Some(a), Some(b)) if a == b && b > 0);
         if hit {
             plateau = now;
@@ -515,16 +476,38 @@ fn slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session() {
     );
 }
 
-/// A dense flood through a real outage: the keeper stops reading the server at the reset
-/// window, the backlog stays in the (bounded) server socket, the session survives, and after
-/// resume the latest output arrives and Ctrl-C answers.
+/// Linux-only observation of the outage test: the keeper stops reading at the reset window,
+/// so the server socket fills to its cap and stays there (`ss -xpn` Recv-Q of the keeper's
+/// server stream). Skipped with a note when `ss` cannot be run.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume() {
+fn assert_server_backlog_plateaus(remote: &Remote, client: &Client) {
     if std::process::Command::new("ss").arg("-V").output().is_err() {
-        eprintln!("skipped: `ss` is not available to sample the keeper's server backlog");
+        eprintln!("skipped the server-backlog plateau check: `ss` is not available");
         return;
     }
+    let keepers = remote.keeper_pids();
+    let first = backlog_plateau(&keepers);
+    assert!(
+        first.is_some(),
+        "no server backlog plateau while down\n{}",
+        fail_context(remote, client)
+    );
+    thread_sleep(1000);
+    let second = backlog_plateau(&keepers);
+    let (first, second) = (first.unwrap_or(0), second.unwrap_or(0));
+    assert!(
+        second > 0 && second <= first + CHUNK,
+        "server backlog grew while down: {first} -> {second}\n{}",
+        fail_context(remote, client)
+    );
+}
+
+/// A dense flood through a real outage: the session survives, the ring holds at most the reset
+/// window, after resume the latest output arrives and Ctrl-C answers. These checks run on every
+/// unix target; the server-socket plateau (the backlog stays in the bounded server socket) is
+/// observed on Linux only (`ss`).
+#[test]
+fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume() {
     let _lock = timing_lock();
     let remote = Remote::start();
     let mut client = attached(
@@ -534,7 +517,6 @@ fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers
             ..ClientOptions::grace(600)
         },
     );
-    let keepers = remote.keeper_pids();
     remote.set_knob(knob::EOF_WELCOME, "");
     remote.signal_leg(&client.id, libc::SIGKILL);
     assert!(client.wait_event("leg_down", 1, READY));
@@ -543,21 +525,9 @@ fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers
     let flood_started = Instant::now();
     remote.pane_run(SATURATING_FLOOD);
 
-    // The keeper stops at INITIAL; the server socket fills to its cap and stays there.
-    let first = backlog_plateau(&keepers);
-    assert!(
-        first.is_some(),
-        "no server backlog plateau while down\n{}",
-        fail_context(&remote, &client)
-    );
-    thread_sleep(1000);
-    let second = backlog_plateau(&keepers);
-    let (first, second) = (first.unwrap_or(0), second.unwrap_or(0));
-    assert!(
-        second > 0 && second <= first + CHUNK,
-        "server backlog grew while down: {first} -> {second}\n{}",
-        fail_context(&remote, &client)
-    );
+    // Linux only: the keeper stops at INITIAL and the server socket fills to its cap.
+    #[cfg(target_os = "linux")]
+    assert_server_backlog_plateaus(&remote, &client);
     // Hold the outage at least 3 s of flood (well over 1 MiB of output at about 508 KiB/s,
     // so a keeper draining to its ring cap would exceed INITIAL many times over).
     let floor = Duration::from_secs(3);

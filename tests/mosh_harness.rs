@@ -46,6 +46,71 @@ pub fn wait_for<F: FnMut() -> bool>(timeout: Duration, predicate: F) -> bool {
     wait_until(timeout, Duration::from_millis(50), predicate)
 }
 
+// ---- host-wide timing lock and socket probes ----
+
+/// Host-wide lock of every flood and link-emulation test (nextest runs each test in its own
+/// process, so concurrent floods would skew each other's clocks). One owner, one lock file:
+/// tests/mosh_pacing.rs and tests/mosh_resume.rs both take this. Held until dropped.
+pub struct TimingLock(#[allow(dead_code)] fs::File); // held only for its flock
+
+pub fn timing_lock() -> TimingLock {
+    use std::os::unix::io::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("herdr-mosh-pacing.lock"))
+        .expect("open the timing lock");
+    // SAFETY: flock(2) on a file descriptor this function owns.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "flock failed");
+    TimingLock(file)
+}
+
+/// `ss -xpn` rows of the `keepers` processes: (state, recv_q, send_q, local address).
+/// Empty when `ss` cannot be run (it is Linux-only).
+fn keeper_unix_sockets(keepers: &[libc::pid_t]) -> Vec<(String, u64, u64, String)> {
+    let tags: Vec<String> = keepers.iter().map(|pid| format!("pid={pid},")).collect();
+    let Ok(out) = std::process::Command::new("ss").arg("-xpn").output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| tags.iter().any(|tag| line.contains(tag.as_str())))
+        .filter_map(|line| {
+            // Netid State Recv-Q Send-Q Local-Address Local-Inode Peer-Address Peer-Inode Process
+            let f: Vec<&str> = line.split_whitespace().collect();
+            Some((
+                f.get(1)?.to_string(),
+                f.get(2)?.parse().ok()?,
+                f.get(3)?.parse().ok()?,
+                f.get(4)?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The backlog metric: Recv-Q of the keeper's server stream (its connected, unbound `*`
+/// socket to the herdr server; the keeper's leg sockets are accepted on its rendezvous path):
+/// bytes the server wrote that the keeper has not read, the same quantity as FIONREAD.
+/// `None` when `ss` fails or the stream is gone.
+pub fn keeper_server_backlog(keepers: &[libc::pid_t]) -> Option<u64> {
+    keeper_unix_sockets(keepers)
+        .into_iter()
+        .filter(|(state, _, _, local)| state == "ESTAB" && local == "*")
+        .map(|(_, recv_q, _, _)| recv_q)
+        .max()
+}
+
+/// Send-Q of the keeper's leg sockets: bytes the keeper wrote that the attacher has not read
+/// (a lower bound on the downstream bytes the keeper holds unacked).
+pub fn keeper_leg_send_q(keepers: &[libc::pid_t]) -> Option<u64> {
+    keeper_unix_sockets(keepers)
+        .into_iter()
+        .filter(|(state, _, _, local)| state == "ESTAB" && local != "*")
+        .map(|(_, _, send_q, _)| send_q)
+        .max()
+}
+
 fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
         "herdr-dev"
