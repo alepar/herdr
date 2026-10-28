@@ -3,7 +3,8 @@
 //! acceptance tests (mosh-hex.5, mosh-hex.6).
 //!
 //! Timing policy: every test here takes the host-wide `timing_lock()`, so floods and
-//! link-emulation measurements never overlap (tests/mosh_resume.rs takes the same lock). The
+//! link-emulation measurements never overlap (the shared `mosh_harness::timing_lock`, which
+//! tests/mosh_resume.rs takes too). The
 //! wall-clock acceptance tests run only with `HERDR_MOSH_PACING_TESTS=1` and when `perl` and
 //! `ss` are available; otherwise they print a note and pass. They are acceptance evidence:
 //! `HERDR_MOSH_PACING_TESTS=1 cargo nextest run --locked --test mosh_pacing --no-capture`.
@@ -22,7 +23,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use mosh_harness::{Client, ClientOptions, Remote};
+use mosh_harness::{
+    keeper_leg_send_q, keeper_server_backlog, timing_lock, Client, ClientOptions, Remote,
+    TimingLock,
+};
 
 const READY: Duration = Duration::from_secs(30);
 const MIB: u64 = 1024 * 1024;
@@ -270,25 +274,6 @@ fn flood_probe_prints_the_marker_after_ctrl_c_under_interactive_sh() {
     let _ = child.wait();
 }
 
-/// Timing tests take this host-wide lock so concurrent floods (nextest runs every test in
-/// its own process) do not skew each other's clocks. Every test in this file takes it
-/// (directly or through `acceptance_gate`); tests/mosh_resume.rs mirrors it on the same lock
-/// file. Held until dropped.
-pub struct TimingLock(#[allow(dead_code)] std::fs::File);
-
-pub fn timing_lock() -> TimingLock {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::env::temp_dir().join("herdr-mosh-pacing.lock"))
-        .unwrap();
-    // SAFETY: flock(2) on a file descriptor this function owns.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(rc, 0, "flock failed");
-    TimingLock(file)
-}
-
 /// Opt-in for the wall-clock acceptance tests (Phase 2 acceptance evidence): they assert
 /// wall-clock bounds over an emulated 300 ms link, so they stay out of the default suite.
 const PACING_OPT_IN: &str = "HERDR_MOSH_PACING_TESTS";
@@ -401,49 +386,6 @@ pub fn ctrl_c_latency(client: &mut Client, timeout: Duration) -> Duration {
         .find(|(_, len)| *len >= hi)
         .map(|(at, _)| *at)
         .expect("the last sample reached the marker prefix")
-}
-
-/// `ss -xpn` rows of the `keepers` processes: (state, recv_q, send_q, local address).
-fn keeper_unix_sockets(keepers: &[libc::pid_t]) -> Vec<(String, u64, u64, String)> {
-    let tags: Vec<String> = keepers.iter().map(|pid| format!("pid={pid},")).collect();
-    let Ok(out) = Command::new("ss").arg("-xpn").output() else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|line| tags.iter().any(|tag| line.contains(tag.as_str())))
-        .filter_map(|line| {
-            // Netid State Recv-Q Send-Q Local-Address Local-Inode Peer-Address Peer-Inode Process
-            let f: Vec<&str> = line.split_whitespace().collect();
-            Some((
-                f.get(1)?.to_string(),
-                f.get(2)?.parse().ok()?,
-                f.get(3)?.parse().ok()?,
-                f.get(4)?.to_string(),
-            ))
-        })
-        .collect()
-}
-
-/// The backlog metric: Recv-Q of the keeper's server stream (its connected, unbound `*`
-/// socket to the herdr server; the keeper's leg sockets are accepted on its rendezvous path):
-/// bytes the server wrote that the keeper has not read, the same quantity as FIONREAD.
-pub fn keeper_server_backlog(keepers: &[libc::pid_t]) -> Option<u64> {
-    keeper_unix_sockets(keepers)
-        .into_iter()
-        .filter(|(state, _, _, local)| state == "ESTAB" && local == "*")
-        .map(|(_, recv_q, _, _)| recv_q)
-        .max()
-}
-
-/// Send-Q of the keeper's leg sockets: bytes the keeper wrote that the attacher has not read
-/// (a lower bound on the downstream bytes the keeper holds unacked).
-pub fn keeper_leg_send_q(keepers: &[libc::pid_t]) -> Option<u64> {
-    keeper_unix_sockets(keepers)
-        .into_iter()
-        .filter(|(state, _, _, local)| state == "ESTAB" && local != "*")
-        .map(|(_, _, send_q, _)| send_q)
-        .max()
 }
 
 /// Sample `probe` every 100 ms on a background thread until the returned guard is stopped.
