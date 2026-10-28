@@ -50,9 +50,9 @@ To judge a prediction it needs one more fact: which of its inputs the server has
 
 ### 2. Echo-ack emission (chosen: deadline-driven, as mosh; see Key abstractions)
 
-- One hook statement at the render send path, the full and patch senders (render.rs:963 and retained_surface.rs:566), reports `(client, surface_revision)` once a frame is enqueued.
-  - If both senders cannot share one statement, it is two lines.
-- For each pane whose applied count increased since the last ack, `EchoTracker` queues `x-mosh.echo-ack.v1 {pane_id, input_seq: applied, surface_revision}` on the client's control lane.
+- Emission runs from the main-loop deadline (`echo_due`, Key abstractions), not from the render send path; there is no render-sent hook.
+- For each pane whose applied count increased since the last ack, and whose input was received at least 50 ms earlier, `EchoTracker` queues `x-mosh.echo-ack.v1 {pane_id, input_seq: applied, surface_revision}` on the client's control lane.
+- **Pending renders hold the ack.** At the deadline, if a render for that client is pending or deferred (the pending render slot is occupied, the pane is dirty, or a render was held back by backpressure, `TrySendError::Full` at render.rs:963-990), the ack waits for a later tick. It uses the last committed `surface_revision` only when nothing is pending for that client, so the revision it names already contains the echo. The check runs inside the existing `echo_due` statement; no new hook line.
 - Order on the wire does not matter, because the client waits for the revision.
 - Acks are sent only to subscribed clients. Unsubscribed clients cost one map lookup.
 
@@ -103,11 +103,12 @@ That is 7 added lines (the observe and paint lines are edits; the render-sent ho
   - Predictor epochs: confirm, wrong, epoch hiding, paste/resize reset, right-edge stop, and judging only at or above the ack revision (an ack ahead of its surface leaves predictions pending).
   - Mode thresholds.
   - Facade routing.
-  - `EchoTracker`: count, emit-after-render, subscription gating, disconnect cleanup.
+  - `EchoTracker`: count, emit-after-render, hold while a render is pending or deferred, subscription gating, disconnect cleanup.
 - **Integration** (`tests/mosh_predict.rs`, harness link knob, 150 ms one-way, `HERDR_MOSH_PREDICT=on`):
   - Typed text appears and stays correct.
   - With an echo-suppressing program (`stty -echo; cat`), a typed character is painted, then cleared within 1 RTT plus one render after the ack.
   - With an old remote (capability stripped), there are no predictions and no subscribe.
+  - Flood plus typing: a dense flood in one pane keeps the render slot backpressured while printable keys are typed into a shell; correct predictions are never cleared as wrong (no ack names a pre-echo revision).
 - **Timing** (`#[ignore]`, `timing_lock()`): the median keypress-to-screen latency for 50 printable keys at 150 ms one-way is under 5 ms. It is measured from the predictor's trace timestamps (tap to the paint frame written), and cross-checked by the harness screen showing the character before 1 RTT.
 - **Prediction off by default:** the existing suites run unchanged.
 
@@ -156,6 +157,7 @@ That is 7 added lines (the observe and paint lines are edits; the render-sent ho
 - Counting: on receipt, on the reader thread (client_transport.rs:1196), for subscribed clients only. Receipt also covers events the main loop later drops (headless.rs:2365-2386), so the counts match the client's.
 - Emission, on mosh's deadline:
   - An ack covers input received at least `ECHO_DELAY` (50 ms) earlier and carries the client's last committed `surface_revision`, via `render_state.last_pane_surface()`.
+  - While a render for that client is pending or deferred (pending render slot occupied, pane dirty, or render held back by backpressure), the ack waits for a later tick; the last committed revision is used only when nothing is pending (§2).
   - With no baseline (just after a resync), the ack waits for a later tick. Acks go on the control lane.
   - It is driven by two main-loop statements in headless.rs: `echo_due` before step 8 (~:608), and `echo_deadline` folded into `next_deadline` (the loop otherwise wakes every 250 ms, :167).
 - Disconnect: one statement in `remove_client` (headless.rs:946), which both detach and disconnect pass through.

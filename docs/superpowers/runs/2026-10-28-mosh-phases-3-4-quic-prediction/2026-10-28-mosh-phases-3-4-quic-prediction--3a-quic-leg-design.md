@@ -44,18 +44,24 @@ window) is transport-neutral and moves to a QUIC stream unchanged.
 ### 1. Bootstrap (chosen: keeper answers a query, attacher prints)
 
 - **Recommended:**
-  - The attacher, after starting its keeper connection, sends a one-byte bootstrap query (`Q`, which
-    cannot be a `SessionMsg` type byte) on the rendezvous connection.
+  - The attacher opens its own short-lived rendezvous connection for the query and sends a one-byte
+    bootstrap query (`Q`, which cannot be a `SessionMsg` type byte) on it. The query never shares a
+    connection with session bytes.
   - The keeper starts its `QuicAcceptor` lazily on first query. It replies one JSON line:
     `{port, fingerprint, token}`.
     - `fingerprint` is the SHA-256 of its self-signed certificate, hex.
     - `token` is 32 random bytes, hex, minted per query.
+  - The attacher reads the reply with a 2 s timeout, then closes the query connection. EOF, a read
+    error or the timeout all count as `none`; an older keeper that parses `Q` as a broken HELLO and
+    closes the connection therefore yields `none` and a plain ssh mosh leg. A reply that arrives
+    after the timeout lands on the closed query connection and never reaches the session stream.
   - Only when started with `--x-mosh-quic-v1`, the attacher writes exactly one line right after the
-    ready marker and before any session bytes, then pumps as today:
+    ready marker and before any session bytes:
     - `herdr-mosh-quic:1 <port> <fingerprint> <token>` on a reply with fields;
-    - `herdr-mosh-quic:1 none` when the reply is `{}` (UDP bind failed) or does not arrive within
-      2 s.
-    The attacher then sends HELLO on the same connection; the first byte disambiguates.
+    - `herdr-mosh-quic:1 none` when the reply is `{}` (UDP bind failed) or the query gave no reply.
+  - With the flag, the attacher opens its session rendezvous connection lazily, on the first byte
+    from stdin (the HELLO), then pumps as today. A leg-0 ssh leg held as the QUIC standby (§6)
+    therefore holds no keeper connection, and no `PRE_WELCOME_BOUND` runs on it while QUIC is tried.
   - The dialer waits for that one line, bounded by a 5 s safety timeout that it treats as `none`.
     This replaces a best-effort bounded read, so a late line can never land in the session stream.
 - **Considered:** the keeper printing the line itself. Impossible, since the keeper's stdio is null
@@ -71,6 +77,10 @@ window) is transport-neutral and moves to a QUIC stream unchanged.
     unbound for 60 s expires.
   - Later QUIC HELLOs for that session must carry the same token.
   - A leg with a bad or absent token gets `END {reason:"quic-token"}` and is closed.
+- Client side: once a QUIC leg has reached WELCOME with the cached token, that token is bound and
+  the client keeps it for the session. A bootstrap refresh on an ssh leg (§7) then updates only port
+  and fingerprint. Before the first binding, a refresh replaces the token as well. This lets a session
+  that fell back to ssh mid-session return to QUIC at a later reconnect dial.
 
 ### 3. Dial address (chosen: `ssh -G` hostname, skip QUIC behind a jump)
 
@@ -115,7 +125,9 @@ window) is transport-neutral and moves to a QUIC stream unchanged.
 - **Recommended:** `admit`, `run_leg`, `leg_writer` and `LegSlot` take a `KeeperLeg`: a boxed reader,
   a boxed writer, a shutdown handle callable from another thread, and an optional render lane
   (`None` until 3b).
-- The existing Unix accept loop produces `KeeperLeg`s; `QuicAcceptor` produces them for QUIC.
+- The existing Unix accept loop produces `KeeperLeg`s; `QuicAcceptor` produces them for QUIC. The
+  Unix producer's first-byte match answers `Q` on any rendezvous connection; the attacher sends it
+  only on its dedicated query connection (§1).
 - Behaviour-preserving for Unix legs; all Phase 1 and 2 tests pass unmodified.
 
 ### 6. `QuicLegDialer` (chosen: wraps `SshLegDialer`)
@@ -129,10 +141,15 @@ window) is transport-neutral and moves to a QUIC stream unchanged.
     - On success: return the QUIC leg, carrying the live ssh leg as its standby. The ssh child stays
       alive until WELCOME arrives over QUIC; `LocalBridge` then drops the standby, which tears the
       ssh child down. If the QUIC leg ends before WELCOME (token refusal, pre-WELCOME bound, early
-      loss), `LocalBridge` switches to the standby ssh leg and sends HELLO again on it, never the
-      plain bridge.
+      loss), `LocalBridge` switches to the standby ssh leg, never the plain bridge, and sends a
+      leg-0-style HELLO on it (resume false) with a fresh session token and `previous_token` set to
+      the QUIC attempt's session token. The bridge cannot tell whether the keeper admitted the QUIC
+      HELLO; Phase 1's ghost eviction (`previous_token` handling in keeper.rs) removes that session if
+      it exists and is a no-op otherwise. The standby attacher opens its session connection only now
+      (§1), so no keeper-side `PRE_WELCOME_BOUND` ran on it during the QUIC attempt.
     - On failure: return the ssh leg as is and log the reason.
-  - Reconnect legs: try QUIC with the cached bootstrap (3 s bound); any QUIC failure, a fingerprint
+  - Reconnect legs: try QUIC with the cached bootstrap (3 s bound; its token kept across ssh refreshes
+    once bound, §2); any QUIC failure, a fingerprint
     mismatch included, falls through to the ssh reconnect leg in the same dial. QUIC failures are
     `Retryable` and never `Fatal`; a changed fingerprint means a new keeper, and the ssh leg's
     WELCOME `Unknown` then ends the session through Phase 1's rules.
@@ -163,7 +180,8 @@ subepic owns.
   leg, no ssh process) and the echo appears within 2 RTT plus one render after restore. This needs
   the QUIC silence window below.
 - Long idle gap: the relay blackholes for 60 s within a 120 s grace and calls `rebind()` during the gap,
-  then restores. A new QUIC leg (not ssh) is admitted and the echo appears within 3 RTT plus one
+  then restores. The bridge redials QUIC first (ssh only if that QUIC attempt itself fails); a new
+  QUIC leg is admitted and the echo appears within 3 RTT plus one
   reconnect backoff step plus one render after restore, plus up to the 3 s handshake bound of an
   attempt already in flight when the link returns.
 - **QUIC silence window (coverage round 1):** Phase 1's bridge silence verdict would end a QUIC leg
@@ -171,11 +189,18 @@ subepic owns.
   legs set 30 s (ssh legs keep Phase 1's value). Gaps under it ride QUIC migration on the same
   connection; longer ones end the leg and reconnect QUIC-first.
 - **Bootstrap refresh (coverage round 1):** ssh reconnect legs run in bootstrap mode too, and a fresh
-  `QuicBootstrap` replaces the cache, so a transient UDP failure at leg 0 does not leave the session
-  ssh-only for life.
+  `QuicBootstrap` updates the cache, so a transient UDP failure at leg 0 does not leave the session
+  ssh-only for life. Before the token is bound the refresh replaces it; once bound, the refresh
+  updates only port and fingerprint and the bound token stays (§2).
 - Mid-session UDP block: the relay goes to 100 % loss for longer than the silence timeout. The
-  reconnect leg falls back to ssh and the session continues.
+  reconnect leg falls back to ssh and the session continues. The relay then restores UDP and the ssh
+  leg is dropped; the next reconnect dial returns the session to QUIC (no `quic-token` END).
 - Old remote: with `strip-capability` the session is ssh-only.
+- Old keeper: a pre-Phase-3 keeper process still running under a new binary closes the query
+  connection on `Q`; the attacher writes `herdr-mosh-quic:1 none` and the session comes up on a plain
+  ssh mosh leg.
+- Late bootstrap reply: a keeper whose reply is delayed past the attacher's 2 s timeout; the line is
+  `none`, and the late reply never reaches the session stream (the leg reads WELCOME first).
 
 Non-timing unit tests: bootstrap line round trip; token mint, bind and expiry; pinning verifier
 accepts only the fingerprint; `KeeperLeg` refactor covered by existing suites.
@@ -206,7 +231,7 @@ accepts only the fingerprint; `KeeperLeg` refactor covered by existing suites.
 - Idle timeout: quinn negotiates `max_idle_timeout` as the minimum of both peers' values during the handshake, before HELLO arrives. So the keeper advertises the grace ceiling (3600 s) and the client advertises its own grace; the negotiated value is the client's grace.
 
 **KeeperLeg** — extended (root-defined); the HELLO read moves out of `admit` into each producer.
-- Unix producer: reads the first byte with `set_read_timeout(PRE_WELCOME_BOUND)` and runs a closed match: `Q` answers the bootstrap and loops; the HELLO type byte reads HELLO.
+- Unix producer: reads the first byte with `set_read_timeout(PRE_WELCOME_BOUND)` and runs a closed match: `Q` answers the bootstrap and loops; the HELLO type byte reads HELLO. The match accepts `Q` on any rendezvous connection; the attacher sends it only on its dedicated query connection, which it closes after the reply (§1), so the loop then sees EOF and ends without admitting anything.
 - QUIC producer: reads HELLO through the blocking adapter and checks the token.
 - Both call one `admit` with the `KeeperLeg` and the decoded `Hello`.
 - `admit`, `run_leg`, `leg_writer`, `answer_and_close` and `LegSlot` use the leg's boxed halves and its shutdown closure: Unix is `shutdown(Both)` on a clone; QUIC is `Connection::close` (synchronous, safe from any thread).
@@ -216,11 +241,11 @@ accepts only the fingerprint; `KeeperLeg` refactor covered by existing suites.
 - Composition: a concrete `SshLegDialer`. It calls its bootstrap-mode method for leg 0 and its plain `dial` for ssh reconnects.
 - State:
   - the resolved dial host;
-  - the cached `QuicBootstrap` (`None` means QUIC is off for the session);
+  - the cached `QuicBootstrap` (`None` means QUIC is off for the session) and whether its token is bound (a QUIC leg reached WELCOME with it); a refresh keeps a bound token and updates only port and fingerprint (§2);
   - a "last QUIC leg died before WELCOME" flag, in a `Cell` because `classify` takes `&self`;
   - the client endpoint and runtime.
 - Classification (keeper verdicts arrive as leg ends):
-  - Leg 0, QUIC leg ended before WELCOME (token refusal, pre-WELCOME bound, early loss): not a leg-0 failure. `LocalBridge` switches to the leg's live ssh standby (§6), never the plain bridge; Phase 1's leg-0 table applies only if that ssh leg also ends before WELCOME.
+  - Leg 0, QUIC leg ended before WELCOME (token refusal, pre-WELCOME bound, early loss): not a leg-0 failure. `LocalBridge` switches to the leg's live ssh standby (§6), never the plain bridge, with a leg-0-style HELLO carrying a fresh session token and `previous_token` = the QUIC attempt's token, so ghost eviction removes a QUIC session the keeper may have admitted; Phase 1's leg-0 table applies only if that ssh leg also ends before WELCOME.
   - Reconnect, `quic-token` END or a transport close before WELCOME: `Retryable`, and QUIC is skipped on the next dial. `quic-token` also clears the cached bootstrap, which prevents an endless QUIC redial.
   - Reconnect refusals an ssh leg would also get (`protocol-version`, `server-connect-failed`, `token-in-use`): Phase 1's `classify_leg`.
   - Ended after WELCOME: `Retryable`.
@@ -236,13 +261,16 @@ accepts only the fingerprint; `KeeperLeg` refactor covered by existing suites.
 - the RTT probe (mosh-19g.6);
 - a QUIC close reason in the end report;
 - the render lane slot, `None` until 3b;
-- on a leg-0 QUIC leg, the live ssh leg as an optional standby: `LocalBridge` drops it on WELCOME (tearing the ssh child down) and switches to it if the leg ends before WELCOME, without learning the transport.
+- on a leg-0 QUIC leg, the live ssh leg as an optional standby: `LocalBridge` drops it on WELCOME (tearing the ssh child down) and switches to it if the leg ends before WELCOME, without learning the transport. On the switch it sends a leg-0-style HELLO with a fresh session token and `previous_token` = the QUIC attempt's session token (§6). The standby holds no keeper connection until that HELLO (§1).
 
 **Hello / SessionEndpoint** — extended: optional `quic_token` (`skip_serializing_if`, like `previous_token`). `SESSION_PROTOCOL_VERSION` is unchanged.
 
 **SshLegDialer** — extended: a separate bootstrap-mode method, not a flag. It adds `--x-mosh-quic-v1` to the remote command and, after the ready marker, waits for the one bootstrap line (5 s safety timeout, treated as `none`), returning the leg plus the parsed bootstrap.
 
-**Attacher** — extended: sends `Q` and writes a line only when started with `--x-mosh-quic-v1`, so an older client never sees the line as session bytes. With the flag it writes exactly one line before any session bytes: the bootstrap, or `herdr-mosh-quic:1 none` on a bind failure or when the keeper's reply takes longer than 2 s.
+**Attacher** — extended: sends `Q` and writes a line only when started with `--x-mosh-quic-v1`, so an older client never sees the line as session bytes. With the flag:
+- it sends `Q` on its own short-lived rendezvous connection, reads the reply with a 2 s timeout and closes that connection; EOF, an error or the timeout mean `none`, so an older keeper that closes on `Q` is just `none`;
+- it writes exactly one line before any session bytes: the bootstrap, or `herdr-mosh-quic:1 none` on a bind failure or no reply;
+- it opens the session rendezvous connection lazily, on the first byte from stdin (the HELLO), so a late reply never reaches the session stream and a standby ssh leg holds no keeper connection.
 
 **start_ui_bridge** — extended, the one place the kind is chosen. It wraps in `QuicLegDialer` only when:
 - the probe reports `x-mosh-quic-v1`;
@@ -261,13 +289,14 @@ The `-G` parse is a small function next to the existing `-G` use (attach.rs:886)
 **Walk-through:**
 - Leg 0, success:
   1. `start_ui_bridge` registers `QuicLegDialer(SshLegDialer)`.
-  2. ssh runs with `--x-mosh-quic-v1`. The attacher sends `Q`; the keeper starts `QuicAcceptor`, which mints a token; the line is printed.
+  2. ssh runs with `--x-mosh-quic-v1`. The attacher sends `Q` on a dedicated query connection; the keeper starts `QuicAcceptor`, which mints a token; the attacher closes the query connection and prints the line. It opens no session connection yet.
   3. The pinned handshake succeeds in under 3 s, and a QUIC `Leg` carrying the token and the live ssh leg as its standby is returned.
   4. The bridge copies the token into HELLO. The acceptor reads HELLO, `QuicTokens` binds it, then `admit` → `run_leg` proceed. WELCOME arrives over QUIC and the bridge drops the standby, tearing ssh down.
-- Leg 0, QUIC ends before WELCOME (token refused, pre-WELCOME bound, early loss): the bridge switches to the standby ssh leg and sends HELLO on it.
-- Leg 0, UDP blocked: the same ssh leg is returned. The token expires unbound after 60 s; the next ssh reconnect leg runs in bootstrap mode and refreshes the cached bootstrap (Coverage round 1), so QUIC is retried then. A session whose ssh leg never drops stays on ssh.
+- Leg 0, QUIC ends before WELCOME (token refused, pre-WELCOME bound, early loss): the bridge switches to the standby ssh leg and sends a HELLO with a fresh session token and `previous_token` = the QUIC attempt's token; the attacher opens its session connection on that HELLO, and the keeper evicts any admitted QUIC session.
+- Leg 0, UDP blocked: the same ssh leg is returned. The token expires unbound after 60 s; the next ssh reconnect leg runs in bootstrap mode and refreshes the cached bootstrap, token included because it was never bound (Coverage round 1), so QUIC is retried then. A session whose ssh leg never drops stays on ssh.
+- Leg 0, old keeper: it closes the query connection on `Q`; the line is `none` and the session runs on a plain ssh mosh leg.
 - Address change: quinn migrates, driven by the session heartbeats.
-- Mid-session UDP block: the silence verdict fires, the QUIC dial fails in 3 s and falls back to ssh, and the next dial tries QUIC again.
+- Mid-session UDP block: the silence verdict fires, the QUIC dial fails in 3 s and falls back to ssh, whose refresh keeps the bound token; the next dial tries QUIC again with it.
 - Future: a third transport adds one `LegDialer` impl, one `KeeperLeg` producer and one arm in `start_ui_bridge`.
 
 Per §1 (design roast r1): when the bind fails, the reply is `{}` and the attacher writes `herdr-mosh-quic:1 none`, so the dialer never waits out a timeout on a healthy remote; the 5 s safety timeout only covers a stuck attacher.

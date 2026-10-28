@@ -97,7 +97,13 @@ full surface.
     header, so the bridge can tell a reset caused by supersede from a loss.
   - The leg's quinn transport config caps concurrent unidirectional streams at 64. When none are
     free, the lane waits, the channel fills, and the overflow rule above applies.
-  - Stream priority is the same as the session stream.
+  - Older render streams send first. Each render stream's priority is set with quinn's
+    `SendStream::set_priority` to a value that decreases with its sequence number, so a large
+    self-contained frame is never overtaken by the small chained frames enqueued after it. The
+    keeper-side transport config also disables send fairness for render streams if quinn exposes
+    it (`TransportConfig::send_fairness(false)`). `RenderReorder` still measures "overdue" from
+    stream completion (§3); the send order is what keeps a lossless link from producing gaps.
+    Priority between the lane and the session stream is not tuned (§7).
 - **Frames never acked:** render frames do not consume session offsets and are not in the replay ring.
   `InflightWindow` (Phase 2) governs only the session stream. QUIC congestion control and supersede
   govern the lane.
@@ -153,6 +159,7 @@ discards chained frames until the full surface arrives.
     leg starts in gap.
   - Keeper chain gate: down, overflow and evict-on-self-contained paths.
   - `RenderLane` supersede resets older streams (loopback quinn).
+  - `RenderLane` stream priority decreases with sequence number.
 - **Integration** (`tests/mosh_supersede.rs`):
   - No disconnect: a burst of patches with 20 % loss, both leg types and a QUIC → ssh leg change.
   - The server hook produces a full surface after an injected resync.
@@ -162,6 +169,8 @@ discards chained frames until the full surface arrives.
   - A typed marker's echo is visible on screen within 2 s while the flood runs.
   - Output keeps advancing: the screen changes at least once per second over 20 s.
   - The same test over a Phase 1 ssh-only leg is recorded for comparison, with no assertion.
+  - At 0 % loss and 150 ms one-way, a dense flood produces zero overdue-declared gaps (render
+    streams send oldest-first, §2).
 
 ### 7. Out of scope
 
@@ -195,6 +204,7 @@ discards chained frames until the full surface arrives.
 The lane also owns:
 - per-leg sequence numbers from 0;
 - writing the new frame's header before resetting older in-flight streams;
+- send order: each stream's priority decreases with its sequence number, so older streams send first, with send fairness off for render streams where quinn exposes it (§2);
 - the 64-concurrent-uni-streams cap, set by `QuicAcceptor` in the leg's transport config.
 The queue handle lives in `LegSlot`.
 
