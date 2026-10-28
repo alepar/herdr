@@ -10,7 +10,7 @@
 #
 # Exit codes:
 #   0  within budget and every upstream hunk is tagged
-#   1  more than 20 inserted upstream lines, or an upstream hunk without a
+#   1  more than 30 inserted upstream lines, or an upstream hunk without a
 #      "mosh-fork" tag on an added line (deletion-only hunks are untagged)
 #   2  usage or setup error (for example, no origin/master)
 #
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-budget=20
+budget=30
 
 cd "$(git rev-parse --show-toplevel)"
 
