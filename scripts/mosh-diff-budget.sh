@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# mosh-diff-budget.sh: audit how far the fork's diff reaches into upstream files.
+# Run by hand at upstream merges.
+#
+# Fork paths (excluded from the audit): src/mosh, tests/mosh_*, scripts/mosh-*,
+# HERDR_MOSH_VISION.md, docs/superpowers. Everything else is "upstream".
+#
+# The diff is taken from the merge base with origin/master to the working tree,
+# so uncommitted edits are audited too.
+#
+# Exit codes:
+#   0  within budget and every upstream hunk is tagged
+#   1  more than 20 inserted upstream lines, or an upstream hunk without a
+#      "mosh-fork" tag on an added line (deletion-only hunks are untagged)
+#   2  usage or setup error (for example, no origin/master)
+#
+# Synthetic failure check: append an untagged line (e.g. `// probe`) to
+# src/update.rs, run this script, which must exit 1 naming the hunk, then
+# `git checkout -- src/update.rs`.
+
+set -euo pipefail
+
+budget=20
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! base=$(git merge-base origin/master HEAD 2>/dev/null); then
+  echo "mosh-diff-budget: cannot find a merge base with origin/master" >&2
+  exit 2
+fi
+
+fork_excludes=(
+  ':(exclude)src/mosh'
+  ':(exclude,glob)tests/mosh_*'
+  ':(exclude,glob)scripts/mosh-*'
+  ':(exclude)HERDR_MOSH_VISION.md'
+  ':(exclude)docs/superpowers'
+)
+
+git diff "$base" --stat -- . "${fork_excludes[@]}"
+git grep -n 'mosh-fork' -- . ':(exclude)scripts/mosh-diff-budget.sh' || true
+
+inserted=$(git diff "$base" --numstat -- . "${fork_excludes[@]}" |
+  awk '$1 != "-" { n += $1 } END { print n + 0 }')
+
+untagged=$(git diff "$base" -U0 --no-color -- . "${fork_excludes[@]}" |
+  awk '
+    function flush() {
+      if (inhunk && !tagged) print "untagged hunk: " file " " header
+      inhunk = 0
+    }
+    /^diff --git / { flush(); next }
+    /^\+\+\+ / { file = ($2 == "/dev/null") ? file : substr($2, 3); next }
+    /^--- / { next }
+    /^@@/ { flush(); inhunk = 1; tagged = 0; header = $0; next }
+    /^\+/ { if (index($0, "mosh-fork")) tagged = 1 }
+    END { flush() }
+  ')
+
+if [ -n "$untagged" ]; then
+  echo "$untagged"
+  untagged_count=$(printf '%s\n' "$untagged" | wc -l)
+else
+  untagged_count=0
+fi
+
+echo "mosh-diff-budget: $inserted inserted upstream lines (budget $budget), $untagged_count untagged hunks"
+
+if [ "$inserted" -gt "$budget" ] || [ "$untagged_count" -gt 0 ]; then
+  exit 1
+fi

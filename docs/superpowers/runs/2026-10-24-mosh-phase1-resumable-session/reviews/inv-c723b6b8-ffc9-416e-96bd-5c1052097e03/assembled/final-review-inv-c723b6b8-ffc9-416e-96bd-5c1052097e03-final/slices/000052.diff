@@ -1,0 +1,491 @@
+diff --git a/tests/mosh_multi_client.rs b/tests/mosh_multi_client.rs
+new file mode 100644
+index 00000000..23e818c7
+--- /dev/null
++++ b/tests/mosh_multi_client.rs
+@@ -0,0 +1,485 @@
++//! Saved machines, multiple clients, client exit and ghost eviction over a fake ssh
++//! (mosh-dqw.9).
++
++#![cfg(unix)]
++
++#[path = "mosh_harness.rs"]
++pub mod mosh_harness;
++pub mod support;
++
++use std::time::{Duration, Instant};
++
++use mosh_harness::{knob, Client, ClientOptions, Remote};
++
++const READY: Duration = Duration::from_secs(30);
++
++fn wait(predicate: impl FnMut() -> bool) -> bool {
++    mosh_harness::wait_for(READY, predicate)
++}
++
++fn sleep_ms(ms: u64) {
++    std::thread::sleep(Duration::from_millis(ms));
++}
++
++fn fail_context(remote: &Remote, client: &Client) -> String {
++    format!(
++        "screen:\n{}\nlocal: {:?}\nkeeper: {:?}\nlegs: {:?}\nplain: {:?}",
++        client.screen(),
++        client.events(),
++        remote.keeper_events(),
++        remote.session_legs(&client.id),
++        remote.plain_bridges(&client.id)
++    )
++}
++
++/// A saved-machine client whose remote endpoint is fully active: input typed into the TUI has
++/// reached the remote pane (activation still in flight would be torn by an early outage).
++fn saved(remote: &Remote, opts: &ClientOptions) -> Client {
++    let mut client = remote.spawn_saved_client(opts);
++    client.wait_attached(remote, READY);
++    assert!(
++        remote.wait_leg_count(&client.id, 1, READY),
++        "no session leg started"
++    );
++    // Input is dropped until activation finishes, so keep typing until it lands.
++    let tag = format!("up-{}", client.id);
++    assert!(
++        mosh_harness::wait_until(READY, Duration::from_millis(500), || {
++            if marks(remote).contains(&format!("MK{tag}")) {
++                return true;
++            }
++            type_mark(&mut client, &tag);
++            false
++        }),
++        "{}",
++        fail_context(remote, &client)
++    );
++    client
++}
++
++fn type_mark(client: &mut Client, tag: &str) {
++    client.type_mark(tag);
++}
++
++fn marks(remote: &Remote) -> Vec<String> {
++    remote.marks()
++}
++
++fn session_ends(remote: &Remote, reason: &str) -> usize {
++    remote
++        .keeper_events()
++        .iter()
++        .filter(|e| e["event"] == "session_end" && e["reason"] == reason)
++        .count()
++}
++
++/// Sessions the keeper still holds: created minus ended.
++fn live_sessions(remote: &Remote) -> isize {
++    remote.keeper_event_count("server_connect") as isize
++        - remote.keeper_event_count("session_end") as isize
++}
++
++fn saved_screen_never_unavailable(client: &Client) -> bool {
++    let screen = client.screen();
++    !screen.contains("unavailable") && !screen.contains("Action interrupted")
++}
++
++#[test]
++fn saved_outage_past_the_health_timeout_keeps_the_endpoint() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(120));
++
++    // Every reconnect leg fails, so the outage outlasts the client's 10 s health expiry.
++    remote.set_knob(knob::EOF_WELCOME, "");
++    remote.signal_leg(&client.id, libc::SIGKILL);
++    assert!(
++        client.wait_screen("unreachable", READY),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    for _ in 0..14 {
++        sleep_ms(1000);
++        assert!(
++            saved_screen_never_unavailable(&client),
++            "{}",
++            fail_context(&remote, &client)
++        );
++        assert_eq!(
++            client.event_count("session_end"),
++            0,
++            "{}",
++            fail_context(&remote, &client)
++        );
++    }
++    assert!(
++        remote.plain_bridges(&client.id).is_empty(),
++        "supervisor fell back: {}",
++        fail_context(&remote, &client)
++    );
++
++    remote.clear_knob(knob::EOF_WELCOME);
++    assert!(
++        client.wait_event("welcome", 2, Duration::from_secs(30)),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    assert!(client.has_welcome("resumed"));
++    type_mark(&mut client, "after-outage");
++    assert!(
++        wait(|| marks(&remote).contains(&"MKafter-outage".to_owned())),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    assert_eq!(
++        remote.keeper_event_count("server_connect"),
++        1,
++        "a reconnect opened a second server connection"
++    );
++    assert_eq!(client.event_count("session_end"), 0);
++    assert!(remote.plain_bridges(&client.id).is_empty());
++}
++
++#[test]
++fn saved_leg_stalling_right_after_a_health_ping_does_not_expire_the_endpoint() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(120));
++    // The client pings 5 s after the last server message. Make a server message, then stall the
++    // leg a hair before, at and after that ping, so the stall lands at every point of the 10 s
++    // health window.
++    for (round, offset_ms) in [4600u64, 5100, 5600].into_iter().enumerate() {
++        let before = client.event_count("welcome");
++        remote.pane_run(&format!("printf 'ROUND_%s\\n' {round}"));
++        assert!(client.wait_screen(&format!("ROUND_{round}"), READY));
++        sleep_ms(offset_ms);
++        remote.signal_leg(&client.id, libc::SIGSTOP);
++        assert!(
++            client.wait_event("welcome", before + 1, Duration::from_secs(40)),
++            "round {round} never resumed: {}",
++            fail_context(&remote, &client)
++        );
++        assert_eq!(
++            client.event_count("session_end"),
++            0,
++            "round {round}: {}",
++            fail_context(&remote, &client)
++        );
++        assert!(
++            remote.plain_bridges(&client.id).is_empty(),
++            "round {round}: supervisor fell back"
++        );
++        assert!(
++            saved_screen_never_unavailable(&client),
++            "round {round}: {}",
++            client.screen()
++        );
++    }
++    type_mark(&mut client, "after-stalls");
++    assert!(
++        wait(|| marks(&remote).contains(&"MKafter-stalls".to_owned())),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    assert_eq!(remote.keeper_event_count("server_connect"), 1);
++}
++
++#[test]
++fn saved_grace_expiry_takes_the_supervisor_reconnect_path() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(5));
++
++    remote.set_knob(knob::EOF_RECONNECT, "");
++    remote.signal_leg(&client.id, libc::SIGKILL);
++    // Past the 5 s grace the bridge gives up; the supervisor then builds a new bridge and
++    // dials a fresh leg 0 (the knob spares leg 0), i.e. a second session.
++    assert!(
++        client.wait_event("session_end", 1, Duration::from_secs(45)),
++        "bridge never gave up: {}",
++        fail_context(&remote, &client)
++    );
++    assert!(
++        wait(|| remote.keeper_event_count("server_connect") == 2),
++        "no supervisor reconnect: {}",
++        fail_context(&remote, &client)
++    );
++    let tag = "after-reconnect";
++    assert!(
++        mosh_harness::wait_until(READY, Duration::from_millis(500), || {
++            if marks(&remote).contains(&format!("MK{tag}")) {
++                return true;
++            }
++            type_mark(&mut client, tag);
++            false
++        }),
++        "saved machine never recovered: {}",
++        fail_context(&remote, &client)
++    );
++    assert!(!client.exited());
++    assert_eq!(live_sessions(&remote), 1, "{:?}", remote.keeper_events());
++}
++
++#[test]
++fn two_clients_have_independent_sessions() {
++    let remote = Remote::start();
++    let opts = ClientOptions::grace(60);
++    let mut first = remote.spawn_remote_client(&opts);
++    first.wait_attached(&remote, READY);
++    let mut second = remote.spawn_remote_client(&opts);
++    second.wait_attached(&remote, READY);
++    assert!(
++        remote.wait_leg_count(&first.id, 1, READY) && remote.wait_leg_count(&second.id, 1, READY)
++    );
++    assert_eq!(
++        remote.keeper_pids().len(),
++        1,
++        "both clients share one keeper"
++    );
++    assert_eq!(remote.keeper_event_count("server_connect"), 2);
++
++    remote.signal_leg(&first.id, libc::SIGKILL);
++    assert!(
++        first.wait_event("welcome", 2, READY),
++        "{}",
++        fail_context(&remote, &first)
++    );
++    assert!(first.has_welcome("resumed"));
++    // Both clients drive the same pane, so type one at a time.
++    type_mark(&mut first, "first");
++    assert!(
++        wait(|| marks(&remote).contains(&"MKfirst".to_owned())),
++        "{}",
++        fail_context(&remote, &first)
++    );
++    type_mark(&mut second, "second");
++    assert!(
++        wait(|| marks(&remote).contains(&"MKsecond".to_owned())),
++        "{}",
++        fail_context(&remote, &second)
++    );
++    // The other client never noticed.
++    assert_eq!(
++        second.event_count("leg_down"),
++        0,
++        "{}",
++        fail_context(&remote, &second)
++    );
++    assert_eq!(second.event_count("welcome"), 1);
++    assert_eq!(remote.leg_pids(&second.id).len(), 1);
++    assert_eq!(
++        remote.keeper_event_count("server_connect"),
++        2,
++        "a resume reconnected to the server"
++    );
++}
++
++#[test]
++fn client_exit_ends_the_keeper_session_within_two_seconds() {
++    // The UI process dies while the leg is alive: the bridge sees a client EOF (and then the
++    // bridge is dropped, which sets should_stop). The keeper must hear END{client-gone}.
++    let remote = Remote::start();
++    let mut client = attached_remote(&remote);
++    let begin = Instant::now();
++    let ui = ui_child(client.pid().unwrap()).expect("the --remote client runs a UI child");
++    // SAFETY: the pid is a child of the client process this test started.
++    assert_eq!(unsafe { libc::kill(ui, libc::SIGKILL) }, 0);
++    assert!(
++        mosh_harness::wait_until(Duration::from_secs(2), Duration::from_millis(20), || {
++            session_ends(&remote, "client-gone") == 1
++        }),
++        "keeper session did not end with client-gone within 2 s ({:?} elapsed): {}",
++        begin.elapsed(),
++        fail_context(&remote, &client)
++    );
++    assert!(client.wait_exit(Duration::from_secs(10)));
++    assert_eq!(live_sessions(&remote), 0);
++}
++
++#[test]
++fn saved_machine_quit_ends_the_keeper_session_within_two_seconds() {
++    // Quitting the saved-machine client stops its in-process bridge (should_stop) while the
++    // leg is alive: END{client-gone} must reach the keeper at once. Repeated because the
++    // bridge's stop races the UI closing its socket.
++    for round in 0..4 {
++        let remote = Remote::start();
++        let mut client = saved(&remote, &ClientOptions::grace(60));
++        let begin = Instant::now();
++        client.type_keys("\x02q");
++        assert!(
++            mosh_harness::wait_until(Duration::from_secs(2), Duration::from_millis(20), || {
++                session_ends(&remote, "client-gone") == 1
++            }),
++            "round {round}: keeper session did not end with client-gone within 2 s ({:?} elapsed): {}",
++            begin.elapsed(),
++            fail_context(&remote, &client)
++        );
++        assert!(client.wait_exit(Duration::from_secs(10)), "round {round}");
++        assert_eq!(live_sessions(&remote), 0, "round {round}");
++    }
++}
++
++fn attached_remote(remote: &Remote) -> Client {
++    let client = remote.spawn_remote_client(&ClientOptions::grace(60));
++    client.wait_attached(remote, READY);
++    assert!(remote.wait_leg_count(&client.id, 1, READY));
++    client
++}
++
++/// Child of `parent` (the thin UI process a `--remote` client starts).
++fn ui_child(parent: u32) -> Option<libc::pid_t> {
++    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
++        let Some(pid) = entry
++            .file_name()
++            .to_str()
++            .and_then(|n| n.parse::<libc::pid_t>().ok())
++        else {
++            continue;
++        };
++        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
++            continue;
++        };
++        // pid (comm) state ppid ...: comm may contain spaces, so split after the last ')'.
++        let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
++        let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
++        if fields.get(1).and_then(|p| p.parse::<u32>().ok()) == Some(parent)
++            && String::from_utf8_lossy(&cmdline).contains("client")
++        {
++            return Some(pid);
++        }
++    }
++    None
++}
++
++#[test]
++fn saved_reconnect_through_the_same_path_evicts_the_parked_session() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(300));
++    assert_eq!(live_sessions(&remote), 1);
++
++    // Outage with the old session parked in the keeper. Reconnect legs fail but leg 0 works.
++    remote.set_knob(knob::EOF_RECONNECT, "");
++    remote.signal_leg(&client.id, libc::SIGKILL);
++    assert!(client.wait_event("leg_down", 1, READY));
++    // More input than the 8 MiB local ring holds ends the connection with the leg still down;
++    // the supervisor then reconnects through the same local socket path with previous_token.
++    for _ in 0..10 {
++        paste_mib(&mut client);
++    }
++    assert!(
++        client.wait_event("session_end", 1, Duration::from_secs(60)),
++        "local ring never overflowed: {}",
++        fail_context(&remote, &client)
++    );
++    assert!(
++        wait(|| session_ends(&remote, "evicted") == 1),
++        "the parked session was not evicted: {}",
++        fail_context(&remote, &client)
++    );
++    assert_eq!(remote.keeper_event_count("server_connect"), 2);
++    assert_eq!(live_sessions(&remote), 1, "{:?}", remote.keeper_events());
++    let tag = "after-eviction";
++    assert!(
++        mosh_harness::wait_until(READY, Duration::from_millis(500), || {
++            if marks(&remote).contains(&format!("MK{tag}")) {
++                return true;
++            }
++            type_mark(&mut client, tag);
++            false
++        }),
++        "{}",
++        fail_context(&remote, &client)
++    );
++}
++
++fn paste_mib(client: &mut Client) {
++    let block = format!("{}\n", "0123456789abcdef".repeat(4)).repeat(1024);
++    client.type_bytes(b"\x1b[200~");
++    for _ in 0..16 {
++        client.type_bytes(block.as_bytes());
++    }
++    client.type_bytes(b"\x1b[201~");
++}
++
++#[test]
++fn saved_live_handoff_reconnects_and_leaves_one_session() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(60));
++    let reply = remote
++        .request(serde_json::json!({"id":"handoff","method":"server.live_handoff","params":{}}));
++    assert!(reply.get("error").is_none(), "{reply}");
++    // Today's reconnect: the saved machine comes back through the same bridge socket.
++    assert!(
++        wait(|| remote.keeper_event_count("server_connect") == 2),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    let tag = "after-handoff";
++    assert!(
++        mosh_harness::wait_until(READY, Duration::from_millis(500), || {
++            if marks(&remote).contains(&format!("MK{tag}")) {
++                return true;
++            }
++            type_mark(&mut client, tag);
++            false
++        }),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    assert!(!client.exited());
++    assert!(
++        wait(|| live_sessions(&remote) == 1),
++        "{:?}",
++        remote.keeper_events()
++    );
++    assert!(!client.output_text().contains("lost connection"));
++}
++
++#[test]
++fn saved_request_buffered_past_the_command_timeout_executes_once_on_resume() {
++    let remote = Remote::start();
++    let mut client = saved(&remote, &ClientOptions::grace(240));
++    let tabs_before = remote.tab_count();
++
++    remote.set_knob(knob::EOF_WELCOME, "");
++    remote.signal_leg(&client.id, libc::SIGKILL);
++    assert!(
++        client.wait_screen("unreachable", READY),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    // Prefix + c, then Enter on the name prompt: an endpoint request that cannot reach the server.
++    client.type_keys("\x02c");
++    sleep_ms(1000);
++    client.type_keys("\r");
++    // ENDPOINT_COMMAND_TIMEOUT is 60 s: the request is stale before the leg returns.
++    assert!(
++        mosh_harness::wait_for(Duration::from_secs(90), || client
++            .screen()
++            .contains("did not respond")),
++        "the request never timed out client-side: {}",
++        fail_context(&remote, &client)
++    );
++    assert_eq!(
++        remote.tab_count(),
++        tabs_before,
++        "request executed during the outage"
++    );
++    assert!(!client.exited());
++
++    remote.clear_knob(knob::EOF_WELCOME);
++    assert!(
++        client.wait_event("welcome", 2, Duration::from_secs(30)),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    assert!(
++        wait(|| remote.tab_count() == tabs_before + 1),
++        "tabs: {}",
++        remote.tab_count()
++    );
++    sleep_ms(3000);
++    assert_eq!(
++        remote.tab_count(),
++        tabs_before + 1,
++        "request executed more than once"
++    );
++    assert!(remote.plain_bridges(&client.id).is_empty());
++}

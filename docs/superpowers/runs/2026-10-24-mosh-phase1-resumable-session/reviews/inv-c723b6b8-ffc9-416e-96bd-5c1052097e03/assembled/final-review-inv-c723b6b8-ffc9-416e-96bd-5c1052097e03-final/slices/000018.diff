@@ -1,0 +1,39 @@
+diff --git a/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md
+new file mode 100644
+index 00000000..b853f7c5
+--- /dev/null
++++ b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md
+@@ -0,0 +1,33 @@
++requirements:
++R1 → mosh-dqw.1, mosh-dqw.4, mosh-dqw.6, mosh-dqw.7, mosh-dqw.8, mosh-dqw.10, mosh-dqw.9
++R2 → mosh-dqw.8, mosh-dqw.5, mosh-dqw.2, mosh-dqw.1, mosh-dqw.9
++R3 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.6, mosh-dqw.9
++R4 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
++R5 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.5, mosh-dqw.9
++R6 → mosh-dqw.2, mosh-dqw.5, mosh-dqw.8, mosh-dqw.9
++R7 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
++R8 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
++R9 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
++R10 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
++R11 → mosh-dqw.4, mosh-dqw.9
++R12 → mosh-dqw.8, mosh-dqw.6, mosh-dqw.10, mosh-dqw.1, mosh-dqw.9
++R13 → mosh-dqw.6, mosh-dqw.9
++R14 → mosh-dqw.3, mosh-dqw.1
++R15 → mosh-dqw.3
++R16 → mosh-dqw.1, mosh-dqw.10, mosh-dqw.7, mosh-dqw.9
++R17 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8
++R18 → mosh-dqw.1
++R-new: the remote keeper exits on its own once it holds no parked sessions → (unmapped)
++
++GAP · R18 · cross-host config
++GAP · R11 · D6 behaviour unnamed (ledger C8)
++GAP · R17 · no idle-link e2e case
++GAP · keeper lifetime · idle exit / version mismatch
++GAP · R2 · saved-machine call site (ledger C4)
++UNOWNED-SEAM · upstream touch list and hook tag format
++UNOWNED-SEAM · keeper spawn entry point
++UNOWNED-SEAM · capability advertisement format (ledger C12)
++UNOWNED-SEAM · mosh module tree consumed by .2/.3
++ORPHAN · mosh-dqw.3 · R15 not derivable from goal
++GAP · C14 cross-host
++NEEDS-SPEC: mosh-dqw.7

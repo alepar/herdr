@@ -1,0 +1,18 @@
+# friction log — 2026-10-24-mosh-phase1-resumable-session
+- [pre-flight] repo had no beads tracker; initialized with `bd init --stealth -p mosh` (tracker excluded via .git/info/exclude) instead of stopping, since the user requested the run explicitly at launch.
+- [pre-flight] `.worktrees/` ignored via .git/info/exclude instead of committing to upstream-owned .gitignore (fork minimal-diff rule).
+- [pre-flight] docs/* is upstream-gitignored; run-directory files are force-added (git add -f) on every commit.
+- [phase 2] design roast rung: Workflow
+- [phase 2] round 1 roast ran without --review-readiness (caller omission) → [low coverage] qualifier; supplied from round 2
+- [phase 2] parallelism pass: graph-pass judge not dispatched because graph-shape reported no candidate that reduces depth (all 5→5)
+- [phase 2] design roast converged at round 2 with 8 sub-Blocking findings; all 8 applied inline as spec+bead amendments (punch list "file or decline": chosen to fix at design time, not re-roasted)
+- [phase 3 prep] zig 0.16.0 was missing (vendored libghostty-vt build dep); installed official release to ~/.local/opt (sha256 verified) and symlinked ~/.local/bin/zig. bun missing → just check's maintenance-test unavailable; sweep = cargo nextest + clippy -D warnings + fmt --check
+- [phase 3 prep] .superpowers/ (super-code workspace) excluded via .git/info/exclude, not .gitignore (fork minimal-diff)
+- [phase 3 prep] run-start baseline: 4116 run, 4102 passed, 14 failed (pre-run: agent/api_ping/cross_area/live_handoff agent-status tests; evidence/run-start-baseline.txt). Not this run's fix scope.
+- [phase 3] review collection gap: final-review-*.md and 4 cluster reports use ### finding headings; report-verdict --complete rejects them (empty finding section). Producer/extractor format mismatch in super-code final review.
+- [phase 3] coordinator run-failure attribution compared against base 992f6a45 (already contains fork code) instead of run-start baseline; caller re-attributed the 15th failure (client_mode idle-timeout) as run-introduced.
+- [phase 4] assembler: unavailable — review input selection: provenance unavailable; captured source available (incomplete claimed collection inv-c723b6b8). Round 1 code roast run as a separately named bounded direct review over product paths (docs/superpowers/** unreviewed); round/whole-range review stays unavailable for acceptance.
+- [phase 4] assembler: unavailable — review input selection: provenance unavailable; captured source available (incomplete claimed collection inv-c723b6b8). Round 1 code roast run as a bounded direct review over product paths (docs/superpowers/** unreviewed); round/whole-range review stays unavailable for acceptance.
+- [phase 5] report-verdict --complete rejects the super-roast PR report ('finding text without a list marker in Unverified nits (spot-checked)') → finding-source/projection unavailable; punch-list file written from scope-dispositions output instead of scope-dispositions --project --keys
+- [phase 5] re-entered super-code (fix round 1) despite inv-c723b6b8 collection gap (exit 3): gap is a producer/extractor format mismatch, sources retained in workspace+archive, parked as degraded-verdict
+- [phase 5] round-4 (cap round) step-back not dispatched: three test-only findings in one new test; recorded local by the orchestrator. Loop exited capped with 0 Blocking; round-4 findings punch-listed.

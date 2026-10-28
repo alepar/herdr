@@ -1,0 +1,10 @@
+requirements: R1-R19 all mapped
+R-new: local/remote builds of different versions interoperate or fall back to plain → .4/.10
+R-new: all fork code under src/mosh/ → .2/.3 (conflict)
+GAP · code location (.2/.3 outside src/mosh) (ledger C29)
+UNOWNED-SEAM · hook tag format and per-task budget (ledger C24)
+GAP · R2 health mechanism unnamed
+UNOWNED-SEAM · capability advertisement owner vs .6 edge
+GAP · cross-version interoperability
+GAP · R14/R15/R18 verification outside .3
+GAP · R18 MoshConfig field scope

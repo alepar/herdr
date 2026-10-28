@@ -1,0 +1,32 @@
+t+5s connected? out=5 procs: 3
+t+5s DROP applied
+t+13s SIGKILL client pid=525183; all ssh procs for 127.0.0.2: 525174 python3 -I <scratch>/ptyrun.py <scratch>/tty-A.log sleep 600 | ssh -C -F <scratch>/cfg-A -S /tmp/claude-1001/mp-A -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.2 'echo moshprobe-A; while :; do sleep 1; date; done' > <scratch>/out-A.log;525179 sh -c sleep 600 | ssh -C -F <scratch>/cfg-A -S /tmp/claude-1001/mp-A -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.2 'echo moshprobe-A; while :; do sleep 1; date; done' > <scratch>/out-A.log;525183 ssh -C -F <scratch>/cfg-A -S /tmp/claude-1001/mp-A -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.2 echo moshprobe-A; while :; do sleep 1; date; done;
+t+133s end; remaining ssh procs: 525174 python3 -I <scratch>/ptyrun.py <scratch>/tty-A.log sleep 600 | ssh -C -F <scratch>/cfg-A -S /tmp/claude-1001/mp-A -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.2 'echo moshprobe-A; while :; do sleep 1; date; done' > <scratch>/out-A.log;525179 sh -c sleep 600 | ssh -C -F <scratch>/cfg-A -S /tmp/claude-1001/mp-A -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.2 'echo moshprobe-A; while :; do sleep 1; date; done' > <scratch>/out-A.log;
+t+5s connected? out=5 procs: 3
+t+5s DROP applied
+t+13s SIGKILL client pid=508283; all ssh procs for 127.0.0.3: 508271 python3 -I <scratch>/ptyrun.py <scratch>/tty-B.log sleep 600 | ssh -C -F <scratch>/cfg-B  -T 127.0.0.3 'echo moshprobe-B; while :; do sleep 1; date; done' > <scratch>/out-B.log;508278 sh -c sleep 600 | ssh -C -F <scratch>/cfg-B  -T 127.0.0.3 'echo moshprobe-B; while :; do sleep 1; date; done' > <scratch>/out-B.log;508283 ssh -C -F <scratch>/cfg-B -T 127.0.0.3 echo moshprobe-B; while :; do sleep 1; date; done;
+t+133s end; remaining ssh procs: 508271 python3 -I <scratch>/ptyrun.py <scratch>/tty-B.log sleep 600 | ssh -C -F <scratch>/cfg-B  -T 127.0.0.3 'echo moshprobe-B; while :; do sleep 1; date; done' > <scratch>/out-B.log;508278 sh -c sleep 600 | ssh -C -F <scratch>/cfg-B  -T 127.0.0.3 'echo moshprobe-B; while :; do sleep 1; date; done' > <scratch>/out-B.log;
+t+5s connected? out=5 procs: 3
+t+5s DROP applied
+t+13s SIGKILL client pid=525178; all ssh procs for 127.0.0.4: 525171 python3 -I <scratch>/ptyrun.py <scratch>/tty-C.log sleep 600 | ssh -C -F <scratch>/cfg-C -S /tmp/claude-1001/mp-C -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.4 'echo moshprobe-C; while :; do sleep 1; date; done' > <scratch>/out-C.log;525176 sh -c sleep 600 | ssh -C -F <scratch>/cfg-C -S /tmp/claude-1001/mp-C -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.4 'echo moshprobe-C; while :; do sleep 1; date; done' > <scratch>/out-C.log;525178 ssh -C -F <scratch>/cfg-C -S /tmp/claude-1001/mp-C -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.4 echo moshprobe-C; while :; do sleep 1; date; done;
+t+40s RESTORED link
+t+133s end; remaining ssh procs: 525171 python3 -I <scratch>/ptyrun.py <scratch>/tty-C.log sleep 600 | ssh -C -F <scratch>/cfg-C -S /tmp/claude-1001/mp-C -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.4 'echo moshprobe-C; while :; do sleep 1; date; done' > <scratch>/out-C.log;525176 sh -c sleep 600 | ssh -C -F <scratch>/cfg-C -S /tmp/claude-1001/mp-C -o ControlMaster=auto -o ControlPersist=600 -T 127.0.0.4 'echo moshprobe-C; while :; do sleep 1; date; done' > <scratch>/out-C.log;
+t+4s leg0 ssh pid=570461 out-lines=4
+t+4s drop applied on 127.0.0.11
+t+7s TTY: [t+6.9s] Timeout, server 127.0.0.11 not responding.    
+t+12s leg0 already exited before herdr kill
+t+104s end
+t+4s leg0 ssh pid=570454 out-lines=4
+t+4s reject applied on 127.0.0.12
+t+12s SIGKILL leg0 (herdr 8s silence)
+t+104s end
+t+0s pre-created master
+t+4s leg0 ssh pid=570539 out-lines=4
+t+4s reject applied on 127.0.0.13
+t+12s leg0 already exited before herdr kill
+t+105s end
+t+4s leg0 ssh pid=570457 out-lines=4
+t+4s drop applied on 127.0.0.15
+t+12s SIGKILL leg0 (herdr 8s silence)
+t+78s TTY: [t+77.9s] Timeout, server 127.0.0.15 not responding.    
+t+105s end

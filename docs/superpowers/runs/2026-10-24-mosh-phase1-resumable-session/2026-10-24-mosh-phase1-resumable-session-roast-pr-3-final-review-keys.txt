@@ -1,0 +1,2 @@
+review: not ready
+[Must-fix] src/mosh/local_bridge.rs tick_closing Phase B — EndSent Closing checks only reader_done; a leg writer failure waits out 500 ms and completes without END

@@ -1,0 +1,1 @@
+agent_commands_work @ tip: 3/3 fail; @ run-start dec51b74: 1/1 fail (same panic tests/cli/harness.rs:379) — pre-run, environment-dependent (passed once in the original baseline run)

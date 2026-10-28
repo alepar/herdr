@@ -1,0 +1,151 @@
+diff --git a/tests/mosh_integration.rs b/tests/mosh_integration.rs
+new file mode 100644
+index 00000000..76cf29db
+--- /dev/null
++++ b/tests/mosh_integration.rs
+@@ -0,0 +1,145 @@
++//! Integration sweep over the combined resumable-session tree (mosh-dqw.11): cases no
++//! per-bead test covers, over the fake ssh from `mosh_harness`.
++
++#![cfg(unix)]
++
++#[path = "mosh_harness.rs"]
++pub mod mosh_harness;
++pub mod support;
++
++use std::collections::BTreeSet;
++use std::time::Duration;
++
++use mosh_harness::{knob, Client, ClientOptions, Remote};
++
++const READY: Duration = Duration::from_secs(30);
++
++fn fail_context(remote: &Remote, client: &Client) -> String {
++    format!(
++        "screen:\n{}\nlocal: {:?}\nkeeper: {:?}\nlegs: {:?}",
++        client.screen(),
++        client.events(),
++        remote.keeper_events(),
++        remote.session_legs(&client.id)
++    )
++}
++
++/// Wall-clock ms of the first keeper event named `event`.
++fn keeper_ms(remote: &Remote, event: &str) -> Option<u64> {
++    remote
++        .keeper_events()
++        .iter()
++        .find(|line| line["event"] == event)
++        .and_then(|line| line["ms"].as_u64())
++}
++
++/// R18: the keeper takes the grace period from `HELLO.grace_ms`, not from its own
++/// environment. The client asks for 5 s; the remote environment says 3600 s.
++#[test]
++fn keeper_grace_comes_from_hello_not_the_remote_environment() {
++    let remote = Remote::start();
++    let opts = ClientOptions {
++        env: vec![("FAKE_SSH_REMOTE_GRACE".to_owned(), "3600".to_owned())],
++        ..ClientOptions::grace(5)
++    };
++    let mut client = remote.spawn_remote_client(&opts);
++    client.wait_attached(&remote, READY);
++    assert!(remote.wait_leg_count(&client.id, 1, READY));
++
++    // Kill the leg and keep every reconnect failing for longer than the grace period.
++    remote.set_knob(knob::FAIL255, "");
++    remote.signal_leg(&client.id, libc::SIGKILL);
++    assert!(
++        remote.wait_keeper_event("leg_down", 1, READY),
++        "{}",
++        fail_context(&remote, &client)
++    );
++    std::thread::sleep(Duration::from_secs(8));
++    remote.clear_knob(knob::FAIL255);
++
++    assert!(
++        remote.wait_keeper_event("session_end", 1, Duration::from_secs(10)),
++        "keeper never ended the session: {}",
++        fail_context(&remote, &client)
++    );
++    let events = remote.keeper_events();
++    let end = events
++        .iter()
++        .find(|line| line["event"] == "session_end")
++        .unwrap();
++    assert_eq!(end["reason"], "grace", "{events:?}");
++    let down = keeper_ms(&remote, "leg_down").unwrap();
++    let ended = end["ms"].as_u64().unwrap();
++    let elapsed = ended.saturating_sub(down);
++    assert!(
++        (4_000..=7_500).contains(&elapsed),
++        "grace ran {elapsed} ms after leg_down, expected about 5000 (env says 3600 s): {events:?}"
++    );
++
++    assert!(
++        client.wait_exit(Duration::from_secs(30)),
++        "client still running: {}",
++        fail_context(&remote, &client)
++    );
++    assert!(
++        client.output_text().contains("to reattach"),
++        "no reattach hint: {}",
++        client.output_text()
++    );
++}
++
++/// A saved machine and a `--remote` session to the same host share one keeper but keep two
++/// sessions with two tokens, and an outage of one leaves the other alone.
++#[test]
++fn saved_machine_and_remote_session_share_one_keeper_with_two_tokens() {
++    let remote = Remote::start();
++    let opts = ClientOptions::grace(60);
++    let mut remote_client = remote.spawn_remote_client(&opts);
++    remote_client.wait_attached(&remote, READY);
++    assert!(remote.wait_leg_count(&remote_client.id, 1, READY));
++
++    let mut saved_client = remote.spawn_saved_client(&opts);
++    saved_client.wait_attached(&remote, READY);
++    assert!(remote.wait_leg_count(&saved_client.id, 1, READY));
++    // Input is dropped until the saved endpoint finishes activating.
++    assert!(
++        remote.wait_mark(&mut saved_client, "saved-up", READY),
++        "{}",
++        fail_context(&remote, &saved_client)
++    );
++
++    assert_eq!(
++        remote.keeper_pids().len(),
++        1,
++        "{:?}",
++        remote.keeper_details()
++    );
++    let tokens: BTreeSet<String> = remote
++        .keeper_events()
++        .iter()
++        .filter(|line| line["event"] == "server_connect")
++        .filter_map(|line| line["token"].as_str().map(str::to_owned))
++        .collect();
++    assert_eq!(tokens.len(), 2, "{:?}", remote.keeper_events());
++
++    // Outage on the saved machine's leg only; the --remote session never notices.
++    remote.signal_leg(&saved_client.id, libc::SIGKILL);
++    assert!(
++        saved_client.has_welcome_after_resume(READY),
++        "{}",
++        fail_context(&remote, &saved_client)
++    );
++    assert!(
++        remote.wait_mark(&mut saved_client, "saved-after", READY),
++        "{}",
++        fail_context(&remote, &saved_client)
++    );
++    assert!(
++        remote.wait_mark(&mut remote_client, "remote-after", READY),
++        "{}",
++        fail_context(&remote, &remote_client)
++    );
++    assert_eq!(remote_client.event_count("leg_down"), 0);
++    assert_eq!(remote.keeper_pids().len(), 1);
++    assert_eq!(remote.keeper_event_count("server_connect"), 2);
++}

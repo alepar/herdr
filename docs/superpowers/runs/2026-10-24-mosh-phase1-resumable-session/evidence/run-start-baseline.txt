@@ -1,0 +1,19 @@
+run-start baseline @ dec51b74be2570218bf9bad81e62f32954bb9729 — cargo nextest run --locked --no-fail-fast (linux x86_64, zig 0.16.0, quiet host)
+exit=100
+        FAIL [   1.008s] ( 159/4116) herdr::cli cases::agents::agent_start_command_works
+        FAIL [   1.025s] ( 132/4116) herdr::api_ping events_subscribe_streams_workspace_tab_and_agent_events
+        FAIL [   1.095s] ( 175/4116) herdr::cli cases::agents::agent_start_waits_for_a_new_pane_shell_to_finish_initializing
+        FAIL [   1.129s] ( 138/4116) herdr::api_ping metadata_status_subscription_filter_and_ttl_expiry_are_observable
+        FAIL [   3.503s] ( 272/4116) herdr::api_ping official_release_waits_for_confirmed_process_exit
+        FAIL [   3.596s] ( 276/4116) herdr::api_ping pane_clear_agent_authority_restores_fallback_state
+        FAIL [   3.616s] ( 277/4116) herdr::api_ping pane_report_agent_updates_effective_state
+        FAIL [   4.277s] ( 382/4116) herdr::cli cases::agents::agent_start_stops_retrying_when_the_pane_shell_stays_busy
+        FAIL [   4.415s] ( 305/4116) herdr::api_ping events_subscribe_streams_output_and_agent_status_events
+        FAIL [   4.443s] ( 312/4116) herdr::cli cases::agent_options::agent_wait_accepts_repeated_until_and_exits_when_one_status_matches
+        FAIL [   5.763s] (4104/4116) herdr::cross_area cross_area_agent_process_survives_detach_and_reattach
+        FAIL [   6.280s] (4111/4116) herdr::live_handoff live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session
+        FAIL [  10.971s] (4112/4116) herdr::cli cases::agent_wait::agent_wait_exits_when_done_status_matches
+        FAIL [  12.608s] (4114/4116) herdr::api_ping pane_info_and_subscriptions_expose_done_agent_status
+     Summary [  20.448s] 4116 tests run: 4102 passed, 14 failed, 17 skipped
+
+[exited with code 0]

@@ -1,0 +1,12 @@
+diff --git a/src/client/shell/composition.rs b/src/client/shell/composition.rs
+index b7ab4a96..87a4cf80 100644
+--- a/src/client/shell/composition.rs
++++ b/src/client/shell/composition.rs
+@@ -720,6 +720,7 @@ impl ClientShellState {
+             self.hits.pane_splits.clear();
+             self.hits.popup = None;
+         }
++        #[rustfmt::skip] let () = crate::client::mosh_outage::paint(&mut frame, &self.active_endpoint_id, self.endpoint_label(&self.active_endpoint_id)); // mosh-fork hook
+         let graphics = self.compose_graphics(layout, &occlusion);
+         Some(crate::client::frame_output::ComposedFrame { frame, graphics })
+     }

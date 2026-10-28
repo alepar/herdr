@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
+#[rustfmt::skip] const STABLE_UPDATE_MANIFEST_URL: &str = match option_env!("HERDR_STABLE_UPDATE_MANIFEST_URL") { Some(url) if !url.is_empty() => url, _ => "https://herdr.dev/latest.json" }; // mosh-fork hook
+#[rustfmt::skip] const PREVIEW_UPDATE_MANIFEST_URL: &str = match option_env!("HERDR_PREVIEW_UPDATE_MANIFEST_URL") { Some(url) if !url.is_empty() => url, _ => "https://herdr.dev/preview.json" }; // mosh-fork hook
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";

@@ -1,0 +1,5 @@
+review: not ready
+[Must-fix] src/mosh/remote/keeper.rs run_leg — PeerEnd remove_session can drop bytes still queued on to_server (client's final Detach)
+[Must-fix] src/mosh/ssh_leg.rs dial_command — reconnect-leg spawn_leg error classified Fatal instead of Retryable
+[Must-fix] src/mosh/remote/keeper.rs run_timers — fully acked eof session parked for grace instead of removed
+[Must-fix] src/mosh/ssh_leg.rs spawn_leg teardown / local_bridge.rs pre_welcome_failed — unbounded child wait and stderr-thread join

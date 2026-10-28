@@ -1,0 +1,18 @@
+{"inspected":[
+{"path":"src/cli/status.rs","hunks":["@@ -299,6 +299,8 @@ fn client_status_json() -> ClientStatusJson {"]},
+{"path":"src/client/mod.rs","hunks":["@@ -30,6 +30,7 @@ mod handshake;","@@ -2091,6 +2092,7 @@ async fn run_client_loop("]},
+{"path":"src/client/shell/composition.rs","hunks":["@@ -720,6 +720,7 @@ impl ClientShellState {"]},
+{"path":"src/remote/attach.rs","hunks":["@@ -27,6 +27,7 @@ use std::sync::{","@@ -87,7 +88,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {"]},
+{"path":"src/remote/host.rs","hunks":["@@ -12,6 +12,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {","@@ -22,6 +23,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {"]},
+{"path":"src/remote/saved.rs","hunks":["@@ -32,7 +32,7 @@ pub(crate) fn connect_saved_ssh("]},
+{"path":"src/update.rs","hunks":["@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};"]},
+{"path":"src/mosh/mod.rs","hunks":["@@ -0,0 +1,237 @@"]},
+{"path":"src/mosh/remote/mod.rs","hunks":["@@ -0,0 +1,420 @@"]},
+{"path":"src/mosh/remote/attacher.rs","hunks":["@@ -0,0 +1,526 @@"]},
+{"path":"src/mosh/ring.rs","hunks":["@@ -0,0 +1,166 @@"]},
+{"path":"src/mosh/link_frames.rs","hunks":["@@ -0,0 +1,234 @@"]},
+{"path":"src/mosh/outage.rs","hunks":["@@ -0,0 +1,314 @@"]},
+{"path":"tests/mosh_status.rs","hunks":["@@ -0,0 +1,31 @@"]},
+{"path":"scripts/mosh-diff-budget.sh","hunks":["@@ -0,0 +1,71 @@"]},
+{"path":"docs/superpowers/specs/INDEX.md","hunks":["@@ -0,0 +1,5 @@"]}
+]}

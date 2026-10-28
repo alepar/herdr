@@ -1,0 +1,504 @@
+diff --git a/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md
+new file mode 100644
+index 00000000..eb0747ff
+--- /dev/null
++++ b/docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md
+@@ -0,0 +1,498 @@
++# Touch Map and Minimal-Diff Strategy for the herdr mosh-like fork
++
++Scope: `github.com/alepar/herdr` (remote `fork`), tracking `herdrdev/herdr` (`origin`, about 1596 commits in 6 months). Citations are relative to `/var/home/alepar/AleCode/herdr` at `5608de06`. **[re-verified]** marks points that the workstreams or critics disputed and that were checked against the source for this final version.
++
++---
++
++## 0. The decision this document turns on (D1)
++
++The workstreams put Phase 1 in two incompatible places.
++
++| | **A. Protocol-level Phase 1** (workstreams p1-acks, p1-input, p1-resume, p1-remote) | **B. Link-level Phase 1** (Eternal-Terminal style) |
++|---|---|---|
++| Where the resume logic lives | Inside the herdr endpoint protocol: surface-ack ring, sequenced input envelope, server-side detached-client record, `--remote` reconnect | In a resumable byte-stream session between a fork local bridge and a fork remote "keeper" process. The keeper holds the server socket open while ssh is down |
++| What the server and TUI see on an ssh kill | A disconnect, then a reconnect and a resume handshake | No disconnect. The server's `ClientConnection` stays registered and the client socket stays open. The client sees a pause, kept alive by injected keepalives (§2.1) |
++| Lines in existing files | about 220 | **about 8** |
++| Hot files touched | headless.rs about 13, client/mod.rs about 15, client_transport.rs about 25, render_stream.rs 14, handshake.rs 12, supervisor.rs 12, surface_reuse.rs 40 | none: main.rs, headless.rs, client/*, render_stream.rs, client_transport.rs, handshake.rs, wire.rs, endpoint.rs and app/mod.rs are all untouched |
++| Exactly-once delivery | Pane and popup input only. EndpointRequests are excluded (p1-input risk 5) | Every client-to-server byte, including EndpointRequests, resize and focus. Delivery is exactly once, but the *semantics* are not (see the row below) |
++| Late-delivery semantics | Same issue for the covered subset | Client-side deadlines fire during an outage and the buffered request still runs later. `ENDPOINT_COMMAND_TIMEOUT` = 60 s (`client/endpoint_commands.rs:12`) **[re-verified]**: the command is reported failed and then executes on resume, so a user retry runs it twice. `ACTIVATION_TIMEOUT` = 5 s (`client/endpoint/activation.rs:14`) **[re-verified]**: surface on/off pairs replay after the client's rollback (`client/mod.rs:2304-2323`). Buffered clicks and navigation keys replay against a layout another client may have changed |
++| No full snapshot on resume | Only when the client decoder baseline identity matches the server's parked baseline. That needs the ack ring (p1-resume risk 2) | Always within the grace period, because nothing was torn down. A deferred render is a pending flag, not a forced repaint (`clients.rs:453-465`) |
++| Server-side state while a client is down | The detached record is not an active client | The parked connection is still an active client. That has real effects (geometry, foreground state, focus, held keys). See §4.4 |
++| Survives server restart or live handoff | No (new `boot_id` gives a fresh session) | No. The keeper forwards EOF cut at a frame boundary and today's reconnect runs (§4.4) |
++| Reused by Phase 3 | The ack ring, resync and relaxed chain are prerequisites for QUIC drop-on-supersede | The keeper becomes the Phase 3 QUIC daemon, and the session layer becomes the QUIC stream's resume layer. Drop-on-supersede still needs the A-style ack ring, which moves to Phase 3b |
++
++**Recommendation: B for Phase 1, and A's surface-ack and resync work moved into Phase 3b.**
++
++Why this holds up:
++- Over SSH the stream is reliable, so frames are never lost except at disconnect. B makes disconnects lossless.
++- p1-acks reached the same conclusion: under the Optimistic (newest-sent) base on ordered transports, acks do no work in Phase 1 except feed resume.
++- B meets the Phase 1 acceptance criteria (ssh kill or netem loss leads to resume, zero lost input, no full snapshot) with a few percent of A's diff, and without touching any hot region.
++
++This departs from the plan's Phase 1 bullet list (`mosh-like-herdr-plan.md:5-13`), which names the protocol mechanisms explicitly, so it needs a decision. Section 2.2 keeps A in condensed form as the fallback design and as the Phase 3b work list.
++
++Facts B depends on, all re-verified:
++- Shell clients have no server-side write timeout. Only observers get `OBSERVER_WRITE_TIMEOUT` = 30 s (`server/client_transport.rs:45, 1076-1079`). A keeper that stops reading stalls the server writer; it does not disconnect it.
++- The render lane is a single slot, latest-wins (`client_transport.rs:320-330`) **[re-verified]**. The control lane is a plain `VecDeque` with **no cap** (`send_control`, `client_transport.rs:310-318`) **[re-verified]**. It carries notifications, snapshots, agent completions and Kitty `Graphics` payloads. A keeper that stops reading for a long time therefore grows server memory. §2.1 1b chooses the keeper's drain policy to avoid that.
++- The client counts any inbound `ServerMessage` as liveness before dispatch (`client/mod.rs:1457-1458`). An unknown `EndpointControl` kind decodes to `Ignored`; only `shell.snapshot.*` kinds are fatal (`client/endpoint/control.rs:61-66`, handled at `client/mod.rs:2139-2142`). The local bridge can therefore inject link frames harmlessly, under the rules in §2.1.
++- Saved-machine health is a 5 s idle ping with a 10 s timeout (`client/endpoint/health.rs:3-4`). Without injected keepalives, a resume must finish within about 10 s of the last ping, or the client tears down and does a full reconnect.
++- `SshStdioBridge::start_command` (`remote/attach.rs:3030`, `pub(super)`) spawns one ssh per accepted local connection, strips the preamble and supervises the child (`attach.rs:3259-3394`). `bridge_child(stream, command, stop)` (`attach.rs:3287`) takes a caller-built `Command`. A descendant module of `attach` can drive either one per leg without editing their bodies.
++- `SshStdioBridge` is `{local_socket, socket_identity, should_stop, failure_rx, thread}` (`attach.rs:2996-3002`) **[re-verified]**. Its `Drop` (`attach.rs:3108-3120`) sets `should_stop`, removes the socket if owned and joins the thread. A descendant module can build one with a struct literal around the local-bridge thread, so no wrapper enum is needed (§2.1 1c).
++
++---
++
++## 1. Diff-minimization principles
++
++### 1.1 Rules
++
++1. **Put fork code in a fork tree.** All new code goes under `src/mosh/`, plus `tests/mosh_*.rs`, `scripts/mosh-diff-budget.sh` and, in Phase 3, possibly `crates/herdr-mosh-net/`. `git diff upstream/master -- ':!src/mosh' ':!tests/mosh_*' ':!scripts/mosh-*' ':!HERDR_MOSH_VISION.md'` is the whole review surface. `scripts/mosh-diff-budget.sh` fails if that diff grows past a budget (20 lines through Phase 2). It is run by hand at each upstream merge, not as a `.github/workflows` job, because the workflow tree is upstream-owned and a fork job there is itself a conflict surface.
++
++2. **Mount the fork tree with `#[path]`, not visibility bumps or a `main.rs` line.**
++   - The `mod` block in `main.rs` (l.14-65) had 28 commits in 6 months **[re-verified]**, so it is not a quiet anchor.
++   - Phase 1 mounts the whole tree with **one line in `src/remote/attach.rs`**: `#[path = "../mosh/mod.rs"] pub(super) mod mosh; // mosh-fork hook`. A `#[path]` in a non-mod.rs file resolves relative to that file's directory, so this means `src/mosh/mod.rs`. Because the target file is named `mod.rs`, its own `mod session;` lines resolve under `src/mosh/`.
++   - Every fork module is then a descendant of `remote::attach`. It can reach private items: `RemoteHerdr` fields (`attach.rs:475-481`), `RemoteExecutable::{command, session_args}` (`attach.rs:367-394`), `ManagedSshOptions` fields (`attach.rs:725-731`), `SshStdioBridge` fields, `remote_client_status` (`attach.rs:2019`), `remote_binary_candidates`, `posix_remote_output_command` and `bridge_child`.
++   - Visibility: `pub(super) mod mosh` makes the module visible across `remote`. Items that `remote::saved` and `remote::host` call (`start_ui_bridge`, `remote::dispatch`) must be declared `pub(in crate::remote)`; `pub(super)` inside a submodule of `mosh` would reach only `mosh`.
++   - Later phases that need `impl HeadlessServer` or client internals mount *separate* fork files under those owners, for example `#[path = "../mosh/server_hooks.rs"] mod mosh_hooks;` next to the `mod` list at `headless.rs:77-85`. A file can be mounted only once, so each later module belongs to exactly one owner. If Phase 4 client code needs to call into the shared session code, that is when `mod mosh;` moves to `main.rs` (1 line), not before.
++   - Upstream already uses `#[path]` this way (`server/headless/tests/mod.rs:5-13`). If upstream renames an owner file, the build fails loudly and the fix is one line.
++
++3. **Hooks are one statement at a stable anchor, tagged.** Every edit to an upstream file is a single call, match arm, field or predicate, ending in `// mosh-fork hook`. After each upstream merge, `git grep -n 'mosh-fork'` lists the whole touch surface.
++
++4. **Prefer swap points to edits.** The two `SshStdioBridge::start(` UI call sites are the Phase 1 and Phase 3 transport seams: `attach.rs:90` in `run_remote` (4 commits in 6 months) and `saved.rs:35` in `connect_saved_ssh` (l.30-46: 3 commits).
++   - The third caller, `probe_remote_endpoint` (`attach.rs:2388-2405`), is **intentionally left plain**. It is metadata-only and uses the same `local_forward_socket_path` as `run_remote` (`attach.rs:57`, `2392`). The local bridge's `prepare_socket_path` relies on the probe having finished first. The test callers at `attach.rs:4012` and `4115` are unaffected.
++   - Hooking the first statement of `SshStdioBridge::start` (l.3005, 6 commits) instead of both call sites was considered and rejected. `start` does not receive the `RemoteSsh`, so the capability probe would have to rebuild one from private `ManagedSshConfig` layout.
++   - The remote entry is a guard arm in `remote/host.rs:7-21`. That avoids the `main.rs:565-567` dispatch and the `main.rs:767` allow-list. The `remote-client-bridge` dispatch runs before the allow-list **[re-verified]**.
++
++5. **Reuse upstream internals by calling them, never by copying them.** `start_command`, `bridge_child`, `posix_remote_output_command`, `RemoteExecutable::session_args`, `remote_binary_candidates` and `remote_client_status` are all reachable from the `#[path]` tree. The attach.rs bridge internals had 9 commits in the last 30 days, and copies would drift silently.
++
++6. **Leave frozen contracts byte-identical:**
++   - `ClientMessage` and `ServerMessage` variant order, `PROTOCOL_VERSION` = 22 and `ENDPOINT_PROTOCOL_GENERATION` = 1;
++   - `EndpointClientHello` fields (`protocol/endpoint.rs:46-75`), the bincode structs `PaneSurfacePatch` and `PaneSurfaceFrame`;
++   - `tests/fixtures/endpoint-method-shapes-v1.json`.
++
++7. **Prefix every fork-introduced name** with `x-mosh` / `x-mosh.`: EndpointControl kinds, status capability strings, bridge flags and env vars. An upstream name added later then cannot collide with different semantics. The workstream names such as `endpoint.surface-ack.v1` become `x-mosh.surface-ack.v1`, unless and until the piece is upstreamed under upstream's name.
++
++8. **Do not add hello fields.** Each new `EndpointClientHello` bool spreads to `ServerEvent::ClientShellConnected { .. }` literals: 16 in tests (`headless/tests/mod.rs` 11, `tests/surface_interest.rs` 5) and 8 in source (`client_transport.rs` 4, `headless.rs` 4). If a later phase must opt in per connection:
++   - the client merges an `x_mosh` object into the serialized hello JSON (there is no `deny_unknown_fields` on the struct, `endpoint.rs:46`);
++   - the server parses `data` a second time into a fork struct;
++   - better still, opt in implicitly by sending the first fork control message, as p1-acks does.
++
++9. **Use runtime capability negotiation, not cargo features.** Upstream has no `[features]` table. Remote capability detection reuses the open `endpoint_capabilities` list in `status client --json` (`cli/status.rs:298-302`), parsed into `RemoteClientStatusJson.endpoint_capabilities` (`attach.rs:2420`).
++   - The fork tree is not reachable from `cli` (rule 2), so `status.rs` pushes the **string literal** `"x-mosh-resume-bridge-v1"`. `src/mosh/mod.rs` holds the same constant, and a unit test asserts that `status client --json` output contains it.
++   - The kill switch is an env var on the client side, read inside `src/mosh/` (`HERDR_MOSH_RESUME=0`). Phase 1 needs no config key.
++
++10. **Dependencies, lock file and identity:**
++    - Phase 1 adds no dependencies. Tokens come from `/dev/urandom`, hashed with the existing `sha2`.
++    - Phase 3 dependencies go in one comment-headed block, or in a workspace crate.
++    - Never hand-merge `Cargo.lock`. Take upstream's version with `git checkout --theirs Cargo.lock`, then run `cargo check`. Never run `cargo update` in the fork.
++    - Never edit `Cargo.toml` `version =`. Label fork builds with `HERDR_BUILD_CHANNEL` / `HERDR_BUILD_ID` (`build_info.rs:6,10`).
++
++11. **Tests live in fork files, and the crate is binary-only.** There is no `src/lib.rs` and no `[lib]` target **[re-verified]**. So:
++    - `tests/mosh_resume.rs` and `tests/mosh_multi_client.rs` can only drive the `herdr` binary as a subprocess, reusing `tests/support`. The integration precedent for fake ssh on PATH is `tests/remote_attach.rs:69-107`; `tests/live_handoff.rs` is the precedent for the handoff test.
++    - In-process tests of legs, `start_command` and `bridge_child` must be `#[cfg(test)]` modules inside `src/mosh/ssh_leg.rs`, which is a descendant of `attach`. The unit test at `attach.rs:3684-3709` shows the in-process fake-ssh technique.
++    - Never add cases to `headless/tests/mod.rs` or the `client_transport.rs` test module.
++
++12. **Merge upstream weekly.** At 9 commits per 30 days in headless.rs and 13 in client/mod.rs, one-line hooks resolve trivially only while the context is fresh.
++
++13. **Fix repo hygiene before the first fork commit.** The working tree has 22 mode-only changes (755→644, 0 insertions or deletions), including `.githooks/commit-msg` and `.githooks/pre-commit`. The hooks are therefore not executable, and the conventional-commit check is silently skipped. Run `git checkout -- <paths>` to restore the +x bits, and do not commit them. `core.fileMode=true`.
++
++### 1.2 Proposed module tree
++
++```
++src/mosh/                 -- mounted as remote::attach::mosh via one #[path] line
++  mod.rs                  -- API (pub(in crate::remote)), env kill switch, x-mosh constants
++  session.rs              -- link session protocol: framing, byte-offset seq/ack, heartbeat, hello/welcome
++  ring.rs                 -- bounded replay rings (both directions) with a fixed cap
++  link_frames.rs          -- u32-LE length-prefix splitter + x-mosh.link.v1 keepalive encoder
++  local_bridge.rs         -- user-facing local socket; leg manager; client<->session pump; injection
++  ssh_leg.rs              -- remote command builder, per-leg ssh (start_command or bridge_child),
++                             capability probe + candidate re-selection, start_ui_bridge() swap target
++  remote/
++    mod.rs                -- dispatch(args) for --x-mosh-* flags
++    attacher.rs           -- ssh-exec'd process: stdio <-> keeper socket (short-lived, one per leg)
++    keeper.rs             -- detached per-(user, session) daemon: token -> {server LocalStream, rings}, grace
++  bootstrap_cache.rs      -- (deferred) cached RemoteHerdr per saved profile
++  quic/                   -- Phase 3: endpoint.rs, tls.rs, frame_class.rs, cache.rs (or crates/herdr-mosh-net)
++  surface_ack/            -- Phase 3b, mounted under server::headless / client::endpoint (rule 2)
++  pacing.rs               -- Phase 2 fallback, mounted under server::headless
++  predict/, outage/       -- Phases 4-5, mounted under client::shell
++tests/mosh_resume.rs, tests/mosh_multi_client.rs
++scripts/mosh-diff-budget.sh
++```
++
++### 1.3 Hook pattern per hot file
++
++| File (6-month commits) | Pattern | Phase 1 (B) | Later |
++|---|---|---|---|
++| `app/mod.rs` (176) | none | 0 | 0. Do not change `MIN_RENDER_INTERVAL` (l.39) |
++| `server/headless.rs` (156) | `#[path]` child for `impl HeadlessServer`; one-line dispatch arms only | 0 | Phase 1.5 (optional): about 10. Phase 3b: 1 mod line + 1 arm. Phase 4: about 3 calls |
++| `main.rs` (145; `mod` block l.14-65: 28) | nothing in Phase 1. `mod mosh;` only when client-side phases need shared code | 0 | Phase 4: possibly 1 |
++| `client/mod.rs` (98) | single-statement `if fork::x(..) { continue; }` at the top of an arm | 0 | Phase 3b: about 3. Phases 4-5: about 4 |
++| `server/client_transport.rs` (34) | one guarded arm before the generic `EndpointControl` arm (l.1349) that calls a fork decoder | 0 | Phase 3b: about 8 |
++| `protocol/wire.rs` (34) | never | 0 | 0 |
++| `server/render_stream.rs` (31) | one field in `Semantic`, a 1-line record in `commit_sent_frame` (l.284) | 0 | Phase 3b: about 14 |
++| `remote/attach.rs` (28) | the single `#[path] mod mosh` line, plus the swap at l.90 | 2 | Phase 3: 0 (same swap point) |
++| `server/headless/render.rs`, `retained_surface.rs` | none; hooking `commit_sent_frame` covers both call sites (`render.rs:980`, `retained_surface.rs:591`) | 0 | 0 |
++
++---
++
++## 2. Per-phase touch tables
++
++### 2.1 Phase 1, recommended design B: resumable link session over SSH
++
++**How it fits together:**
++
++```
++herdr client --local sock--> local_bridge (fork) ==session==> [leg: internal sock -> ssh (start_command or bridge_child)
++  -> sshd -> `herdr remote-client-bridge --x-mosh-session-v1` (attacher)] --unix--> keeper (detached)
++  --unix--> herdr server client socket
++```
++
++**Lifecycle:**
++- On a leg failure, `local_bridge` keeps the client socket open and opens a new leg (fresh, BatchMode, one at a time; see 1d).
++- The session handshake exchanges `(token, recv_offset, grace, build_id)`, and both ends retransmit from the peer's offset.
++- The local bridge forwards **only whole frames** to the client. It holds a partial downstream frame until it completes, so an outage that starts mid-frame never leaves the client stream mid-frame, and injection is always possible.
++- Keepalive injection rules:
++  - only after the first complete downstream frame (the `Welcome`) has passed through, so `do_handshake` (`client/handshake.rs:165-310`, 60 s remote timeout at l.32) is never disturbed;
++  - only between whole frames;
++  - only while a resume attempt is active, and never past the local give-up deadline.
++- **Session end** is explicit and has four triggers. The keeper closes its server socket and drops the token on any of them:
++  1. Local client EOF. The local bridge sends `end` to the keeper, best effort over the live leg, and otherwise on the next leg it opens. For `--remote` the client is a child process (`attach.rs:3577-3599`) and the bridge lives in the parent. For saved machines the bridge is dropped with the transport (`supervisor.rs:476-484`).
++  2. Bridge drop or stop, including the shared `cancelled` flag in `connect_saved_ssh` (`saved.rs:24-43`). `SshStdioBridge::drop` joins the thread on the caller, so the local-bridge thread must poll `should_stop` at a short interval and never block on the network.
++  3. The grace period expires on the keeper. The local bridge has its own give-up deadline equal to the grace, because it cannot learn of the expiry while the host is unreachable. At the deadline it closes the client socket, and today's reconnect or exit path runs.
++  4. Ghost eviction. When the client gives up and does a full reconnect, the new session hello names the previous token from the same local bridge slot (saved profile id or `--remote` socket path), and the keeper evicts it at once. Without this the server sees two `ClientConnection`s for one physical client for the whole grace (§4.4).
++
++#### 1a: Session core and repo hygiene (pure code, no behaviour change)
++
++| File | Symbols | Change | Est. lines in existing file | Hook / new |
++|---|---|---|---|---|
++| `src/remote/attach.rs` | module scope, after the `use` block near l.18-50 | `#[path = "../mosh/mod.rs"] pub(super) mod mosh; // mosh-fork hook` | 1 | hook |
++| `src/mosh/{mod,session,ring,link_frames}.rs` | new | Session framing (chunk, ack, heartbeat, hello/welcome, end); byte-offset replay rings with a fixed cap; length-prefix splitter (`wire.rs:1679-1710` framing: u32-LE plus bincode for every message **[re-verified]**) and the `x-mosh.link.v1` keepalive encoder. Unit tests: loss at every offset, duplicates, double reconnect, cap overflow, partial-frame hold-back | 0 | new |
++| working tree | 22 mode-only paths | `git checkout --` to restore +x; never commit | 0 | hygiene |
++
++#### 1b: Remote side, attacher and keeper
++
++| File | Symbols | Change | Est. lines | Hook / new |
++|---|---|---|---|---|
++| `src/remote/host.rs` | `run_remote_client_bridge` match l.7-21 | One guard arm for both fork flags: `[o] if o.starts_with("--x-mosh-") => false, // mosh-fork hook`. The match keeps its `bool` type | 1 | hook |
++| `src/remote/host.rs` | after `_ssh_agent` l.23-24 | `if let Some(r) = super::attach::mosh::remote::dispatch(args) { return r; } // mosh-fork hook`. `ensure_remote_server_running()` (l.22) still runs first, so every attacher and the keeper start the server if needed. The attacher keeps today's per-leg `$SSH_AUTH_SOCK` registration | 1 | hook |
++| `src/cli/status.rs` | `client_status_json` `endpoint_capabilities` l.298-302 | push the literal `"x-mosh-resume-bridge-v1"`, Unix only. Open check: whether `#[cfg(unix)]` on a `vec![]` element compiles; otherwise use `dispatch` returning "unsupported" on Windows, so the leg falls back to plain once | 1 | hook |
++| `src/mosh/remote/attacher.rs` | new | Connects to the keeper socket, named with `crate::platform::remote_bridge_endpoint_path(readable, short)` (`unix_common.rs:506-517`), with a short hashed name that includes the protocol version and `build_id`, and 0600. If it is absent, spawns the keeper as `current_exe [--session S] remote-client-bridge --x-mosh-keeper-v1` using `detach_server_daemon_command` plus a plain `spawn`, as `autodetect.rs:233, 488` do. Not `launch_server_daemon_command`: on macOS it tries launchd unless `SSH_CONNECTION` is set (`launchd_spawn.rs:31-36`), and a launchd child must call `leave_launchd_job` first **[re-verified]**. The spawn uses `env_remove("SSH_AUTH_SOCK")`, so the keeper's own `Registration::start()` returns `None` (`ssh_agent.rs:17-22`) **[re-verified]** and it does not hold leg 0's agent socket. Then pumps stdio to the keeper socket | 0 | new |
++| `src/mosh/remote/keeper.rs` | new | Token table. Per session: a `LocalStream` to `client_socket_path()`, an upstream and a downstream ring with fixed caps, and the grace taken from the session hello. **Drain policy:** while a leg is up, reads from the server pause when the downstream ring is full, which is today's backpressure. While the leg is down, the keeper keeps draining the server into the ring, so the server's uncapped control lane does not grow. If the ring overflows during an outage, the session ends (full reconnect, today's behaviour). A new attacher presenting a live token steals the leg (the old leg is closed). Server EOF is forwarded only after the last complete frame (§4.4, handoff). Idle exit when the table is empty. **Version skew:** because the build id is in the socket name, a newer attacher never talks to an older keeper; it starts its own keeper, and the old keeper drains its sessions and exits idle | 0 | new |
++
++#### 1c: Local side, the resumable bridge at the two swap points
++
++| File | Symbols | Change | Est. lines | Hook / new |
++|---|---|---|---|---|
++| `src/remote/attach.rs` | `run_remote` l.90 | `SshStdioBridge::start(` becomes `mosh::start_ui_bridge(&remote_ssh, `, otherwise the same arguments | 1 | swap |
++| `src/remote/saved.rs` | `connect_saved_ssh` l.35 | `SshStdioBridge::start(` becomes `super::attach::mosh::start_ui_bridge(&ssh, `. The `SavedSshBridge._bridge` field type (l.11-13) is unchanged, because `start_ui_bridge` returns `SshStdioBridge` | 1 | swap |
++| `src/mosh/ssh_leg.rs` | new | `start_ui_bridge(ssh, remote_herdr, ..) -> io::Result<SshStdioBridge>`. Steps: (1) Probe `remote_client_status(ssh, &remote_herdr)` once (+1 RTT per launch or per saved full reconnect, never per leg). (2) If the selected binary lacks `x-mosh-resume-bridge-v1`, re-select: walk `remote_binary_candidates` for one that has both the capability and `supports_endpoint_requirement`, because upstream selection takes the first capable candidate regardless of fork status (`attach.rs:1519-1540, 1588-1593`) **[re-verified]**. (3) If none qualifies, or on Windows remotes, or with `HERDR_MOSH_RESUME=0`, call `SshStdioBridge::start` unchanged (plain). For `--remote`, print one line naming `HERDR_REMOTE_BINARY` (`attach.rs:1518`) as the way to install the fork binary. (4) Otherwise start the local bridge thread and return an `SshStdioBridge` struct literal with its `should_stop`, a `failure_tx` the local bridge reports into (so `reported_failure()` keeps working for `cli/target.rs:127,160` and `attach.rs:2407`), and the thread handle. Per leg: `posix_remote_output_command("exec " + exe.command(session_args(.., ["remote-client-bridge","--x-mosh-session-v1"])))`, run interactively for leg 0 on `--remote` and noninteractively (BatchMode, piped stderr, so no prompts land on the raw-mode TUI) for every reconnect leg | 0 | new |
++| `src/mosh/local_bridge.rs` | new | Binds the user-facing socket with the same 0600 and identity semantics, reusing `crate::ipc::{prepare_socket_path, bind_private_local_listener, restrict_socket_permissions}` the way `start_command` does at `attach.rs:3038-3051`, and `remote_bridge_endpoint_path` for internal leg sockets. That covers Windows named pipes; socket-file cleanup on Windows happens after the join (`attach.rs:3116-3117`). Upstream buffer cap at least 8 MiB (above a 1.4 MiB paste), and client writes are always accepted during an outage up to the cap, so the client writer's 5 s deadline never fires (`writer.rs:15, 186-256`). Whole-frame forwarding, injection rules and session-end triggers as in the lifecycle above | 0 | new |
++| `tests/mosh_resume.rs`, `tests/mosh_multi_client.rs` | new, subprocess-driven | Fake ssh on PATH (`tests/remote_attach.rs:69-107` pattern). Cases: kill ssh mid-stream and mid-frame, with no lost keys and no `ClientShellSnapshot` or full `PaneSurface` after resume; outage longer than 10 s on a saved machine with health intact; two clients, one killed (the other is unaffected and the killed one resumes); client exit ends the keeper session promptly; a full reconnect evicts the ghost token; live handoff during an outage delivers `ServerShutdown` (`tests/live_handoff.rs` pattern); a command buffered past `ENDPOINT_COMMAND_TIMEOUT` runs once, with the documented late-execution semantics | 0 | new |
++
++The local side may run resumable on a Windows *client* talking to a Unix remote. Only Windows *remotes* are excluded, by the `cfg(unix)` capability.
++
++Open check for 1c: whether `interprocess::local_socket::Stream` (`ipc.rs:11`, interprocess 2.4.4) can wrap an in-process socketpair. If it can, the internal per-leg socket path can be dropped. The internal-path design works either way.
++
++#### 1d: Hardening and release blockers
++
++| File | Symbols | Change | Est. lines | Hook / new |
++|---|---|---|---|---|
++| `src/update.rs` l.25-26 | `STABLE_/PREVIEW_UPDATE_MANIFEST_URL` | `option_env!("HERDR_UPDATE_MANIFEST_URL")`-style overrides, defaulting to herdr.dev. **This blocks the release.** `auto_update` (`update.rs:2427`) would otherwise replace a fork build with upstream. A fork `HERDR_BUILD_CHANNEL` does not change the manifest URL, and the `[update]` knobs (`version_check`, `manifest_check`, `config/model.rs:33-37`) only disable checks; they do not redirect them | 2 | in place, upstreamable |
++| `src/remote/attach.rs` l.46-47 | remote install manifest consts | **Not patched in Phase 1.** `HERDR_REMOTE_BINARY` already points remote installs at a fork binary, and remotes that already run a fork binary are never reinstalled. Document it, and send the seam upstream (§6 item 4) | 0 | doc |
++| `src/mosh/ssh_leg.rs` | reconnect leg policy | One strategy: on dead link, kill the leg and open one fresh `ControlPath`-less leg in BatchMode, one at a time, with exponential back-off between legs (1, 2, 4 s, capped at 8 s). A mux channel through a TCP-dead master can hang indefinitely: noninteractive legs carry `ServerAliveInterval=15 × 4` (`attach.rs:1415-1418`), but an interactive `--remote` master may have no ServerAlive at all. **Building the fresh leg:** with managed config, `apply_managed_ssh_options` forces `-S <control_path> -o ControlMaster=auto` (`attach.rs:1421-1440`) **[re-verified]**, so pass a clone of `ManagedSshOptions` with `control_path: None` (the managed config file at `config_path` must be checked for its own `ControlPath`). With `manage_ssh_config=false` (options `None`), the user's ssh config applies, and `start_command` offers no extra-arguments hook, so build the `Command` with `-o ControlPath=none` and call `bridge_child` directly. Dead-link timeout: a fixed 8 s of silence with data or heartbeat outstanding, at a 2 s heartbeat. Phase 0 measures it under 20% netem loss, where TCP retransmission back-off and `ConnectTimeout=10` (`attach.rs:1411-1412`) both exceed 4 s. SRTT-adaptive detection belongs to Phase 2/3 | 0 | new |
++| `src/mosh/ssh_leg.rs` | leg failure classification | Fatal errors stop the leg manager at once instead of retrying until grace expires: auth failure, a host-key change under `StrictHostKeyChecking=yes` (`attach.rs:1403-1419`), and the "needs one final update" generation mismatch from `ensure_remote_server_running` (`host.rs:40-61`). The signal is the leg's `reported_failure()` (`attach.rs:3101-3105`) plus ssh's exit status | 0 | new |
++| *(deferred)* `src/mosh/bootstrap_cache.rs`; `saved.rs:29` (1); `supervisor.rs` spawn_due invalidation (3) | | Cached `RemoteHerdr` per profile. Under B, transient drops never reach `connect_saved_ssh`, so this only speeds up full reconnects. supervisor.rs is hot right now (7 commits in 30 days) | 0 now | new |
++| *(deferred 1e)* `client/mod.rs` l.645, l.2278, Status arm (about 5); `supervisor.rs:500` (1) | | p1-remote's `local_recovers`: a full reconnect for `--remote` when the session is unrecoverable (grace expired, keeper or server restarted). Today the client exits with the reattach message (`client/errors.rs:62-71`), which is acceptable for the first release | 0 now | hooks |
++
++**Moved out of the fork to upstream-only (§6):** `prepare_shared_transport` in `run_remote` (`attach.rs:80`) and the `TimedOut` reclassification in `saved_ssh_failure_needs_attention` (`saved.rs:155-180`). Under B, reconnect legs never pass through `run_remote` or `connect_saved_ssh`, so both only affect first connects and full reconnects, which is existing upstream behaviour.
++
++**Not done under B, contradicting p1-remote:**
++- `registry.rs:157`: enabling client health for the `--remote` Local endpoint would *break* resume. Pings sent during an outage would expire 10 s later and tear down a session the link layer is still recovering. Link liveness belongs to the session heartbeat.
++- The remote idle watchdog for interactive bridges: attachers are per leg, and the keeper has its own grace timer.
++
++**Known Phase 1 regressions, accepted and documented:**
++- **No outage indicator.** With an unreachable host, a saved machine looks online but frozen for up to the grace period, instead of today's roughly 10 s "reconnecting" state. Input is buffered blindly, because `shell_runtime.rs:846` sees the endpoint as online.
++- **Injection hides failure from the supervisor.** Injected frames call `supervisors.received`, which clears `retry_after_resume` (`supervisor.rs:381-389`). The power-resume probe (`supervisor.rs:345-357`; `client/mod.rs:774-777, 845-848`) is answered by the local bridge rather than the server. This is bounded by the give-up deadline, and the local bridge runs its own session heartbeat at once on wake.
++- Both are bounded by the short default grace (D2: 60 s). If they prove unacceptable, pull the Phase 5 banner hook forward: 1 line in the `client/mod.rs` `EndpointControl` arm plus 1 in `composition.rs` (D5).
++
++**Out of scope for Phase 1 (stated explicitly):**
++- The API bridge is not resumable. `SavedSshApiBridge` (`saved.rs:60+`) and `remote-api-bridge` (`main.rs:560-562`) still fail on a link drop. Machine API calls that go through the UI bridge (`ClientShellEndpointRequest`) are covered.
++- Observer and direct-attach clients (`ObserveTerminal`, `client_transport.rs:1072-1087`; `terminal_sessions.rs:80-110`) always connect to the local `client_socket_path()` and never use the remote bridge. No touch is needed. A keeper-proxied observer would be cut off after the 30 s observer write timeout.
++
++**Landing order:**
++1. 1a: pure code, merges independently.
++2. 1b: inert until a client asks for it.
++3. 1c: end to end, behind the capability and the kill switch.
++4. 1d.
++5. Phase 0 netem acceptance run.
++6. Release.
++
++1b and 1c can be reviewed separately but should merge in the same week, so the capability string is never advertised without a working consumer.
++
++### 2.2 Phase 1 alternative A: protocol-level design (fallback, and the Phase 3b source)
++
++Condensed from the workstreams. Line numbers corrected where re-verified.
++
++| Sub | File | Symbols | Change | Est. lines |
++|---|---|---|---|---|
++| 1a acks/resync | `server/render_stream.rs` | `Semantic` l.17-24, `new` l.36-43, `requires_recompute` l.83-91, `reset_baseline`/`request_repaint` l.93-114, `prepare_pane_surface_with_file` delta/reuse base l.208-236, `commit_sent_frame` l.284-338 | `sent: SentSurfaces` field. Base from a policy: Optimistic (newest-sent) by default, Acked only for resume or QUIC | 14 |
++| | `server/client_transport.rs` | `ServerEvent` (starts l.396), guarded arm before l.1349 | `ClientShellSurfaceControl` variant and arm | 8 |
++| | `server/headless.rs` | mod list l.77-85, `handle_server_event` arm | `mod` line and one dispatch arm | 3 |
++| | `protocol/surface_reuse.rs` | `matches_patch` l.58-63 (`== base+1` at l.62), `Decoder` l.84-201 | Decoder retained-baseline ring; desync becomes resync when negotiated | 30 |
++| | `client/transport.rs` l.36-104; `client/mod.rs` l.166-173, l.1458, l.1605; `client/shell/surface_patch.rs` l.8-11, l.116-126; `client/endpoint/registry.rs` l.62-68; `protocol/endpoint.rs` l.169-178; mod lines | | `take_control` loop; forwarding hook; `Desynced` outcome; resync rate-limit flag; capability entry | about 35 |
++| 1b input log | `client/endpoint/registry.rs` | `EndpointRegistry` l.88-105, `insert` l.149-172, `unfreeze_input`, `send_to` l.288-306 | Client-side unacked input log at the `send_to` chokepoint | 20 |
++| | `server/client_transport.rs` | after the `ClientMessage` decode around l.1037 | `input_seq::accept` match | 9 |
++| | `client/mod.rs`, `protocol/endpoint.rs`, mod lines | | `observe_input_control` hook; capability | about 5 |
++| 1c resume token | `server/headless.rs` | `remove_client` l.946-1026, `ClientShellConnected` arm l.1899-2032, `ClientDetach` l.2640-2645 | Park and rehydrate whitelisted fields | 10 |
++| | `headless/surface_interest.rs:33`; `client_transport.rs` l.734-786, l.886-925; `protocol/endpoint.rs` l.46-75; `surface_reuse.rs` (`baseline_identity`); `client/mod.rs` l.166-173, l.625, l.1386; `client/transport.rs`; `client/handshake.rs` l.165-310; `supervisor.rs` l.96-126, l.180-240, l.442-535 | | Hello `session` field; `ClientShellSession` event; resumable decoder store | about 50 |
++| 1d `--remote` | `client/mod.rs` l.645, l.2278; `registry.rs:157`; `supervisor.rs` l.500, l.212-234; `saved.rs` l.29, l.155-180; `attach.rs` l.80, l.90-98, `start_command` policy | | `local_recovers`, health for `--remote`, bootstrap cache, BatchMode reconnect policy | about 37 |
++| **Total** | | | | **about 220**, including headless.rs about 13, client/mod.rs about 15, client_transport.rs about 25 |
++
++Corrections to the workstreams:
++- The drop guards are at `shell_runtime.rs:846` (`!active_endpoint_online`) and `:849` (`pending_activation`), with the send at `:853`. p1-input cited 841-847 and p4-p5 cited 840-846.
++- p1-resume's count of "16+ test literals" is correct (11 + 5).
++
++### 2.3 Phase 2: adaptive frame rate
++
++| Option | Files | Change | Est. lines |
++|---|---|---|---|
++| **2-primary: keeper in-flight window** | `src/mosh/ring.rs`, `keeper.rs` | Turns Phase 1's fixed ring cap into an RTT-sized window *while a leg is up*. The keeper reads from the server only while unacked downstream bytes are below max(64 KiB, rate×SRTT). The server's single render slot then coalesces frames: the render is deferred while the slot is full and re-rendered on claim (`retained_surface.rs:594-597`, `headless.rs:2651-2656`). That gives link-adaptive latest-state-wins without per-client pacing. The outage drain policy from 1b is unchanged, so the server's uncapped control lane never grows for longer than one window's worth of link time | 0 |
++| 2-fallback: server per-client pacing (p2-p3) | `server/clients.rs` l.161/240 (3); `server/mod.rs` (1); `headless/render.rs` l.~561 `continue` hook (3); `headless.rs` before step 7 at about l.545, deadline fold l.609-623, input notes l.2451/2540 (7) | `ClientPacing` with interval = clamp(SRTT/2, 16 ms, 250 ms), on top of the unchanged global floor | about 14 |
++| RTT source for the fallback | `client_transport.rs` guarded arm before l.1349 (about 6); headless.rs arm (1) | The keeper injects `x-mosh.link.rtt.v1` upstream from its session acks. Phase 3b surface acks can replace it | about 7 |
++
++Risks to measure in Phase 0:
++- AF_UNIX send-buffer staleness. Frames already in the server→keeper socket buffer (Linux default about 208 KiB on the sender side) sit outside both the window and latest-wins. At 1 Mbit/s that is about 1.6 s of stale output. If netem confirms it, add a 1-line `SO_SNDBUF` cap on accepted shell sockets (upstreamable) or use the server-pacing fallback.
++- Control-lane growth under a sustained slow link with heavy `Graphics` traffic. That already happens today with a slow ssh pipe. If it matters, a control-lane cap is a `client_transport.rs` hook and an upstream candidate.
++
++### 2.4 Phase 3: QUIC (quinn)
++
++| Sub | File | Change | Est. lines |
++|---|---|---|---|
++| 3a reliable QUIC leg | `Cargo.toml` (+ lock) | `quinn 0.11` (runtime-tokio, rustls-ring), `rustls 0.23` ring, `rcgen 0.13` ring, in a trailing comment-headed block, or `crates/herdr-mosh-net` plus 1 member and 1 path dependency. Use ring, not aws-lc-rs, because of the musl and windows-msvc release targets | 3-4 |
++| | `src/cli/status.rs:298` | `x-mosh-quic-bridge-v1` capability literal | 1 |
++| | `src/mosh/quic/*`, `keeper.rs`, `ssh_leg.rs` | The keeper grows a UDP listener. The ssh bootstrap prints `port + cert fingerprint + token`. The local bridge's leg becomes a QUIC bidi stream instead of an ssh pipe, and the session layer is unchanged (migration plus resume). Fall back to the ssh leg on dial failure within about 3 s. No new `ConnectTarget` variant, no `main.rs` edit, and the swap points from 1c are reused | 0 |
++| 3b cancel-on-supersede | `src/mosh/quic/frame_class.rs` | Peek the bincode varint discriminant (`PaneSurface` 13, `PaneSurfacePatch` 19, `EndpointControl` 20 with surface-codec kinds; `wire.rs:1384-1504`). Tests serialize real messages, so an upstream reorder breaks them | 0 |
++| | §2.2 row "1a acks/resync" | The server sent-surface ring with the Acked policy, the decoder retained ring, `Desynced`, resync, and the relaxed chain. Required before render frames may be dropped. `sent_at` per revision gives RTT for the Phase 2 fallback | about 90 |
++| | local bridge | A render frame is gated on the reliable-stream offset stamped at read time, so `ClientShellSnapshot` ordering against surfaces is preserved | 0 |
++
++### 2.5 Phase 4: predictive local echo
++
++Taken from p4-p5, with one change. B provides no per-message input seq, so Phase 4 brings its own epoch marks. Client-side modules are mounted under `client::shell` (rule 2); if they need the session code, `mod mosh;` moves to `main.rs` at this point.
++
++| File | Change | Est. lines |
++|---|---|---|
++| `client/shell_runtime.rs` near l.853 (send point) | `remote_ux::observe(..)` plus a post-loop compose | 4 |
++| `client/mod.rs` mod list; `EndpointControl` arm top (l.2093); Timer arm | 3 one-line hooks | 3-5 |
++| `client/shell/composition.rs` after `blit_pane_surface` (about l.346) and before the final return (about l.724) | `predict.paint`, stall banner | 2 |
++| `client/shell/surface_patch.rs` `fast_path_blocker` l.57-94 | Fall back while predictions are visible | 2 |
++| `client/shell/state.rs` (fields, init, `timer_delay`), `client/shell.rs` (mods) | | 7 |
++| server: `client_transport.rs` guarded arm (`x-mosh.input-mark.v1`, ordered via a `ServerEvent` variant); `headless.rs` 3 calls; `retained_surface.rs` about l.566/591 and `render.rs` about l.961/980 (2+2, echo-ack frames appended to the render-lane item, following the precedent at `retained_surface.rs:563`); `clients.rs` field | Echo acks only on the render lane. The control lane overtakes renders (`client_transport.rs:357-372`) | about 18 |
++| `protocol/endpoint.rs` welcome capability | 1 | 1 |
++| `main.rs` (if needed) | `mod mosh;` | 0-1 |
++| Deferred: termios ECHO hint (`pty/actor/unix.rs`, `pane.rs` (132 commits), `terminal/runtime.rs`) | mosh epoch rules already hide predictions at no-echo prompts | (about 22) |
++
++### 2.6 Phase 5: outage UX
++
++Under B, typing during a resume is already buffered in the local bridge and delivered exactly once. That is Phase 5's "offline typeahead", obtained for free within the grace period. It is blind, so the stall banner matters more, and it fixes the Phase 1 "online but frozen" regression.
++
++| File | Change | Est. lines |
++|---|---|---|
++| `src/mosh/link_frames.rs` | Add a status payload (last contact, phase) to `x-mosh.link.v1`. Phase 1 frames carry no payload, and the client ignores the kind either way | 0 |
++| `client/mod.rs` `EndpointControl` arm | Consume `x-mosh.link.v1` status into outage state | 1 (shared with the Phase 4 hook) |
++| `client/shell/composition.rs` | Banner "<label> · last contact Ns ago" | 1 (shared) |
++| `client/shell_runtime.rs:846/849` | Unchanged. After the give-up deadline, input is dropped visibly, as today | 0 |
++
++---
++
++## 3. New files
++
++| Phase | Path | Purpose |
++|---|---|---|
++| 1a | `src/mosh/mod.rs` (mounted at `remote::attach::mosh`) | Constants (`STATUS_CAPABILITY`, flags, kinds), kill switch, `pub(in crate::remote)` API |
++| 1a | `src/mosh/session.rs` | Link session protocol: hello/welcome `(token, recv_offset, grace, build_id, previous token)`, chunk/ack/heartbeat/end, reconnect state machine |
++| 1a | `src/mosh/ring.rs` | Bounded byte-offset replay rings with a fixed cap; overflow policy (while the leg is up, stop reading the source; during an outage, end the session) |
++| 1a | `src/mosh/link_frames.rs` | u32-LE length-prefix splitter (`wire.rs:1679-1710` framing), whole-frame hold-back and the `x-mosh.link.v1` keepalive encoder |
++| 1a | `scripts/mosh-diff-budget.sh` | Upstream-diff budget and `git grep mosh-fork` audit, run by hand at each merge |
++| 1b | `src/mosh/remote/{mod,attacher,keeper}.rs` | Flag dispatch, remote attacher (per ssh leg) and detached keeper (per user, session and build, many tokens) |
++| 1c | `src/mosh/ssh_leg.rs` | Remote command builder, per-leg ssh via `start_command` or `bridge_child`, capability probe and candidate re-selection, `start_ui_bridge`, failure classification, in-process tests |
++| 1c | `src/mosh/local_bridge.rs` | User-facing socket, client↔session pump, injection, leg manager, session-end triggers, give-up deadline |
++| 1c | `tests/mosh_resume.rs`, `tests/mosh_multi_client.rs` | Subprocess end-to-end tests with fake ssh |
++| 1d (deferred) | `src/mosh/bootstrap_cache.rs` | Cached `RemoteHerdr` per profile |
++| 2 (fallback) | `src/mosh/pacing.rs` (`#[path]` child of `server::headless` for `impl HeadlessServer`) | Per-client pacing |
++| 3a | `src/mosh/quic/{mod,endpoint,tls,cache}.rs` or `crates/herdr-mosh-net/` | quinn endpoint, rcgen cert and pinned verifier, ready-line, bootstrap cache (0600) |
++| 3b | `src/mosh/quic/frame_class.rs` | Render vs reliable classification |
++| 3b | `src/mosh/surface_ack/{protocol,server,client}.rs` (`#[path]` children of `server::headless` and `client::endpoint`) | `SentSurfaces`, `DecoderAcks`, resync handlers (p1-acks design) |
++| 4 | `src/mosh/predict.rs`, `src/mosh/echo_ack.rs`, `src/mosh/remote_ux.rs` (`#[path]` children of `client::shell`, `server::headless::render`) | Predictor, echo acks, client glue |
++| 5 | `src/mosh/outage.rs` | Stall state and banner |
++| docs | `HERDR_MOSH_VISION.md` (root) | Fork plan. A new file, so it cannot conflict |
++
++---
++
++## 4. Wire and protocol compatibility
++
++### 4.1 Phase 1 (B): no endpoint wire change at all
++
++- The session protocol runs *inside* the ssh pipe, after the existing `herdr-remote-output-ready:1` marker (`attach.rs:49, 3459-3500`). It is visible only to fork bridges. The server and the TUI exchange the same frames as today.
++- **Discovery:** the `x-mosh-resume-bridge-v1` string in `status client --json` `endpoint_capabilities` (`cli/status.rs:298`). If the selected remote binary lacks it, `start_ui_bridge` looks for another candidate that has it. If none does, the client uses the plain `SshStdioBridge`, which is today's path. If a remote binary is downgraded after the probe, it rejects the unknown flag with "unsupported remote client bridge option" (`host.rs:15-19`), and the leg falls back to plain once.
++- **Injected link frames:** `EndpointControl{kind:"x-mosh.link.v1"}` on the local hop only, after `Welcome`, at frame boundaries. The client counts them as liveness and ignores them (§0). They never reach the server or the network.
++- **Keeper protocol versioning:** the protocol version and build id are in the keeper socket name and in the session hello. Mismatched attachers never reach an incompatible keeper (§2.1 1b).
++- `PROTOCOL_VERSION`, `ENDPOINT_PROTOCOL_GENERATION`, the enums, the hello and the welcome are unchanged.
++
++### 4.2 Phases 2-5: everything rides on EndpointControl plus capabilities
++
++| Item | Mechanism | Forces a version or enum change? |
++|---|---|---|
++| Surface ack and resync (3b) | c→s `EndpointControl{x-mosh.surface-ack.v1 / x-mosh.surface-resync.v1}`, JSON. Welcome capability `x-mosh-surface-ack`. The client opts in implicitly by sending its first ack | No. All four codecs and `PaneSurfacePatch` already carry `base_surface_revision`. **The semantic change** is that the relaxed `new > base` (`surface_reuse.rs:62`, `surface_patch.rs:120`) and older retained bases become legal. That only happens after negotiation and the first ack. A new client talking to an old server keeps fatal-desync behaviour, because the old server silently ignores unknown kinds at `client_transport.rs:1349-1354` and the client would otherwise wait forever |
++| RTT hint (2-fallback) | keeper→server `x-mosh.link.rtt.v1` | No |
++| QUIC (3) | Bridge-internal ALPN `herdr-bridge/1`, token, channel header and offset stamp. The herdr frame stream is carried byte for byte | No |
++| Echo ack and input marks (4) | s→c `x-mosh.echo-ack.v1` appended to the render-lane item; c→s `x-mosh.input-mark.v1` | No. Never put it in `PaneSurfacePatch`/`Frame` metadata. Those are frozen bincode structs, so the plan's wording "stamp into surface metadata" (`mosh-like-herdr-plan.md:22`; report §8) would break the wire |
++| Link status (5) | `x-mosh.link.v1` with a payload, local hop only | No |
++| Hello opt-ins (if ever needed) | `x_mosh` JSON object merged into the hello | No (no `deny_unknown_fields`) |
++
++**What would force a change, and must be avoided:** a new `ServerMessage`/`ClientMessage` variant, any field on a bincode surface struct, any change to frame framing, or reusing an upstream kind name with different semantics.
++
++### 4.3 Name compatibility with upstream
++
++Every fork kind and capability carries the `x-mosh` prefix. If a piece is upstreamed (for example resync), the fork switches to upstream's name and keeps accepting both for one release.
++
++### 4.4 Multi-client semantics
++
++- **Isolation:** one session token per local client connection. Several machines and processes, or a desktop and a phone at once, each hold independent sessions in the keeper. Each has its own `ClientConnection` on the server, with its own `render_state`, interest and held inputs, which herdr already supports.
++- **Steal:** a new leg presenting a live token closes the old leg, which handles a half-open previous link. Tokens are 128-bit random but are not a security boundary: anyone with access to the 0600 sockets or the SSH channel can already drive the server.
++- **Ghost eviction:** a full reconnect names the previous token, and the keeper evicts it at once (§2.1 lifecycle). One physical client therefore never holds two server connections for longer than one reconnect.
++- **What a parked client does to the server (B's main semantic cost)** **[re-verified]**. A parked client is still active: it has `writer.is_some()` and counts in `app_client_count()` (`headless.rs:920-925`). Geometry is **not** a minimum over clients. Each tab has a geometry controller, which the last interacting client claims (`claim_shell_tab_geometry`, `client_views.rs:693-711`). It is claimed on input, focus and navigation (`headless.rs:2303, 2433, 2526, 2616`) and on surface activation (`surface_interest.rs:84`). The real effects during the grace period:
++  - **(a) Replay reclaims geometry.** The parked client's buffered input is replayed as interaction on resume. It reclaims the tab, and the other client's tab snaps to the parked client's size. This is arguably correct, since that user did type, but it is visible.
++  - **(b) Only the viewed tab is resized.** With `app_client_count() == 2`, the single-client "resize all tabs" path (`client_views.rs:578`) and `resize_tabs_for_only_shell_client` (`client_views.rs:613-628`) stay disabled while the other client works alone.
++  - **(c) The parked client can stay foreground.** It can remain `foreground_client_id`, and `sync_foreground_client_state` (`headless.rs:798-850`) keeps applying its keybindings, pixel-mouse setting, cell size and `outer_terminal_focus` to the shared app.
++  - **(d) Notifications and pane focus.** A parked client that last sent focus-gained keeps `outer_terminal_focus == Some(true)`. That suppresses active-tab notifications (`app/actions.rs:36-42, 1838, 1872`) while the user is away. Panes never get FocusLost (`headless.rs:2284-2320`), and the client stays in `focused_shell_tabs` (`client_views.rs:393-401`).
++  - **(e) Held keys and buttons stay held.** Presses held at the moment of the drop are not released for the whole grace period, because only `remove_client` releases them (`clients.rs:172-173`, `headless.rs:970-972`).
++- **Consequences for the grace default (D2):** these effects make a long grace a real behaviour change, not a bounded worsening. The default is **60 s**, about the same as today's half-open `--remote` linger (report §5a), during which (c)-(e) already occur. The grace is set on the client (`HERDR_MOSH_GRACE`, read by the local bridge) and carried in the session hello, because a remote env var cannot be set from the client without `SendEnv`. Longer graces are opt-in. Phase 1.5, p1-resume's server-side park and rehydrate (§2.2, about 60 lines, about 10 of them in hot headless.rs), is what fixes (b)-(e) properly: a parked record is not an active client.
++- Do **not** inject `surface.set(false)` from the keeper on park as a mitigation. It calls `request_repaint` and discards the baseline (`surface_interest.rs:33`), which forces the full surface that resume is meant to avoid. The same applies to synthesizing focus-lost or key releases from the keeper: the keeper cannot do it without parsing client input semantics, and replay would then disagree with the server's state.
++- **Concurrent typing** by two clients into one pane interleaves in arrival order, as today.
++- **Blind typing and late execution** during a resume are delivered exactly once when the link returns, with the deadline semantics listed in §0. This is mosh and ET behaviour, bounded by the upstream cap and the grace period. The Phase 5 banner makes it visible.
++- **Live handoff or server restart:** `disconnect_all_clients_for_handoff` (`headless.rs:1716-1735`) **[re-verified]** queues `ServerShutdown{"live update in progress; reconnect after handoff completes"}` and then drops the writer. The keeper keeps draining the server until EOF, so it captures that frame into the downstream ring, and it forwards EOF only after the last complete frame. The local bridge delivers the ring and then closes, again only at a frame boundary. The client therefore sees `ServerShutdown` (`client/mod.rs:2281-2285`), not `ConnectionLost` (`client/mod.rs:1803-1813`), and today's reconnect runs against the new `boot_id`. If the link is down during the handoff, the frame waits in the keeper ring until resume or grace expiry. On grace expiry the client sees `ConnectionLost`, which is today's behaviour for an outage during handoff. Covered by a test in `tests/mosh_resume.rs`.
++- **Phase 3b acks:** per client, in each `ClientConnection.render_state`. The shared retained-path dirty collection (`pane.rs:3590-3620`) is unaffected, because ack-mode clients go through the full or delta path.
++
++---
++
++## 5. Hot-region risks and merge-conflict budget
++
++### 5.1 Hot regions: avoid, or hook only at the stated anchor
++
++| Region | Churn | Policy |
++|---|---|---|
++| `server/headless.rs` `ClientShellConnected` handler l.1899-1990; `remove_client` l.946-1027 | 18 and 11 commits in 6 months | Phase 1 B: untouched. 1.5 or alternative A: 3 hook lines here are unavoidable; use the cold `remove_client_and_resize_if_needed` l.1028-1041 where possible |
++| `client/mod.rs` ServerMessage arm l.1449-1460, PaneSurfacePatch arm l.1582-1623, EndpointControl arm l.2093-2143, failure drain l.2265-2300 | 98 commits, 13 in 30 days | Phase 1 B: untouched. Phase 3b+: single `if fork(..) { continue; }` statements at arm tops |
++| `client/handshake.rs` `do_handshake` l.172-240 | 6 commits in 30 days | Never in Phase 1 |
++| `client/endpoint/supervisor.rs` l.441-540 | 7 commits in 30 days; upstream is reworking reconnect policy | Untouched in Phase 1 B; the bootstrap-cache invalidation stays deferred |
++| `client/shell_runtime.rs` l.558-611, l.800-853 | 7 commits in 30 days | Phase 4 adds 4 lines near l.853. Expect semantic overlap with upstream reconnect UX work |
++| `server/client_transport.rs` `handle_client_handshake` l.670-905 | 19 commits | Never add hello fields. A single guarded arm before l.1349 is acceptable from Phase 3b on |
++| `remote/attach.rs` bridge internals l.3004-3576; candidate selection l.1490-1600 | 9 commits in 30 days; latch range l.1586-1593: 5 commits | Call, never edit. Phase 1 hooks only at the `#[path]` line and l.90. Candidate re-selection lives in `ssh_leg.rs`, not in the discovery loop |
++| `main.rs` `mod` block l.14-65 | 28 commits in 6 months | Not touched in Phase 1 |
++| `server/render_stream.rs` `commit_sent_frame` l.284+ | quiet since the September rewrite, historically bursty | Phase 3b only: 1 field and about 14 lines. Hook `commit_sent_frame`, not its call sites (`render.rs:980`, `retained_surface.rs:591`), which move with the graphics rewrite |
++| `protocol/endpoint.rs` capabilities vec l.169-178 | each upstream codec appends here | 1 line per fork capability from Phase 3b; conflicts are trivial append-vs-append |
++| `Cargo.toml` / `Cargo.lock` | 75 / 58 commits | Phase 3 only; follow the lock policy in §1.1 rule 10 |
++| `app/mod.rs`, `main.rs` dispatch, `wire.rs` | 176 / 145 / 34 | Never |
++
++### 5.2 Technical risks specific to B
++
++1. **Resume window versus health timeout.** If keepalive injection breaks its rules (before `Welcome`, mid-frame, or because a partial frame was forwarded), saved-machine clients expire 10 s after the last ping and fall back to a full reconnect. Tests cover a mid-frame kill and an outage longer than 10 s. The failure mode is safe: today's behaviour.
++2. **Dead ControlMaster on reconnect.** Reconnect legs always bypass the master (`control_path: None` or `-o ControlPath=none` via `bridge_child`). That requires key or agent auth, because BatchMode is on. With password-only auth, resume fails, the leg is classified fatal, and the client gets today's attention or exit path.
++3. **Keeper survival and launch.** The keeper detaches like a server daemon via `detach_server_daemon_command` (not the launchd path on macOS). With logind `KillUserProcesses=yes`, the keeper and the server die together; that is no worse than today.
++4. **Keeper memory and server memory.** The keeper drains the server during an outage into a fixed-cap ring and ends the session on overflow, so the server's uncapped control lane does not grow. Busy panes can fill the ring within a 60 s outage; that ends in a full reconnect, which is today's behaviour.
++5. **Parked-client side effects** (§4.4 a-e), bounded by the 60 s default grace and ghost eviction.
++6. **Late execution of timed-out requests** (§0). Documented and tested; there is no fix without per-request idempotency, which is out of scope.
++7. **Upstream buffer cap.** The local bridge must keep accepting client writes during an outage, or the client writer's 5 s deadline and queue limits cause `ConnectionAborted` (`writer.rs:15, 186-256`).
++8. **Socket-buffer staleness** at the keeper→server hop. See §2.3 and measure in Phase 0.
++9. **Dead-link detection under loss.** The fixed 8 s timeout and leg back-off are guesses until Phase 0 measures 20% netem loss.
++10. **Windows remotes.** The capability is gated with `cfg(unix)`, so Windows remotes use the plain bridge. Windows local clients may run resumable, using named pipes through `crate::ipc`.
++11. **Remote binary selection.** An upstream herdr earlier on the remote PATH (mise shims, distro packages) is selected first by upstream logic. `start_ui_bridge` re-selects, and otherwise falls back to plain and names `HERDR_REMOTE_BINARY`.
++12. **A rename of `attach.rs` upstream** breaks the `#[path]` line: a compile error with a one-line fix.
++
++### 5.3 Merge-conflict budget (lines changed in existing upstream files)
++
++| Phase | Recommended (B line) | of which in the hottest files (headless.rs, client/mod.rs, client_transport.rs, render_stream.rs, handshake.rs, main.rs, app/mod.rs) | Alternative |
++|---|---|---|---|
++| 1 (1a-1d) | **about 8**: attach.rs 2 (`#[path] mod mosh`, l.90 swap), saved.rs 1 (l.35 swap), host.rs 2, status.rs 1, update.rs 2 | 0 | A: about 220 (hot: about 55) |
++| 1.5 (optional server park) | about 60 | about 13 | n/a |
++| 2 | 0 (keeper window) | 0 | about 21 with server pacing and RTT routing (hot: about 13) |
++| 3a | about 5 (Cargo.toml 3-4, status.rs 1) | 0 | p2-p3 variant: about 35 |
++| 3b | about 90 (p1-acks design) | about 35 | n/a |
++| 4 | about 38 (+22 deferred termios), including a possible `mod mosh;` in main.rs | about 11 | n/a |
++| 5 | about 0-2 (shares the Phase 4 hooks) | about 1 | n/a |
++| **Cumulative through Phase 5** | **about 143** | **about 47** | A path: about 330 |
++
++`scripts/mosh-diff-budget.sh` budget: 20 lines through Phase 2, raised deliberately for 3b.
++
++---
++
++## 6. Pieces to send upstream separately
++
++These are small, generic and each fixes a real bug or adds a generic seam. Landing them upstream shrinks the fork or its future work.
++
++1. **Resync instead of a fatal desync.** A mismatched `PaneSurfacePatch` clears the decoder baseline (`surface_reuse.rs:160-163`). The next reuse, delta or scroll message then fails "without a baseline" (`surface_reuse.rs:120-122`), and the reader turns that into `ServerDisconnected` (`client/transport.rs:63-69`). Fix:
++   - the client splits the `Desynced` outcome from `Rejected` (`surface_patch.rs:116-126`);
++   - the decoder drops baseline-dependent messages until a full surface arrives;
++   - the client sends a capability-gated resync;
++   - the server calls `request_recompute` (have base) or `request_repaint` (no base).
++
++   This is p1-acks' "cheaper first slice". Once it is upstream, Phase 3b builds on upstream code.
++2. **Handshake-timeout misclassification.** `TimedOut` should mean back-off, not attention, in `saved.rs:155-180` (3 lines + 3 test lines). Upstream only; not carried in the fork.
++3. **`run_remote` should call `prepare_shared_transport`.** One line at `attach.rs:80`, mirroring `saved.rs:28`. Upstream only; not carried in the fork.
++4. **Manifest URL override seam.** `option_env!` overrides for `update.rs:25-26` (carried in the fork until upstream takes it) and `attach.rs:46-47` (not carried; `HERDR_REMOTE_BINARY` covers the fork). Generic value for packagers and self-hosting; it also removes the fork's only in-place patch.
++5. **Prefer a candidate that advertises a requested capability** in `prepare_discovered_remote_herdr` / `find_installed_remote_herdr`. Generic for any capability rollout; it would let `ssh_leg.rs` drop its re-selection.
++6. **`SO_SNDBUF` cap on shell client sockets**, and possibly a control-lane cap, if Phase 0 confirms staleness or growth. Generic latency and memory fixes for slow links.
++7. **Idle watchdog for interactive `--remote` bridges** when the remote advertises `remote_bridge_idle_timeout` (`attach.rs:3016-3022`). Pairs with item 3 to close the remote half-open. Upstream value only: the fork's keeper supersedes it for resume-capable remotes.
++8. **Visibility-only refactor of the SshStdioBridge building blocks** (`pub(crate)` plus a remote-command and extra-ssh-args hook), pitched as preparation for the "Cloud" endpoint (`protocol/endpoint.rs:5`). It would let the fork tree mount from `main.rs` instead of `attach.rs` and drop the `bridge_child` workaround.
++9. **Phase 0 harness:** netem profiles and bytes-per-keystroke via the `render_prof` counters (`retained_surface.bytes`), alongside `just bench-render-scale`.
++10. Later, only once Phase 3b proves the need: a sent-surface history or ack capability in `ClientRenderState`. It fits upstream's latest-state-wins direction.
++
++---
++
++## 7. Open decisions
++
++- **D1:** Phase 1 design B (link session) versus A (protocol). Recommended: B. This changes the plan's Phase 1 bullets.
++- **D2:** Keeper grace default and parked-client effects (§4.4 a-e). Proposed: 60 s default, set on the client and carried in the session hello, with longer graces opt-in. Phase 1.5 server park only if the effects hurt in practice.
++- **D3:** Phase 2 primary = keeper in-flight window; server pacing only if Phase 0 measurements require it.
++- **D4:** Phase 3 split into 3a (reliable QUIC leg) and 3b (acks plus cancel-on-supersede).
++- **D5:** Whether to accept the Phase 1 "online but frozen" regression or pull the Phase 5 banner forward (2 lines, `client/mod.rs` + `composition.rs`). Also whether to ship 1e (`--remote` full-reconnect fallback, about 6 lines in client/mod.rs) in the first release or leave today's exit-with-reattach in place.
++- **D6:** The late-execution semantics for requests that time out on the client during an outage (§0): accept and document, or have the local bridge drop buffered `EndpointRequest`s older than the client's 60 s command deadline. Dropping requires the bridge to decode request frames; it is fork-local (0 upstream lines) but adds coupling to the frame layout.
++
++---
++
++## Critic changes applied
++
++From the minimality critique:
++1. Removed `mod mosh;` from `main.rs`. The `mod` block had 28 commits in 6 months **[re-verified]**. The whole tree is now mounted with one `#[path = "../mosh/mod.rs"] pub(super) mod mosh;` line in `attach.rs`, which replaces the separate `mosh_leg` line.
++2. `status.rs` pushes a string literal, kept equal to the fork constant by a test.
++3. Dropped the `RemoteHerdr.x_mosh_resume` field, its init and the l.1590 latch. `start_ui_bridge` probes `remote_client_status` itself.
++4. Dropped the `UiBridge` enum and the `saved.rs` field-type change. `start_ui_bridge` returns an `SshStdioBridge` struct literal (fields and `Drop` re-verified at `attach.rs:2996-3002, 3108-3120`). Rejected the single hook in `SshStdioBridge::start`, as the critic also advised.
++5. `host.rs` is down to 2 lines: one `starts_with("--x-mosh-")` guard arm and one dispatch line. The match type is unchanged. The keeper's agent-registration problem is solved with `env_remove("SSH_AUTH_SOCK")` at spawn (`ssh_agent.rs:17-22` returns `None` without it) **[re-verified]**.
++6. and 7. Moved `prepare_shared_transport` at `attach.rs:80` and the `saved.rs` `TimedOut` reclassification to upstream-only.
++8. The manifest override is down to 2 lines (`update.rs` only). The `[update]` config knobs only disable checks (`config/model.rs:33-37`), and `auto_update` exists (`update.rs:2427`), so the `update.rs` patch remains a blocker **[re-verified]**. `attach.rs:46-47` is documented via `HERDR_REMOTE_BINARY` instead of patched.
++9. Removed the mux-vs-fresh leg race and SRTT-based detection. Phase 1 uses one fresh leg at a time, a fixed 8 s dead-link timeout and a 2 s heartbeat. The `ControlPath` open check is resolved by the second critique's item 8 (below).
++10. Merged the keeper in-flight window into a fixed ring cap for Phase 1 and moved the RTT window to Phase 2. Dropped "at most N sessions".
++11. Phase 1 link frames are keepalive only. The status payload moved to Phase 5.
++12. Replaced the CI gate with `scripts/mosh-diff-budget.sh`, run by hand at each merge. Budget lowered to 20 lines.
++
++From the correctness critique:
++1. Remote binary selection: re-verified that upstream takes the first capable candidate (`attach.rs:1519-1540, 1588-1593`). Instead of the proposed 3-line edit inside `prepare_discovered_remote_herdr`, which is hot, the re-selection is done in `ssh_leg.rs` with 0 upstream lines. A plain fallback names `HERDR_REMOTE_BINARY`. The upstream seam is listed as §6 item 5.
++2. Rewrote §4.4 and D2 around the per-tab geometry controller and effects (a)-(e). All cited sites re-verified (`client_views.rs:693-711`, `headless.rs:920-925, 2303, 2433, 2526, 2616`, `surface_interest.rs:84`). Default grace reduced from 5 min to 60 s.
++3. Uncapped control lane re-verified (`client_transport.rs:310-318`). The keeper now drains continuously during outages into a capped ring and ends the session on overflow (§2.1 1b, §5.2 item 4).
++4. Live handoff: the keeper drains to EOF and cuts at frame boundaries, so `ServerShutdown` is delivered. Re-verified at `headless.rs:1716-1735`. A test was added.
++5. Added explicit session-end triggers: client EOF, bridge drop or stop with a non-blocking drop, ghost eviction via the previous token, and a local give-up deadline.
++6. Added keepalive injection rules (after `Welcome`, whole-frame forwarding, only during an active resume, bounded by the deadline). The supervisor-masking and "online but frozen" regressions are documented as accepted, bounded by grace, with D5 offering the banner pull-forward.
++7. Added late-execution semantics to §0 (timeouts re-verified: `endpoint_commands.rs:12`, `activation.rs:14`), to the tests, and as D6.
++8. Fresh legs: `control_path: None` for managed config, and `bridge_child` with `-o ControlPath=none` for unmanaged config (re-verified `attach.rs:1421-1440, 725-731, 3287`). Corrected "about 60 s" to "possibly indefinite" for interactive masters.
++9. Visibility: the fork API is `pub(in crate::remote)`. The `UiBridge` concern is moot because the enum is gone.
++10. `host.rs` ordering: handled by `env_remove("SSH_AUTH_SOCK")` instead of reordering. Added leg-failure classification (auth, host key, generation mismatch).
++11. Keeper version skew: the build id goes in the keeper socket name and the hello.
++12. The keeper uses `detach_server_daemon_command` and a plain spawn, not the launchd path (re-verified `launchd_spawn.rs:31-36`), and `remote_bridge_endpoint_path` for socket naming (re-verified `unix_common.rs:506-517`).
++13. The grace is set on the client and carried in the session hello.
++14. Named `probe_remote_endpoint` as intentionally unswapped (§1.1 rule 4).
++15. Test strategy corrected for a binary-only crate (no `src/lib.rs` **[re-verified]**). The integration precedent is now `tests/remote_attach.rs:69-107`, and in-process tests live in `ssh_leg.rs`.
++16. and 17. API bridge and observers are stated as out of scope.
++18. Windows local clients use named pipes through `crate::ipc`, and the remote-versus-local Windows gating is clarified.
++19. Added back-off between legs and Phase 0 measurement of the dead-link timeout under loss.
++20. Items confirmed correct by the critic were kept as they were (discriminants, framing, ignored control kinds, dispatch order, deferred-render semantics).
++
++Budget effect: Phase 1 dropped from about 25 lines in existing files to **about 8**, and from 1 line to 0 in the hottest files. The cumulative estimate through Phase 5 dropped from about 160 to about 143.

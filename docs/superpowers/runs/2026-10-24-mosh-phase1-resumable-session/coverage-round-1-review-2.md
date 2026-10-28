@@ -1,0 +1,30 @@
+requirements:
+R1 → mosh-dqw.1, mosh-dqw.6, mosh-dqw.7, mosh-dqw.8, mosh-dqw.10, mosh-dqw.9
+R2 → mosh-dqw.8, mosh-dqw.9
+R3 → mosh-dqw.8, mosh-dqw.7, mosh-dqw.4
+R4 → mosh-dqw.4, mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R5 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R6 → mosh-dqw.2, mosh-dqw.8, mosh-dqw.5
+R7 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.9
+R8 → mosh-dqw.7, mosh-dqw.9
+R9 → mosh-dqw.7, mosh-dqw.8, mosh-dqw.10
+R10 → mosh-dqw.7, mosh-dqw.8
+R11 → (unmapped)
+R12 → mosh-dqw.1, mosh-dqw.6, mosh-dqw.10, mosh-dqw.8
+R13 → mosh-dqw.6
+R14 → mosh-dqw.3, mosh-dqw.1
+R15 → mosh-dqw.3
+R-new: liveness heartbeat on an idle-but-healthy link so the >8 s rule does not kill quiet legs → mosh-dqw.4 / mosh-dqw.8
+R-new: the keeper is started on the remote on first attach and reachable by later attaches (spawn/daemonize/lock lifecycle) → mosh-dqw.7 / mosh-dqw.10
+
+GAP · R11 · no task line mentions D6
+GAP · R2 · no task owns the saved-machine supervisor/health hold-off
+GAP · R3 · no task owns heartbeat/stall timer
+GAP · R12 · no task names a byte-identical fallback test
+UNOWNED-SEAM · attacher-keeper handshake · .7/.10 both use keeper socket, no owner of what crosses it
+UNOWNED-SEAM · leg remote command argv · .6 builds, .10 parses
+UNOWNED-SEAM · capability string · .10 advertises, .6 probes, no consumes/dep
+UNOWNED-SEAM · link-frame injection encoding · .5 encodes, .2 decodes, unowned format
+UNOWNED-SEAM · MoshConfig constants · owned by .1 but no consumers declared
+GAP (ledger: C1) · mosh-dqw.8 breadth
+NEEDS-SPEC: mosh-dqw.8; NEEDS-SPEC: mosh-dqw.10
