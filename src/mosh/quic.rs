@@ -7,7 +7,9 @@
 // Unused in non-test builds until mosh-19g.1.3, 1.4 and 1.6 consume it; they remove this.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use super::link_frames::FrameClass;
 use super::quic_bootstrap::Fingerprint;
+use super::render_reorder::RenderArrival;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
@@ -17,8 +19,9 @@ use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
+use crate::protocol::MAX_GRAPHICS_FRAME_SIZE;
 use tokio::runtime::{Builder, Handle, Runtime};
 
 /// Capability string advertised in status when the QUIC leg is available.
@@ -345,6 +348,57 @@ impl RenderHeader {
     }
 }
 
+/// The bridge-side render lane of one QUIC leg.
+pub(super) type RenderLaneRx = mpsc::Receiver<RenderArrival>;
+
+/// Accepts the keeper's uni streams on the client runtime and reports each as `RenderArrival`s:
+/// `Header` after the 9-byte header, `Complete` at stream end, `Reset` on RESET_STREAM. A
+/// stream reset (or unreadable) before its header was read is ignored: its seq is unknown and
+/// the reorder's overdue rule covers it.
+///
+/// Teardown never blocks: once the leg drops the receiver every send fails and the stream tasks
+/// exit; once the connection closes `accept_uni` errors and the accept task exits.
+pub(super) fn spawn_render_reader(handle: &Handle, conn: quinn::Connection) -> RenderLaneRx {
+    let (tx, rx) = mpsc::channel();
+    handle.spawn(async move {
+        while let Ok(recv) = conn.accept_uni().await {
+            tokio::spawn(read_render_stream(recv, tx.clone()));
+        }
+    });
+    rx
+}
+
+async fn read_render_stream(mut recv: quinn::RecvStream, tx: mpsc::Sender<RenderArrival>) {
+    let mut raw = [0u8; RenderHeader::LEN];
+    if recv.read_exact(&mut raw).await.is_err() {
+        return;
+    }
+    let Some(header) = RenderHeader::decode(&raw) else {
+        return;
+    };
+    let Some(class) = FrameClass::from_wire_byte(header.class) else {
+        let _ = recv.stop(0u32.into());
+        return;
+    };
+    let seq = header.seq;
+    if tx.send(RenderArrival::Header { seq, class }).is_err() {
+        return;
+    }
+    let arrival = match recv.read_to_end(MAX_GRAPHICS_FRAME_SIZE + 4).await {
+        Ok(bytes) => RenderArrival::Complete { seq, class, bytes },
+        Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(_))) => {
+            RenderArrival::Reset { seq }
+        }
+        Err(quinn::ReadToEndError::TooLong) => {
+            let _ = recv.stop(0u32.into());
+            RenderArrival::Reset { seq }
+        }
+        // Connection loss and the like: the leg is ending, the lane has nothing to add.
+        Err(_) => return,
+    };
+    let _ = tx.send(arrival);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +421,201 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// A connected loopback pair: the client side (as the bridge sees it) and the keeper side.
+    struct Pair {
+        rt: Arc<QuicRuntime>,
+        client: quinn::Connection,
+        server: quinn::Connection,
+        _endpoints: (quinn::Endpoint, quinn::Endpoint),
+    }
+
+    fn pair() -> Pair {
+        let rt = QuicRuntime::new("quic-render-test").expect("runtime");
+        let identity = ServerIdentity::generate().expect("identity");
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = socket.local_addr().expect("addr");
+        let server_ep = server_endpoint(
+            &rt,
+            server_config(&identity, KEEPER_IDLE_TIMEOUT).expect("server config"),
+            socket,
+        )
+        .expect("server endpoint");
+        let client_ep = client_endpoint(&rt, false).expect("client endpoint");
+        let config = client_config(identity.fingerprint, Duration::from_secs(10)).expect("config");
+        let accept = server_ep.clone();
+        let server_task = rt.handle().spawn(async move {
+            let incoming = accept.accept().await.expect("incoming");
+            incoming.await.expect("server conn")
+        });
+        let connecting = {
+            let _guard = rt.handle().enter();
+            client_ep
+                .connect_with(config, addr, SERVER_NAME)
+                .expect("connect")
+        };
+        let (client, server) = rt
+            .block_on(async move { (connecting.await.expect("client conn"), server_task.await) })
+            .expect("block_on");
+        Pair {
+            rt,
+            client,
+            server: server.expect("join"),
+            _endpoints: (server_ep, client_ep),
+        }
+    }
+
+    fn header(seq: u64, class: FrameClass) -> Vec<u8> {
+        RenderHeader {
+            seq,
+            class: class.wire_byte(),
+        }
+        .encode()
+        .to_vec()
+    }
+
+    fn next(rx: &RenderLaneRx) -> RenderArrival {
+        rx.recv_timeout(Duration::from_secs(5)).expect("arrival")
+    }
+
+    #[test]
+    fn header_then_complete_with_seq_class_bytes() {
+        let p = pair();
+        let rx = spawn_render_reader(&p.rt.handle(), p.client.clone());
+        let server = p.server.clone();
+        let sent = pattern(100_000, 9);
+        let body = sent.clone();
+        p.rt.block_on(async move {
+            let mut a = server.open_uni().await.expect("uni");
+            a.write_all(&header(7, FrameClass::SelfContained))
+                .await
+                .expect("header");
+            a.write_all(&body).await.expect("body");
+            a.finish().expect("finish");
+            let mut b = server.open_uni().await.expect("uni");
+            let mut whole = header(8, FrameClass::Chained);
+            whole.extend_from_slice(b"delta");
+            b.write_all(&whole).await.expect("write");
+            b.finish().expect("finish");
+            // Keep the streams alive until the reader has them.
+            let _ = (a.stopped().await, b.stopped().await);
+        })
+        .expect("block_on");
+        // Streams may interleave: collect per seq and check each stream's own order.
+        let mut seen: Vec<RenderArrival> = (0..4).map(|_| next(&rx)).collect();
+        let pos = |want: &RenderArrival, seen: &[RenderArrival]| {
+            seen.iter().position(|a| a == want).expect("arrival present")
+        };
+        let h7 = RenderArrival::Header {
+            seq: 7,
+            class: FrameClass::SelfContained,
+        };
+        let c7 = RenderArrival::Complete {
+            seq: 7,
+            class: FrameClass::SelfContained,
+            bytes: sent,
+        };
+        let h8 = RenderArrival::Header {
+            seq: 8,
+            class: FrameClass::Chained,
+        };
+        let c8 = RenderArrival::Complete {
+            seq: 8,
+            class: FrameClass::Chained,
+            bytes: b"delta".to_vec(),
+        };
+        assert!(pos(&h7, &seen) < pos(&c7, &seen));
+        assert!(pos(&h8, &seen) < pos(&c8, &seen));
+        seen.clear();
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn reset_stream_yields_reset_seq() {
+        let p = pair();
+        let rx = spawn_render_reader(&p.rt.handle(), p.client.clone());
+        let server = p.server.clone();
+        p.rt.block_on(async move {
+            let mut s = server.open_uni().await.expect("uni");
+            s.write_all(&header(21, FrameClass::Chained))
+                .await
+                .expect("header");
+            s.write_all(b"partial").await.expect("partial");
+            // The header must reach the reader before the reset discards unread data.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            s.reset(5u32.into()).expect("reset");
+        })
+        .expect("block_on");
+        assert_eq!(
+            next(&rx),
+            RenderArrival::Header {
+                seq: 21,
+                class: FrameClass::Chained
+            }
+        );
+        assert_eq!(next(&rx), RenderArrival::Reset { seq: 21 });
+    }
+
+    #[test]
+    fn reset_before_header_is_ignored_and_bad_class_dropped() {
+        let p = pair();
+        let rx = spawn_render_reader(&p.rt.handle(), p.client.clone());
+        let server = p.server.clone();
+        p.rt.block_on(async move {
+            let mut early = server.open_uni().await.expect("uni");
+            early.write_all(b"abc").await.expect("short");
+            early.reset(1u32.into()).expect("reset");
+            let mut bad = server.open_uni().await.expect("uni");
+            bad.write_all(&RenderHeader { seq: 3, class: 9 }.encode())
+                .await
+                .expect("bad header");
+            bad.finish().expect("finish");
+            let mut good = server.open_uni().await.expect("uni");
+            good.write_all(&header(4, FrameClass::Reliable))
+                .await
+                .expect("good");
+            good.finish().expect("finish");
+            let _ = good.stopped().await;
+        })
+        .expect("block_on");
+        assert_eq!(
+            next(&rx),
+            RenderArrival::Header {
+                seq: 4,
+                class: FrameClass::Reliable
+            }
+        );
+        assert_eq!(
+            next(&rx),
+            RenderArrival::Complete {
+                seq: 4,
+                class: FrameClass::Reliable,
+                bytes: Vec::new()
+            }
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn teardown_stops_reader_without_blocking() {
+        let p = pair();
+        let rx = spawn_render_reader(&p.rt.handle(), p.client.clone());
+        // Leg teardown: drop the receiver, close the connection, from a plain thread.
+        let (done_tx, done_rx) = mpsc::channel();
+        let client = p.client.clone();
+        let closer = thread::spawn(move || {
+            drop(rx);
+            client.close(0u32.into(), b"leg end");
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("teardown must not block");
+        closer.join().expect("closer");
+        // The runtime still serves a block_on, and the server sees the close.
+        let reason = p.rt.block_on(p.server.closed()).expect("block_on");
+        assert!(matches!(reason, quinn::ConnectionError::ApplicationClosed(_)));
     }
 
     #[test]

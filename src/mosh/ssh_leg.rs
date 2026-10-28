@@ -2,6 +2,8 @@
 //! failure classification, reconnect back-off. Does not own session bytes.
 
 use super::super as attach;
+#[cfg(unix)]
+use super::quic::RenderLaneRx;
 use attach::{ManagedSshOptions, RemoteClientStatusJson, RemoteHerdr, RemoteSsh};
 use std::io::{self, BufReader, Read, Write};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
@@ -50,10 +52,6 @@ type Teardown = Box<dyn FnOnce(bool, Instant) -> (Option<ExitStatus>, Option<Str
 /// The transport's own RTT estimate, polled by the bridge (QUIC: `Connection::rtt()`).
 pub(super) type RttProbe = Box<dyn Fn() -> Option<Duration> + Send>;
 
-/// The client's render-lane receiver slot. A placeholder in 3a (every leg carries `None`); the
-/// render lane replaces this type (mosh-19g.2.6).
-pub(super) struct RenderLaneSlot;
-
 /// One live connection to the keeper side (transport-neutral).
 ///
 /// Owns: a duplex byte stream, a teardown handle, an optional RTT probe (`None` for ssh legs;
@@ -80,8 +78,9 @@ pub(super) struct Leg {
     admission_token: Option<String>,
     /// Filled by the transport when it closes (QUIC close reason); copied into the end report.
     close_reason: Option<Arc<Mutex<Option<String>>>>,
-    /// The client render-lane receiver; always `None` in 3a.
-    render_lane: Option<RenderLaneSlot>,
+    /// The client render-lane receiver; `Some` on QUIC legs, `None` on ssh legs.
+    #[cfg(unix)]
+    render_lane: Option<RenderLaneRx>,
     /// Inbound-silence override for this leg; `None` is the Phase 1 value.
     silence_timeout: Option<Duration>,
     /// An ssh leg held ready while this (QUIC) leg is tried: the bridge switches to it when this
@@ -105,6 +104,7 @@ impl Leg {
             rtt_probe: None,
             admission_token: None,
             close_reason: None,
+            #[cfg(unix)]
             render_lane: None,
             silence_timeout: None,
             standby: None,
@@ -151,9 +151,18 @@ impl Leg {
         self.standby.take().map(|standby| *standby)
     }
 
-    /// The render-lane receiver, if any (always `None` in 3a).
+    /// Attach the render-lane receiver (QUIC legs).
+    #[cfg(unix)]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn take_render_lane(&mut self) -> Option<RenderLaneSlot> {
+    pub(super) fn with_render_lane(mut self, lane: RenderLaneRx) -> Leg {
+        self.render_lane = Some(lane);
+        self
+    }
+
+    /// The render-lane receiver, if any (`None` on ssh legs).
+    #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn take_render_lane(&mut self) -> Option<RenderLaneRx> {
         self.render_lane.take()
     }
 
@@ -354,6 +363,7 @@ fn spawn_leg(
         rtt_probe: None,
         admission_token: None,
         close_reason: None,
+        #[cfg(unix)]
         render_lane: None,
         silence_timeout: None,
         standby: None,
@@ -1266,6 +1276,7 @@ mod tests {
         assert_eq!(leg.admission_token(), None);
         assert_eq!(leg.silence_timeout(), None);
         assert!(leg.take_standby().is_none());
+        #[cfg(unix)]
         assert!(leg.take_render_lane().is_none());
         let mut leg = bare_leg()
             .with_admission_token("tok".into())
@@ -1275,7 +1286,8 @@ mod tests {
         assert_eq!(leg.silence_timeout(), Some(Duration::from_secs(30)));
         assert!(leg.take_standby().is_some());
         assert!(leg.take_standby().is_none(), "taken once");
-        assert!(leg.take_render_lane().is_none(), "3a legs carry no render lane");
+        #[cfg(unix)]
+        assert!(leg.take_render_lane().is_none(), "ssh legs carry no render lane");
     }
 
     #[test]
