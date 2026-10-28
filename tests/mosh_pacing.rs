@@ -5,9 +5,12 @@
 //! Timing policy: every test here takes the host-wide `timing_lock()`, so floods and
 //! link-emulation measurements never overlap (the shared `mosh_harness::timing_lock`, which
 //! tests/mosh_resume.rs takes too). The
-//! wall-clock acceptance tests run only with `HERDR_MOSH_PACING_TESTS=1` and when `perl` and
-//! `ss` are available; otherwise they print a note and pass. They are acceptance evidence:
-//! `HERDR_MOSH_PACING_TESTS=1 cargo nextest run --locked --test mosh_pacing --no-capture`.
+//! wall-clock acceptance tests are `#[ignore]`d, so the default run lists them as ignored
+//! rather than passed. Opt in with
+//! `cargo nextest run --locked --test mosh_pacing --run-ignored all --no-capture`
+//! (`HERDR_MOSH_PACING_TESTS=1` is no longer read). They need `perl` and `ss`; an opted-in run
+//! on a host without one prints a `SKIP:` line to stderr and returns early (visible with
+//! `--no-capture`), so a missing tool is never mistaken for a pass.
 
 #![cfg(unix)]
 
@@ -274,21 +277,13 @@ fn flood_probe_prints_the_marker_after_ctrl_c_under_interactive_sh() {
     let _ = child.wait();
 }
 
-/// Opt-in for the wall-clock acceptance tests (Phase 2 acceptance evidence): they assert
-/// wall-clock bounds over an emulated 300 ms link, so they stay out of the default suite.
-const PACING_OPT_IN: &str = "HERDR_MOSH_PACING_TESTS";
-
-/// Gate of every wall-clock acceptance test. `None`, after printing why, unless
-/// `HERDR_MOSH_PACING_TESTS=1` is set and `perl` (the delay line) and `ss` (the backlog
+/// Tool gate of every wall-clock acceptance test (each is `#[ignore]`d, which is the opt-in).
+/// `None`, after printing a `SKIP:` line, unless `perl` (the delay line) and `ss` (the backlog
 /// probe) can be run; otherwise the host-wide timing lock, held until dropped.
 fn acceptance_gate(test: &str) -> Option<TimingLock> {
-    if !std::env::var(PACING_OPT_IN).is_ok_and(|v| v == "1") {
-        eprintln!("skipped {test}: wall-clock acceptance test; set {PACING_OPT_IN}=1 to run it");
-        return None;
-    }
     for (tool, flag) in [("perl", "-v"), ("ss", "-V")] {
         if Command::new(tool).arg(flag).output().is_err() {
-            eprintln!("skipped {test}: `{tool}` is not available");
+            eprintln!("SKIP: {test}: `{tool}` is not available");
             return None;
         }
     }
@@ -604,6 +599,7 @@ fn start_dense_flood(remote: &Remote, client: &Client, settle: Duration) {
 }
 
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn ctrl_c_under_a_dense_flood_is_far_faster_than_the_fixed_window_at_300_ms_rtt() {
     let Some(_lock) = acceptance_gate(
         "ctrl_c_under_a_dense_flood_is_far_faster_than_the_fixed_window_at_300_ms_rtt",
@@ -648,6 +644,7 @@ fn ctrl_c_under_a_dense_flood_is_far_faster_than_the_fixed_window_at_300_ms_rtt(
 }
 
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn lan_dense_flood_throughput_matches_the_plain_bridge() {
     let Some(_lock) = acceptance_gate("lan_dense_flood_throughput_matches_the_plain_bridge") else {
         return;
@@ -677,6 +674,7 @@ fn lan_dense_flood_throughput_matches_the_plain_bridge() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn the_window_converges_near_the_bandwidth_delay_product_under_a_dense_flood() {
     let Some(_lock) = acceptance_gate(
         "the_window_converges_near_the_bandwidth_delay_product_under_a_dense_flood",
@@ -739,6 +737,7 @@ fn the_window_converges_near_the_bandwidth_delay_product_under_a_dense_flood() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn a_leg_killed_mid_dense_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() {
     let Some(_lock) = acceptance_gate(
         "a_leg_killed_mid_dense_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time",
@@ -869,6 +868,7 @@ fn window_tokens(remote: &Remote) -> std::collections::BTreeSet<String> {
 /// session's controller at `INITIAL`.
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn two_clients_keep_independent_windows_and_a_resume_resets_only_its_own() {
     let Some(_lock) =
         acceptance_gate("two_clients_keep_independent_windows_and_a_resume_resets_only_its_own")
@@ -949,6 +949,7 @@ const SPLIT_LINK_RATE: u64 = 24 * 1024;
 /// Interactive input crosses the slow link while a second visible pane floods the screen:
 /// the upstream direction does not queue keystrokes behind downstream output.
 #[test]
+#[ignore = "wall-clock acceptance test over an emulated link; run with --run-ignored all"]
 fn typing_reaches_the_shell_while_a_split_pane_floods_over_the_slow_link() {
     let Some(_lock) =
         acceptance_gate("typing_reaches_the_shell_while_a_split_pane_floods_over_the_slow_link")
