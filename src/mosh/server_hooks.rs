@@ -6,6 +6,9 @@
 // call sites; remove this allow when the last one lands.
 #![allow(dead_code)]
 
+/// Client -> server request for a full `PaneSurface` (3b §5).
+pub(crate) const SURFACE_RESYNC_KIND: &str = "x-mosh.surface-resync.v1";
+
 /// Server-side echo bookkeeping and resync marking for mosh clients.
 ///
 /// Owns: per (client connection, pane) received-event counts for subscribed clients

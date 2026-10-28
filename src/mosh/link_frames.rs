@@ -2,10 +2,82 @@
 //! injected `x-mosh.link.v1` frames with the existing `crate::protocol` frame writer.
 //! Does not own status semantics.
 
+use crate::client::mosh_outage::server_hooks::SURFACE_RESYNC_KIND;
 use crate::client::mosh_outage::{LinkStatus, LINK_KIND};
-use crate::protocol::{write_message, ServerMessage, MAX_GRAPHICS_FRAME_SIZE};
+use crate::protocol::{
+    surface_delta, surface_reuse, surface_scroll, write_message, ClientMessage, ServerMessage,
+    MAX_GRAPHICS_FRAME_SIZE,
+};
 
 const PREFIX: usize = 4;
+
+/// Advertised by remotes that support render split + resync (status line: mosh-19g.2.2).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) const SUPERSEDE_CAPABILITY: &str = "x-mosh-supersede-v1";
+
+/// `ServerMessage` variant tags (bincode varint, one byte below 251).
+const TAG_SURFACE_FRAME: u8 = 13;
+const TAG_SURFACE_DELTA: u8 = 19;
+const TAG_ENDPOINT_CONTROL: u8 = 20;
+
+/// How a server frame may be treated on the render split: dropped freely, droppable only
+/// together with the frames chained to it, or never dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum FrameClass {
+    SelfContained,
+    Chained,
+    Reliable,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl FrameClass {
+    /// Classify one whole frame as `FrameSplitter` yields it (4-byte LE length + payload).
+    /// Anything short, unparseable or unrecognised is `Reliable`.
+    pub fn of(frame: &[u8]) -> FrameClass {
+        let Some(payload) = frame.get(PREFIX..) else {
+            return FrameClass::Reliable;
+        };
+        match payload.split_first() {
+            Some((&TAG_SURFACE_FRAME, _)) => FrameClass::SelfContained,
+            Some((&TAG_SURFACE_DELTA, _)) => FrameClass::Chained,
+            Some((&TAG_ENDPOINT_CONTROL, rest)) => {
+                match bincode::serde::decode_from_slice::<String, _>(
+                    rest,
+                    bincode::config::standard(),
+                ) {
+                    Ok((kind, _))
+                        if kind == surface_reuse::MESSAGE_KIND
+                            || kind == surface_delta::MESSAGE_KIND
+                            || kind == surface_scroll::MESSAGE_KIND =>
+                    {
+                        FrameClass::Chained
+                    }
+                    _ => FrameClass::Reliable,
+                }
+            }
+            _ => FrameClass::Reliable,
+        }
+    }
+
+    /// The render-stream header class byte.
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            FrameClass::SelfContained => 0,
+            FrameClass::Chained => 1,
+            FrameClass::Reliable => 2,
+        }
+    }
+
+    pub fn from_wire_byte(byte: u8) -> Option<FrameClass> {
+        match byte {
+            0 => Some(FrameClass::SelfContained),
+            1 => Some(FrameClass::Chained),
+            2 => Some(FrameClass::Reliable),
+            _ => None,
+        }
+    }
+}
 
 /// A frame prefix claimed more than `MAX_GRAPHICS_FRAME_SIZE`. Session-ending.
 #[derive(Debug, PartialEq, Eq)]
@@ -91,6 +163,21 @@ pub(super) fn encode_link_frame(status: &LinkStatus) -> Vec<u8> {
         },
     )
     .expect("link frame encodes");
+    out
+}
+
+/// The client's request for a full `PaneSurface`, via the existing frame writer.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn encode_resync_frame() -> Vec<u8> {
+    let mut out = Vec::new();
+    write_message(
+        &mut out,
+        &ClientMessage::EndpointControl {
+            kind: SURFACE_RESYNC_KIND.to_owned(),
+            data: "{}".to_owned(),
+        },
+    )
+    .expect("resync frame encodes");
     out
 }
 
@@ -232,6 +319,123 @@ mod tests {
             ));
             let (frames, s) = feed(std::iter::once(bytes.clone()));
             assert_eq!(frames, vec![bytes]);
+            assert!(s.at_boundary());
+        }
+    }
+
+    fn control_frame(kind: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_message(
+            &mut out,
+            &ServerMessage::EndpointControl {
+                kind: kind.into(),
+                data: "{}".into(),
+            },
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn every_tag_is_classified() {
+        for tag in 0u8..=19 {
+            let mut frame = 8u32.to_le_bytes().to_vec();
+            frame.push(tag);
+            frame.extend([0u8; 7]);
+            let want = match tag {
+                13 => FrameClass::SelfContained,
+                19 => FrameClass::Chained,
+                _ => FrameClass::Reliable,
+            };
+            assert_eq!(FrameClass::of(&frame), want, "tag {tag}");
+        }
+        // Tag 20 with an undecodable body is Reliable; tags above 20 never occur.
+        let mut frame = 2u32.to_le_bytes().to_vec();
+        frame.extend([20, 0xff]);
+        assert_eq!(FrameClass::of(&frame), FrameClass::Reliable);
+        // Guard: the single-byte varint tag assumption holds for the real encoder.
+        assert_eq!(control_frame("k")[PREFIX], 20);
+    }
+
+    #[test]
+    fn render_kinds_are_chained() {
+        for kind in [
+            surface_reuse::MESSAGE_KIND,
+            surface_delta::MESSAGE_KIND,
+            surface_scroll::MESSAGE_KIND,
+        ] {
+            assert_eq!(FrameClass::of(&control_frame(kind)), FrameClass::Chained, "{kind}");
+        }
+    }
+
+    #[test]
+    fn other_control_kinds_are_reliable() {
+        for kind in [
+            "shell.snapshot.v1",
+            "x-mosh.echo-ack.v1",
+            LINK_KIND,
+            "x-mosh.anything.v1",
+        ] {
+            assert_eq!(FrameClass::of(&control_frame(kind)), FrameClass::Reliable, "{kind}");
+        }
+    }
+
+    #[test]
+    fn truncated_and_garbage_are_reliable() {
+        for len in 0..=4 {
+            assert_eq!(FrameClass::of(&vec![0u8; len]), FrameClass::Reliable, "len {len}");
+        }
+        let full = control_frame(surface_delta::MESSAGE_KIND);
+        // Tag byte only, then a string cut short of its claimed length.
+        for cut in [PREFIX + 1, PREFIX + 2, PREFIX + 1 + 1 + surface_delta::MESSAGE_KIND.len() - 1] {
+            assert_eq!(FrameClass::of(&full[..cut]), FrameClass::Reliable, "cut {cut}");
+        }
+        assert_eq!(
+            FrameClass::of(&[9, 0, 0, 0, 0xfb, 0xfc, 0xfd, 0xfe, 0xff]),
+            FrameClass::Reliable
+        );
+    }
+
+    #[test]
+    fn wire_byte_round_trips() {
+        for class in [FrameClass::SelfContained, FrameClass::Chained, FrameClass::Reliable] {
+            assert_eq!(FrameClass::from_wire_byte(class.wire_byte()), Some(class));
+        }
+        assert_eq!(FrameClass::from_wire_byte(3), None);
+    }
+
+    #[test]
+    fn supersede_capability_name() {
+        assert_eq!(SUPERSEDE_CAPABILITY, "x-mosh-supersede-v1");
+    }
+
+    #[test]
+    fn encode_resync_frame_decodes_as_client_endpoint_control() {
+        let bytes = encode_resync_frame();
+        let msg: ClientMessage = read_message(&mut &bytes[..], MAX_GRAPHICS_FRAME_SIZE).unwrap();
+        let ClientMessage::EndpointControl { kind, .. } = msg else {
+            panic!("not EndpointControl");
+        };
+        assert_eq!(kind, SURFACE_RESYNC_KIND);
+    }
+
+    #[test]
+    fn splitter_splits_client_frames_across_chunking() {
+        use crate::protocol::ClientPaneInputEvent;
+        let mut input = Vec::new();
+        write_message(
+            &mut input,
+            &ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p2".into(),
+                events: vec![ClientPaneInputEvent::TextCommit("hello".into())],
+            },
+        )
+        .unwrap();
+        let frames = vec![encode_resync_frame(), input, encode_resync_frame()];
+        let stream = frames.concat();
+        for chunk in [1usize, 3, 7, 64, stream.len()] {
+            let (got, s) = feed(stream.chunks(chunk).map(<[u8]>::to_vec));
+            assert_eq!(got, frames, "chunk {chunk}");
             assert!(s.at_boundary());
         }
     }
