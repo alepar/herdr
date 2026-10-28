@@ -223,11 +223,20 @@ pub(in crate::remote) fn start_ui_bridge(
                     noninteractive,
                 },
                 trace_dir: std::env::var_os(MOSH_TRACE_ENV).map(PathBuf::from),
+                render_split: supersede_advertised(&candidate.capabilities),
             },
             dialer,
             should_stop,
         )
     }
+}
+
+/// The remote advertises the render split (`x-mosh-supersede-v1` in the status probe).
+#[cfg(unix)]
+fn supersede_advertised(capabilities: &[String]) -> bool {
+    capabilities
+        .iter()
+        .any(|c| c == link_frames::SUPERSEDE_CAPABILITY)
 }
 
 /// Which `LegDialer` `start_ui_bridge` registers.
@@ -330,6 +339,18 @@ mod tests {
         assert!(MoshConfig::parse(None, None, None).quic_enabled);
         assert!(MoshConfig::parse(None, None, Some("1")).quic_enabled);
         assert!(MoshConfig::parse(None, None, Some("")).quic_enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supersede_flag_follows_the_probe_capability() {
+        let with = vec![
+            STATUS_CAPABILITY.to_string(),
+            link_frames::SUPERSEDE_CAPABILITY.to_string(),
+        ];
+        assert!(supersede_advertised(&with));
+        assert!(!supersede_advertised(&[STATUS_CAPABILITY.to_string()]));
+        assert!(!supersede_advertised(&[]));
     }
 
     #[cfg(unix)]

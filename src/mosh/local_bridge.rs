@@ -10,18 +10,20 @@
 //! blocking client-socket write.
 
 use super::super::{bridge_connection, ManagedSshOptions, SshStdioBridge};
-use super::link_frames::{encode_link_frame, FrameSplitter};
+use super::link_frames::{encode_link_frame, encode_resync_frame, FrameClass, FrameSplitter};
+use super::render_reorder::{GapCause, RenderArrival, RenderReorder, ReorderOutput};
 use super::session::{
     self, end_reason, Decoder, LinkVerdict, Role, SessionEndpoint, SessionEvent, SessionMsg, Token,
     WelcomeStatus, MAX_DATA_CHUNK,
 };
+use super::ring::RingOverflow;
 use super::ssh_leg::{Leg, LegDialer, LegEndReport, LegError, LegKind, LEG_REAP_BUDGET};
 use crate::client::mosh_outage::LinkStatus;
 use crate::ipc::{self, LocalStream};
 use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::ListenerNonblockingMode;
 use interprocess::TryClone as _;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -108,6 +110,9 @@ pub(super) struct BridgeParams {
     pub plain: PlainFallback,
     /// `HERDR_MOSH_TRACE`: directory receiving `local.jsonl`.
     pub trace_dir: Option<PathBuf>,
+    /// The remote advertised `x-mosh-supersede-v1`: HELLO asks for the render split and QUIC
+    /// legs carrying a render lane host a `RenderReorder`.
+    pub render_split: bool,
 }
 
 /// Bind the user-facing socket exactly like `SshStdioBridge::start_command` and serve one
@@ -226,40 +231,7 @@ fn serve_connection(
     trace: &Trace,
 ) -> io::Result<()> {
     let token = Token::generate()?;
-    let (tx, rx) = mpsc::channel();
-    let mut conn = Conn {
-        params,
-        dialer,
-        stop,
-        trace,
-        cancel: Arc::new(AtomicBool::new(false)),
-        tx,
-        rx,
-        endpoint: SessionEndpoint::new(Role::Local, token, LOCAL_RING_CAP),
-        srtt_report: SrttReporter::default(),
-        splitter: FrameSplitter::new(),
-        stream: Some(stream),
-        client: None,
-        leg: None,
-        standby: None,
-        ghost: None,
-        leg_gen: 0,
-        stage: Stage::Dialing,
-        kind: LegKind::Initial,
-        attempt: 0,
-        down: None,
-        frames_end: 0,
-        client_closed: false,
-        client_eof_seen: false,
-        client_idle: false,
-        end_deadline: None,
-        closing: None,
-        client_shut: false,
-        peek: Decoder::default(),
-        peer_recv_offset: None,
-        dial_thread: None,
-        done: None,
-    };
+    let mut conn = Conn::new(params, dialer, stop, trace, token, Some(stream));
     conn.run();
     conn.finish()
 }
@@ -269,11 +241,23 @@ enum Event {
     Dialed(Result<Leg, LegError>),
     Client(Vec<u8>),
     ClientEof,
+    /// A render-lane arrival of leg generation `.0`.
+    Lane(u64, RenderArrival),
 }
 
 enum LegIn {
     Bytes(Vec<u8>),
     Eof,
+}
+
+/// Where `Conn::inject_upstream` may write an injected client->server frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum InjectAt {
+    /// At the next client frame boundary (at once when already at one).
+    NextBoundary,
+    /// At the first boundary after the client's first frame (its HELLO) has gone through.
+    AfterFirstFrame,
 }
 
 enum ClientOut {
@@ -412,6 +396,8 @@ struct LegIo {
     reader_done: Arc<AtomicBool>,
     /// The leg writer thread has exited (a write failed, or its sender was dropped).
     writer_done: Arc<AtomicBool>,
+    /// Present on a lane-bearing leg of a render-split session: orders the lane's frames.
+    reorder: Option<RenderReorder>,
 }
 
 impl LegIo {
@@ -450,6 +436,15 @@ struct Conn<'a> {
     /// What the client was last told about the link's SRTT.
     srtt_report: SrttReporter,
     splitter: FrameSplitter,
+    /// Client->server frame boundary tracker: sees the same bytes as the endpoint's source and
+    /// its yielded frames are discarded.
+    upstream: FrameSplitter,
+    /// The tracker saw an oversized prefix and is unusable: injections are refused.
+    upstream_untracked: bool,
+    /// Frames waiting for the next client frame boundary (see `inject_upstream`).
+    pending_inject: VecDeque<Vec<u8>>,
+    /// WELCOMEs received this connection (the resume rule fires on every one after the first).
+    welcomes: u32,
     /// The client stream until the client threads take it (and for the leg-0 fallback).
     stream: Option<LocalStream>,
     client: Option<ClientIo>,
@@ -484,11 +479,62 @@ struct Conn<'a> {
     done: Option<Done>,
 }
 
+impl<'a> Conn<'a> {
+    fn new(
+        params: &'a BridgeParams,
+        dialer: &'a SharedDialer,
+        stop: &'a Arc<AtomicBool>,
+        trace: &'a Trace,
+        token: Token,
+        stream: Option<LocalStream>,
+    ) -> Conn<'a> {
+        let (tx, rx) = mpsc::channel();
+        Conn {
+            params,
+            dialer,
+            stop,
+            trace,
+            cancel: Arc::new(AtomicBool::new(false)),
+            tx,
+            rx,
+            endpoint: SessionEndpoint::new(Role::Local, token, LOCAL_RING_CAP),
+            srtt_report: SrttReporter::default(),
+            splitter: FrameSplitter::new(),
+            upstream: FrameSplitter::new(),
+            upstream_untracked: false,
+            pending_inject: VecDeque::new(),
+            welcomes: 0,
+            stream,
+            client: None,
+            leg: None,
+            standby: None,
+            ghost: None,
+            leg_gen: 0,
+            stage: Stage::Dialing,
+            kind: LegKind::Initial,
+            attempt: 0,
+            down: None,
+            frames_end: 0,
+            client_closed: false,
+            client_eof_seen: false,
+            client_idle: false,
+            end_deadline: None,
+            closing: None,
+            client_shut: false,
+            peek: Decoder::default(),
+            peer_recv_offset: None,
+            dial_thread: None,
+            done: None,
+        }
+    }
+}
+
 impl Conn<'_> {
     fn run(&mut self) {
         self.start_dial(LegKind::Initial, None);
         while self.done.is_none() {
             let wait = if self.closing.is_some() { CLOSING_TICK } else { TICK };
+            let wait = self.reorder_wait(wait);
             match self.rx.recv_timeout(wait) {
                 Ok(event) => self.on_event(event),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -604,6 +650,8 @@ impl Conn<'_> {
         self.endpoint
             .set_quic_token(leg.admission_token().map(str::to_owned));
         self.endpoint.set_silence_timeout(leg.silence_timeout());
+        self.endpoint.set_render_split(self.params.render_split);
+        let lane = leg.take_render_lane();
         if let Some(standby) = leg.take_standby() {
             self.standby = Some(standby);
         }
@@ -637,6 +685,20 @@ impl Conn<'_> {
             }
             reader_flag.store(true, Ordering::Release);
         });
+        let reorder = match lane {
+            Some(lane) if self.params.render_split => {
+                let lane_events = self.tx.clone();
+                thread::spawn(move || {
+                    for arrival in lane {
+                        if lane_events.send(Event::Lane(gen, arrival)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                Some(RenderReorder::new())
+            }
+            _ => None,
+        };
         let (leg_tx, leg_rx) = mpsc::sync_channel::<Vec<u8>>(4);
         let flushed = Arc::new(AtomicU64::new(0));
         let writer_flushed = Arc::clone(&flushed);
@@ -671,6 +733,7 @@ impl Conn<'_> {
             pending: None,
             reader_done,
             writer_done,
+            reorder,
         });
         self.stage = Stage::Welcome;
     }
@@ -740,6 +803,7 @@ impl Conn<'_> {
             }
             Event::Client(bytes) => self.on_client(&bytes),
             Event::ClientEof => self.on_client_eof(),
+            Event::Lane(gen, arrival) => self.on_lane(gen, arrival),
         }
     }
 
@@ -830,15 +894,21 @@ impl Conn<'_> {
         if self.client_closed {
             return;
         }
+        // On a lane-bearing leg render-class frames come on the lane; any on the session stream
+        // are ring replays from an earlier leg, superseded by the resume resync. They still
+        // count toward the ack point.
+        let lane_leg = self.leg.as_ref().is_some_and(|io| io.reorder.is_some());
         match self.splitter.push(bytes) {
             Ok(frames) => {
                 for frame in frames {
                     self.frames_end += frame.len() as u64;
                     let end_offset = self.frames_end;
-                    self.client_send(ClientOut::Stream {
-                        bytes: frame,
-                        end_offset,
-                    });
+                    let bytes = if lane_leg && FrameClass::of(&frame) != FrameClass::Reliable {
+                        Vec::new()
+                    } else {
+                        frame
+                    };
+                    self.client_send(ClientOut::Stream { bytes, end_offset });
                 }
             }
             Err(oversized) => self.end_session(
@@ -905,6 +975,10 @@ impl Conn<'_> {
         }
         self.stage = Stage::Linked;
         self.trace.emit("leg_up", serde_json::json!({}));
+        self.welcomes += 1;
+        if self.welcomes > 1 && status != WelcomeStatus::Unknown {
+            self.request_resync("resume");
+        }
     }
 
     // ---- the client side ------------------------------------------------------------------
@@ -987,7 +1061,7 @@ impl Conn<'_> {
         if self.client_closed || self.closing.is_some() {
             return;
         }
-        if self.endpoint.push_source(bytes).is_err() {
+        if self.push_client_bytes(bytes).is_err() {
             // Only possible while no leg is up: the session ends here.
             self.trace.emit(
                 "session_end",
@@ -1020,6 +1094,133 @@ impl Conn<'_> {
     fn client_gone(&mut self) {
         self.client_closed = true;
         self.client_send(ClientOut::Close);
+    }
+
+    // ---- upstream injection and the render lane ------------------------------------------------
+
+    /// Push client bytes to the endpoint's source and track client frame boundaries. A frame
+    /// queued by `inject_upstream` is pushed at the first boundary after it, inside the chunk
+    /// when the chunk completes the frame, so it never lands within a client frame.
+    fn push_client_bytes(&mut self, bytes: &[u8]) -> Result<(), RingOverflow> {
+        if self.upstream_untracked {
+            return self.endpoint.push_source(bytes);
+        }
+        let mut held = self.upstream.held_back();
+        let frames = match self.upstream.push(bytes) {
+            Ok(frames) => frames,
+            Err(_) => {
+                self.upstream_untracked = true;
+                self.pending_inject.clear();
+                return self.endpoint.push_source(bytes);
+            }
+        };
+        let mut pos = 0;
+        for frame in &frames {
+            let end = pos + frame.len() - held;
+            held = 0;
+            self.endpoint.push_source(&bytes[pos..end])?;
+            pos = end;
+            while let Some(injected) = self.pending_inject.pop_front() {
+                self.endpoint.push_source(&injected)?;
+            }
+        }
+        self.endpoint.push_source(&bytes[pos..])
+    }
+
+    /// Make `frame` offset-bearing session DATA toward the keeper (so a new leg replays it),
+    /// written only at a client frame boundary. Pushes to the endpoint at once when the
+    /// tracker is at a boundary (and, for `AfterFirstFrame`, a client frame was seen);
+    /// otherwise the frame waits for the push that completes the client frame in flight.
+    fn inject_upstream(&mut self, frame: Vec<u8>, at: InjectAt) {
+        if self.upstream_untracked || self.client_closed || self.closing.is_some() {
+            return;
+        }
+        let ready = self.pending_inject.is_empty()
+            && self.upstream.at_boundary()
+            && (at == InjectAt::NextBoundary || self.upstream.frames_seen() >= 1);
+        if !ready {
+            self.pending_inject.push_back(frame);
+        } else if self.endpoint.push_source(&frame).is_err() {
+            // Only possible while no leg is up and the ring is full; the next client write
+            // ends the session on overflow.
+            tracing::debug!("mosh injected frame dropped: ring full");
+        }
+    }
+
+    /// The one resync path: a gap on the lane, or a resume. Only render-split sessions have a
+    /// server that answers it. After the client's first frame, so it never precedes the
+    /// client's HELLO.
+    fn request_resync(&mut self, reason: &str) {
+        if !self.params.render_split {
+            return;
+        }
+        self.trace.emit("resync", serde_json::json!({ "reason": reason }));
+        self.inject_upstream(encode_resync_frame(), InjectAt::AfterFirstFrame);
+    }
+
+    fn on_lane(&mut self, gen: u64, arrival: RenderArrival) {
+        if !self.pumping() {
+            return;
+        }
+        let now = Instant::now();
+        let srtt = self.srtt();
+        let Some(reorder) = self
+            .leg
+            .as_mut()
+            .filter(|io| io.gen == gen)
+            .and_then(|io| io.reorder.as_mut())
+        else {
+            return;
+        };
+        let out = reorder.on_arrival(arrival, now, srtt);
+        self.apply_reorder(out);
+    }
+
+    fn poll_reorder(&mut self, now: Instant) {
+        let srtt = self.srtt();
+        let Some(reorder) = self.leg.as_mut().and_then(|io| io.reorder.as_mut()) else {
+            return;
+        };
+        let out = reorder.poll(now, srtt);
+        self.apply_reorder(out);
+    }
+
+    /// Frames from the lane go out between whole session-stream frames (never counted toward
+    /// the ack point: they carry no stream offset).
+    fn apply_reorder(&mut self, out: ReorderOutput) {
+        if let Some(cause) = out.gap {
+            let cause = match cause {
+                GapCause::Reset => "reset",
+                GapCause::Overdue => "overdue",
+                GapCause::Supersede => "supersede",
+            };
+            self.trace
+                .emit("render_gap", serde_json::json!({ "cause": cause }));
+        }
+        if !self.client_closed {
+            for frame in out.deliver {
+                self.client_send(ClientOut::Injected(frame));
+            }
+        }
+        if out.request_resync {
+            self.request_resync("gap");
+        }
+        if self.stage == Stage::Linked && self.pumping() {
+            self.pump_sends(Instant::now());
+        }
+    }
+
+    /// How long the run loop may sleep before the lane's next overdue deadline.
+    fn reorder_wait(&self, wait: Duration) -> Duration {
+        let deadline = self
+            .leg
+            .as_ref()
+            .and_then(|io| io.reorder.as_ref())
+            .and_then(|reorder| reorder.next_deadline(self.srtt()));
+        match deadline {
+            Some(at) => wait.min(at.saturating_duration_since(Instant::now())),
+            None => wait,
+        }
     }
 
     fn inject(&mut self, status: LinkStatus) {
@@ -1057,6 +1258,7 @@ impl Conn<'_> {
             return;
         }
         self.feed_client();
+        self.poll_reorder(now);
         match self.stage {
             Stage::Dialing => {}
             Stage::Welcome => {
@@ -1152,7 +1354,6 @@ impl Conn<'_> {
 
     /// Current SRTT of this connection's link, or unknown: the leg's own RTT probe when it
     /// has one (QUIC), else the session's EWMA. The only SRTT source for bridge code.
-    // Read by tick_linked now; 3b's RenderReorder is the second caller.
     fn srtt(&self) -> Option<Duration> {
         self.leg
             .as_ref()
@@ -2261,12 +2462,28 @@ mod tests {
             Harness::start_with(dialer, grace, unused_plain(), None, None)
         }
 
+        /// A bridge for a remote that advertised `x-mosh-supersede-v1`.
+        fn start_split(dialer: &MemDialer, grace: Duration) -> Harness {
+            Harness::start_full(dialer, grace, unused_plain(), None, None, true)
+        }
+
         fn start_with(
             dialer: &MemDialer,
             grace: Duration,
             plain: PlainFallback,
             trace_dir: Option<PathBuf>,
             path: Option<(PathBuf, PathBuf)>,
+        ) -> Harness {
+            Harness::start_full(dialer, grace, plain, trace_dir, path, false)
+        }
+
+        fn start_full(
+            dialer: &MemDialer,
+            grace: Duration,
+            plain: PlainFallback,
+            trace_dir: Option<PathBuf>,
+            path: Option<(PathBuf, PathBuf)>,
+            render_split: bool,
         ) -> Harness {
             let (dir, path) = path.unwrap_or_else(|| {
                 let dir = fresh_dir();
@@ -2281,6 +2498,7 @@ mod tests {
                     noninteractive: true,
                     plain,
                     trace_dir,
+                    render_split,
                 },
                 Box::new(dialer.clone()),
                 Arc::clone(&stop),
@@ -3270,5 +3488,317 @@ mod tests {
         }
         assert_eq!(frames, [data("lead"), data("after")]);
         assert!(keeper.hellos()[1].resume, "second leg is a resume");
+    }
+
+    // ---- render hosting, resync and upstream injection --------------------------------------------
+
+    use crate::client::mosh_outage::server_hooks::SURFACE_RESYNC_KIND;
+    use crate::protocol::{surface_reuse, ClientMessage};
+
+    fn client_frame(kind: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_message(
+            &mut out,
+            &ClientMessage::EndpointControl {
+                kind: kind.to_owned(),
+                data: String::new(),
+            },
+        )
+        .unwrap();
+        out
+    }
+
+    /// The kinds of the whole client frames in a client->server byte stream.
+    fn kinds(stream: &[u8]) -> Vec<String> {
+        let frames = FrameSplitter::new().push(stream).unwrap();
+        frames
+            .iter()
+            .map(|frame| {
+                match read_message::<_, ClientMessage>(&mut &frame[..], MAX_GRAPHICS_FRAME_SIZE)
+                    .unwrap()
+                {
+                    ClientMessage::EndpointControl { kind, .. } => kind,
+                    other => panic!("unexpected client frame {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    fn resync_kind() -> String {
+        SURFACE_RESYNC_KIND.to_owned()
+    }
+
+    /// A split-session bridge on `dialer` (scripted by the caller) whose client has seen `first`.
+    fn split_established(dialer: &MemDialer, keeper: &FakeKeeper) -> (Harness, Client) {
+        keeper.push_down(frame("first"));
+        let harness = Harness::start_split(dialer, secs(30));
+        let client = harness.connect();
+        client.expect_data("first");
+        (harness, client)
+    }
+
+    fn lane_leg(keeper: &FakeKeeper, answer: Answer) -> (LegScript, mpsc::Sender<RenderArrival>) {
+        let (lane_tx, lane_rx) = mpsc::channel();
+        let script = decorated(
+            LegScript::Keeper(keeper.clone(), KLeg::new(answer)),
+            move |leg| leg.with_render_lane(lane_rx),
+        );
+        (script, lane_tx)
+    }
+
+    fn lane_frame(seq: u64, class: FrameClass, kind: &str) -> RenderArrival {
+        RenderArrival::Complete {
+            seq,
+            class,
+            bytes: frame(kind),
+        }
+    }
+
+    /// Frames of data kinds the client receives until `last`, link frames dropped.
+    fn data_until(client: &Client, last: &str) -> Vec<String> {
+        let mut kinds = Vec::new();
+        loop {
+            match client.next_seen(WAIT).1 {
+                Seen::Link(_) => {}
+                Seen::Data(kind) => {
+                    let done = kind == last;
+                    kinds.push(kind);
+                    if done {
+                        return kinds;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resume_after_first_leg_emits_exactly_one_resync_between_client_frames() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let (_harness, mut client) = split_established(&dialer, &keeper);
+        client.write(&client_frame("c1"));
+        wait_until("c1", WAIT, || kinds(&keeper.upstream()) == ["c1"]);
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        keeper.kill_leg();
+        wait_until("the resync", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        client.write(&client_frame("c2"));
+        wait_until("c2", WAIT, || kinds(&keeper.upstream()).len() == 3);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(kinds(&keeper.upstream()), ["c1", &resync_kind(), "c2"]);
+        assert!(keeper.hellos()[1].render_split, "every leg's HELLO asks for the split");
+    }
+
+    #[test]
+    fn resume_resync_waits_for_the_client_frame_in_flight() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let (_harness, mut client) = split_established(&dialer, &keeper);
+        let (c1, c2) = (client_frame("c1"), client_frame("c2"));
+        client.write(&[c1.clone(), c2[..3].to_vec()].concat());
+        wait_until("c1 and the head of c2", WAIT, || {
+            keeper.upstream().len() == c1.len() + 3
+        });
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        keeper.kill_leg();
+        wait_until("second leg", WAIT, || keeper.hellos().len() == 2);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(keeper.upstream().len(), c1.len() + 3, "nothing inside c2");
+        client.write(&c2[3..]);
+        wait_until("c2 and the resync", WAIT, || kinds(&keeper.upstream()).len() == 3);
+        assert_eq!(kinds(&keeper.upstream()), ["c1", "c2", &resync_kind()]);
+    }
+
+    #[test]
+    fn non_split_session_sends_no_resync_on_resume() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, mut client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        client.write(&client_frame("c1"));
+        wait_until("c1", WAIT, || kinds(&keeper.upstream()) == ["c1"]);
+        keeper.kill_leg();
+        dialer.keeper(&keeper, KLeg::new(Answer::Resumed));
+        wait_until("second leg", WAIT, || keeper.hellos().len() == 2);
+        client.write(&client_frame("c2"));
+        wait_until("c2", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(kinds(&keeper.upstream()), ["c1", "c2"], "no resync without the split");
+    }
+
+    #[test]
+    fn render_frames_on_session_stream_of_lane_leg_are_not_forwarded() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (script, _lane) = lane_leg(&keeper, Answer::New);
+        dialer.script(script);
+        let (_harness, client) = split_established(&dialer, &keeper);
+        keeper.push_down(
+            [frame(surface_reuse::MESSAGE_KIND), frame("after")].concat(),
+        );
+        assert_eq!(data_until(&client, "after"), ["after"]);
+        keeper.push_down(frame(surface_reuse::MESSAGE_KIND));
+        wait_until("the dropped frame is acked", WAIT, || {
+            keeper
+                .st()
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.fully_acked())
+        });
+    }
+
+    #[test]
+    fn render_frames_on_ssh_leg_are_forwarded() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let (_harness, client) = split_established(&dialer, &keeper);
+        keeper.push_down([frame(surface_reuse::MESSAGE_KIND), frame("after")].concat());
+        assert_eq!(
+            data_until(&client, "after"),
+            [surface_reuse::MESSAGE_KIND, "after"]
+        );
+    }
+
+    #[test]
+    fn lane_gap_produces_one_resync_and_no_chained_before_self_contained() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (script, lane) = lane_leg(&keeper, Answer::New);
+        dialer.script(script);
+        let (_harness, mut client) = split_established(&dialer, &keeper);
+        client.write(&client_frame("c1"));
+        wait_until("c1", WAIT, || kinds(&keeper.upstream()) == ["c1"]);
+        let send = |arrival| lane.send(arrival).unwrap();
+        send(lane_frame(0, FrameClass::SelfContained, "sc0"));
+        assert_eq!(data_until(&client, "sc0"), ["sc0"]);
+        // Seq 1 is reset: one gap, one resync; the chained frames behind it are dropped.
+        send(RenderArrival::Reset { seq: 1 });
+        send(lane_frame(2, FrameClass::Chained, "ch2"));
+        send(RenderArrival::Reset { seq: 3 });
+        send(lane_frame(4, FrameClass::Chained, "ch4"));
+        send(lane_frame(5, FrameClass::SelfContained, "sc5"));
+        assert_eq!(data_until(&client, "sc5"), ["sc5"]);
+        wait_until("the resync", WAIT, || kinds(&keeper.upstream()).len() == 2);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(kinds(&keeper.upstream()), ["c1", &resync_kind()]);
+    }
+
+    #[test]
+    fn probe_without_supersede_capability_sends_no_render_split() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        let (_harness, _client) = established(&dialer, &keeper, secs(30), KLeg::new(Answer::New));
+        assert!(!keeper.hellos()[0].render_split);
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.keeper(&keeper, KLeg::new(Answer::New));
+        let (_harness, _client) = split_established(&dialer, &keeper);
+        assert!(keeper.hellos()[0].render_split);
+    }
+
+    // ---- upstream injection (the API mosh-19g.3.4 builds on) ------------------------------------------
+
+    struct Bare {
+        params: BridgeParams,
+        dialer: SharedDialer,
+        stop: Arc<AtomicBool>,
+        trace: Trace,
+    }
+
+    impl Bare {
+        fn new() -> Bare {
+            Bare {
+                params: BridgeParams {
+                    local_socket: PathBuf::from("unused"),
+                    grace: secs(30),
+                    noninteractive: true,
+                    plain: unused_plain(),
+                    trace_dir: None,
+                    render_split: true,
+                },
+                dialer: Arc::new(Mutex::new(Box::new(MemDialer::new()))),
+                stop: Arc::new(AtomicBool::new(false)),
+                trace: Trace::new(None),
+            }
+        }
+
+        fn conn(&self) -> Conn<'_> {
+            Conn::new(
+                &self.params,
+                &self.dialer,
+                &self.stop,
+                &self.trace,
+                Token::generate().unwrap(),
+                None,
+            )
+        }
+    }
+
+    /// Bring `conn`'s endpoint up against a fresh keeper endpoint (a fresh keeper has received
+    /// nothing, so a resume replays the whole ring).
+    fn link_up(conn: &mut Conn<'_>) -> SessionEndpoint {
+        let now = Instant::now();
+        let hello = conn.endpoint.hello(now, 60_000, None);
+        let mut keeper = SessionEndpoint::new(Role::Keeper, conn.endpoint.token(), 1 << 20);
+        let events = keeper.on_leg_bytes(now, &hello).unwrap();
+        let [SessionEvent::Hello(h)] = &events[..] else { panic!("{events:?}") };
+        let status = if h.resume { WelcomeStatus::Resumed } else { WelcomeStatus::New };
+        let welcome = keeper.welcome(now, status, h.recv_offset).unwrap();
+        conn.endpoint.on_leg_bytes(now, &welcome).unwrap();
+        keeper
+    }
+
+    /// Everything `conn` has due, as the keeper receives it.
+    fn flow(conn: &mut Conn<'_>, keeper: &mut SessionEndpoint) -> Vec<u8> {
+        let now = Instant::now();
+        let mut got = Vec::new();
+        while let Some(message) = conn.endpoint.poll_send(now) {
+            for event in keeper.on_leg_bytes(now, &message).unwrap() {
+                if let SessionEvent::Deliver(bytes) = event {
+                    got.extend(bytes);
+                }
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn inject_upstream_waits_for_a_client_frame_boundary() {
+        let bare = Bare::new();
+        let mut conn = bare.conn();
+        let mut keeper = link_up(&mut conn);
+        let (c1, c2, injected) = (client_frame("c1"), client_frame("c2"), client_frame("inj"));
+        conn.push_client_bytes(&c1[..3]).unwrap();
+        conn.inject_upstream(injected.clone(), InjectAt::NextBoundary);
+        assert_eq!(flow(&mut conn, &mut keeper), c1[..3], "held mid-frame");
+        // The chunk that completes c1 also carries the head of c2: the frame goes between.
+        conn.push_client_bytes(&[&c1[3..], &c2[..2]].concat()).unwrap();
+        assert_eq!(
+            flow(&mut conn, &mut keeper),
+            [&c1[3..], &injected[..], &c2[..2]].concat()
+        );
+        conn.push_client_bytes(&c2[2..]).unwrap();
+        let mut all = [&c1[..], &injected[..], &c2[..]].concat();
+        assert_eq!(flow(&mut conn, &mut keeper), c2[2..]);
+        assert_eq!(kinds(&all), ["c1", "inj", "c2"]);
+        // At a boundary the next injection goes out at once.
+        conn.inject_upstream(client_frame("now"), InjectAt::NextBoundary);
+        assert_eq!(flow(&mut conn, &mut keeper), client_frame("now"));
+        all.extend(client_frame("now"));
+        // Offset-bearing: a new leg to a keeper that saw nothing replays all of it, in order.
+        conn.endpoint.leg_down();
+        let mut fresh = link_up(&mut conn);
+        assert_eq!(flow(&mut conn, &mut fresh), all);
+    }
+
+    #[test]
+    fn inject_after_first_frame_follows_hello() {
+        let bare = Bare::new();
+        let mut conn = bare.conn();
+        let mut keeper = link_up(&mut conn);
+        let (hello, c2, injected) = (client_frame("hello"), client_frame("c2"), client_frame("sub"));
+        // No client frame yet: even at a boundary the frame waits for the first one.
+        conn.inject_upstream(injected.clone(), InjectAt::AfterFirstFrame);
+        assert!(flow(&mut conn, &mut keeper).is_empty());
+        // Hello and c2 in one chunk: the frame follows hello, not c2.
+        conn.push_client_bytes(&[&hello[..], &c2[..]].concat()).unwrap();
+        let got = flow(&mut conn, &mut keeper);
+        assert_eq!(kinds(&got), ["hello", "sub", "c2"]);
+        conn.endpoint.leg_down();
+        let mut fresh = link_up(&mut conn);
+        assert_eq!(flow(&mut conn, &mut fresh), got, "replayed with offsets intact");
     }
 }

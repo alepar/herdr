@@ -161,7 +161,6 @@ impl Leg {
 
     /// The render-lane receiver, if any (`None` on ssh legs).
     #[cfg(unix)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn take_render_lane(&mut self) -> Option<RenderLaneRx> {
         self.render_lane.take()
     }

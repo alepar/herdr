@@ -2,8 +2,6 @@
 //! overdue), chain dropping and the once-per-gap resync request.
 //! Sans-IO: time and SRTT are inputs, the caller performs every delivery and request.
 //! Owns: `RenderReorder`, `RenderArrival`. Does not own: lane reading or resync encoding.
-// Unused until the bridge wires it in (mosh-19g.2.9).
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::link_frames::FrameClass;
 use std::collections::{BTreeMap, BTreeSet};
