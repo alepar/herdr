@@ -1547,12 +1547,17 @@ mod tests {
         local.auto_ack = false;
         let conn = h.server().conn(0);
         conn.write_async(pattern(8 << 20));
-        local.pump(Duration::from_millis(700));
-        // With no acks the keeper holds at most the window plus a sub-4 KiB read rounding in its
-        // ring. The rest sits in socket buffers on the server side (a few hundred KiB each way;
-        // 1 MiB of slack is generous) and the server's writer is blocked well short of 8 MiB.
+        // Lower bound: wait for the keeper to read (pumping the leg, never acking).
+        let read = local.wait(Duration::from_secs(10), |_| {
+            conn.written.load(Ordering::SeqCst) >= INITIAL / 2
+        });
+        assert!(read, "keeper did not read: {}", conn.written.load(Ordering::SeqCst));
+        // Upper bound: settle, then with no acks the keeper holds at most the window plus a
+        // sub-4 KiB read rounding in its ring. The rest sits in socket buffers on the server side
+        // (a few hundred KiB each way; 1 MiB of slack is generous) and the server's writer is
+        // blocked well short of 8 MiB.
+        local.pump(Duration::from_millis(500));
         let written = conn.written.load(Ordering::SeqCst);
-        assert!(written >= INITIAL / 2, "keeper did not read: {written}");
         assert!(
             written <= INITIAL + 4096 + (1 << 20) + 200_000,
             "keeper read past the window: {written}"
@@ -1603,11 +1608,18 @@ mod tests {
         h.wait_trace("leg_down", "", "");
         let data = pattern(4 << 20);
         conn.write_async(data.clone());
-        thread::sleep(Duration::from_millis(700));
-        // The keeper reads the reset window and stops; the rest sits in socket buffers on the
-        // server side (same slack as `window_limits_server_reads_with_leg_up`).
+        // Lower bound: wait for the keeper to read while down.
+        assert!(
+            wait_until(Duration::from_secs(10), || conn.written.load(Ordering::SeqCst)
+                >= INITIAL / 2),
+            "keeper did not read while down: {}",
+            conn.written.load(Ordering::SeqCst)
+        );
+        // Upper bound: settle, then the keeper must have stopped at the reset window; the rest
+        // sits in socket buffers on the server side (same slack as
+        // `window_limits_server_reads_with_leg_up`).
+        thread::sleep(Duration::from_millis(500));
         let written = conn.written.load(Ordering::SeqCst);
-        assert!(written >= INITIAL / 2, "keeper did not read while down: {written}");
         assert!(
             written <= INITIAL + (1 << 20) + 200_000 && written < data.len(),
             "keeper read past the reset window while down: {written}"
@@ -1636,10 +1648,18 @@ mod tests {
         // 17 MiB against a 16 MiB ring: the ring never fills while down.
         let data = pattern(17 << 20);
         conn.write_async(data.clone());
-        thread::sleep(Duration::from_secs(1));
+        // Lower bound: wait for the keeper to read while down.
+        assert!(
+            wait_until(Duration::from_secs(10), || conn.written.load(Ordering::SeqCst)
+                >= INITIAL / 2),
+            "keeper did not read while down: {}",
+            conn.written.load(Ordering::SeqCst)
+        );
+        // Upper bound: settle, then the keeper must have stopped at the reset window.
+        thread::sleep(Duration::from_millis(500));
         let written = conn.written.load(Ordering::SeqCst);
         assert!(
-            (INITIAL / 2..=INITIAL + (1 << 20) + 200_000).contains(&written) && written < data.len(),
+            written <= INITIAL + (1 << 20) + 200_000 && written < data.len(),
             "keeper read past the reset window while down: {written}"
         );
         assert!(!h.trace_has("session_end", "reason", end_reason::RING_OVERFLOW));
