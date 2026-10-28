@@ -213,7 +213,11 @@ mod tests {
 
     #[test]
     fn link_frame_decodes_as_ignored() {
-        for status in [LinkStatus::Resuming { last_contact_ms: 1500 }, LinkStatus::Linked] {
+        for status in [
+            LinkStatus::Resuming { last_contact_ms: 1500 },
+            LinkStatus::Linked { srtt_ms: None },
+            LinkStatus::Linked { srtt_ms: Some(80) },
+        ] {
             let bytes = encode_link_frame(&status);
             let msg: ServerMessage =
                 read_message(&mut &bytes[..], MAX_GRAPHICS_FRAME_SIZE).unwrap();

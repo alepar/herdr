@@ -42,9 +42,13 @@ const REAP_POLL: Duration = Duration::from_millis(5);
 /// gone (it is killed and reaped when the deadline passes).
 type Teardown = Box<dyn FnOnce(bool, Instant) -> (Option<ExitStatus>, Option<String>) + Send>;
 
+/// The transport's own RTT estimate, polled by the bridge (QUIC: `Connection::rtt()`).
+pub(super) type RttProbe = Box<dyn Fn() -> Option<Duration> + Send>;
+
 /// One live connection to the keeper side (transport-neutral).
 ///
-/// Owns: a duplex byte stream, a teardown handle, and a structured end report (`ExitStatus`,
+/// Owns: a duplex byte stream, a teardown handle, an optional RTT probe (`None` for ssh legs;
+/// QUIC legs report the connection's estimate), and a structured end report (`ExitStatus`,
 /// captured stderr on reconnect legs, whether `WELCOME` was reached, any pre-`WELCOME` `END`
 /// reason). For ssh it owns the ssh child directly: no socketpair, no `bridge_child`.
 /// Hides: which process or transport carries the bytes.
@@ -61,6 +65,8 @@ pub(super) struct Leg {
     pre_welcome_end: Option<String>,
     /// Open while leg-0 stderr is relayed to the terminal; closed at `WELCOME`.
     stderr_gate: Option<Arc<AtomicBool>>,
+    /// The transport's RTT estimate; `None` when it has none (ssh).
+    rtt_probe: Option<RttProbe>,
 }
 
 impl Leg {
@@ -77,7 +83,20 @@ impl Leg {
             welcome_reached: false,
             pre_welcome_end: None,
             stderr_gate: None,
+            rtt_probe: None,
         }
+    }
+
+    /// Attach the transport's RTT estimate. Called by the QUIC leg (mosh-19g.1's subtree).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_rtt_probe(mut self, probe: RttProbe) -> Leg {
+        self.rtt_probe = Some(probe);
+        self
+    }
+
+    /// The transport's own RTT estimate now; `None` for ssh legs and while the transport has none.
+    pub(super) fn rtt(&self) -> Option<Duration> {
+        self.rtt_probe.as_ref().and_then(|probe| probe())
     }
 
     /// Wrap a spawned child whose stdin/stdout are the leg's byte stream.
@@ -259,6 +278,7 @@ fn spawn_leg(
         welcome_reached: false,
         pre_welcome_end: None,
         stderr_gate,
+        rtt_probe: None,
     };
     Ok((leg, BufReader::new(stdout)))
 }
@@ -582,6 +602,30 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn sh")
+    }
+
+    #[test]
+    fn ssh_leg_has_no_rtt_probe() {
+        let leg = Leg::new(
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+            Box::new(|_, _| (None, None)),
+        );
+        assert_eq!(leg.rtt(), None);
+        let child = Leg::from_child(spawn("exit 0")).unwrap();
+        assert_eq!(child.rtt(), None);
+        child.finish(false, soon());
+    }
+
+    #[test]
+    fn rtt_probe_is_polled() {
+        let leg = Leg::new(
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+            Box::new(|_, _| (None, None)),
+        )
+        .with_rtt_probe(Box::new(|| Some(Duration::from_millis(42))));
+        assert_eq!(leg.rtt(), Some(Duration::from_millis(42)));
     }
 
     #[test]

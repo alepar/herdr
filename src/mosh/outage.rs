@@ -24,7 +24,11 @@ const STALE_AFTER: Duration = Duration::from_secs(2);
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum LinkStatus {
     Resuming { last_contact_ms: u64 },
-    Linked,
+    Linked {
+        /// Smoothed RTT of the link in ms; absent while unknown (and from older bridges).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        srtt_ms: Option<u64>,
+    },
 }
 
 struct Resuming {
@@ -57,7 +61,7 @@ impl OutageState {
                     },
                 );
             }
-            Ok(LinkStatus::Linked) => {
+            Ok(LinkStatus::Linked { .. }) => {
                 self.resuming.remove(endpoint);
             }
             Err(_) => {}
@@ -197,12 +201,52 @@ mod tests {
         let json = serde_json::to_string(&resuming).unwrap();
         assert_eq!(json, r#"{"state":"resuming","last_contact_ms":1500}"#);
         assert_eq!(serde_json::from_str::<LinkStatus>(&json).unwrap(), resuming);
-        let json = serde_json::to_string(&LinkStatus::Linked).unwrap();
+        let linked = LinkStatus::Linked { srtt_ms: None };
+        let json = serde_json::to_string(&linked).unwrap();
         assert_eq!(json, LINKED);
+        assert_eq!(serde_json::from_str::<LinkStatus>(&json).unwrap(), linked);
+    }
+
+    #[test]
+    fn linked_with_srtt_round_trips() {
+        let linked = LinkStatus::Linked { srtt_ms: Some(42) };
+        let json = serde_json::to_string(&linked).unwrap();
+        assert_eq!(json, r#"{"state":"linked","srtt_ms":42}"#);
+        assert_eq!(serde_json::from_str::<LinkStatus>(&json).unwrap(), linked);
+    }
+
+    #[test]
+    fn old_linked_json_still_parses() {
         assert_eq!(
-            serde_json::from_str::<LinkStatus>(&json).unwrap(),
-            LinkStatus::Linked
+            serde_json::from_str::<LinkStatus>(r#"{"state":"linked"}"#).unwrap(),
+            LinkStatus::Linked { srtt_ms: None }
         );
+    }
+
+    #[test]
+    fn older_client_ignores_srtt_ms() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "state", rename_all = "snake_case")]
+        enum OldLinkStatus {
+            #[allow(dead_code)]
+            Resuming { last_contact_ms: u64 },
+            Linked,
+        }
+        assert_eq!(
+            serde_json::from_str::<OldLinkStatus>(r#"{"state":"linked","srtt_ms":42}"#).unwrap(),
+            OldLinkStatus::Linked
+        );
+    }
+
+    #[test]
+    fn linked_with_srtt_clears_the_banner_like_plain_linked() {
+        let mut s = state();
+        let now = Instant::now();
+        assert!(s.observe_at(&ssh(), LINK_KIND, &resuming(1500), now));
+        assert!(!s.resuming.is_empty());
+        let linked = r#"{"state":"linked","srtt_ms":42}"#;
+        assert!(s.observe_at(&ssh(), LINK_KIND, linked, now));
+        assert!(s.resuming.is_empty());
     }
 
     #[test]
