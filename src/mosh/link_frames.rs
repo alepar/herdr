@@ -2,6 +2,7 @@
 //! injected `x-mosh.link.v1` frames with the existing `crate::protocol` frame writer.
 //! Does not own status semantics.
 
+use crate::client::mosh_outage::predict::ECHO_SUBSCRIBE_KIND;
 use crate::client::mosh_outage::server_hooks::SURFACE_RESYNC_KIND;
 use crate::client::mosh_outage::{LinkStatus, LINK_KIND};
 use crate::protocol::{
@@ -174,6 +175,21 @@ pub(super) fn encode_resync_frame() -> Vec<u8> {
         },
     )
     .expect("resync frame encodes");
+    out
+}
+
+/// The client's one-time request that the server acknowledge echoed input
+/// (`x-mosh.echo-subscribe.v1`), via the existing frame writer.
+pub(super) fn encode_echo_subscribe_frame() -> Vec<u8> {
+    let mut out = Vec::new();
+    write_message(
+        &mut out,
+        &ClientMessage::EndpointControl {
+            kind: ECHO_SUBSCRIBE_KIND.to_owned(),
+            data: "{}".to_owned(),
+        },
+    )
+    .expect("echo subscribe frame encodes");
     out
 }
 
@@ -413,6 +429,19 @@ mod tests {
             panic!("not EndpointControl");
         };
         assert_eq!(kind, SURFACE_RESYNC_KIND);
+    }
+
+    #[test]
+    fn echo_subscribe_frame_decodes() {
+        let bytes = encode_echo_subscribe_frame();
+        let msg: ClientMessage = read_message(&mut &bytes[..], MAX_GRAPHICS_FRAME_SIZE).unwrap();
+        let ClientMessage::EndpointControl { kind, data } = msg else {
+            panic!("not EndpointControl");
+        };
+        assert_eq!(kind, ECHO_SUBSCRIBE_KIND);
+        assert_eq!(data, "{}");
+        let frames = FrameSplitter::new().push(&bytes).unwrap();
+        assert_eq!(frames, vec![bytes], "one whole frame");
     }
 
     #[test]
