@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-24-mosh-phase1-resumable-session
 
 flags: planOneShot=true skipPlanRoast=false skipCodeRoast=false autonomous=true
-phase: finish
+phase: done
 codeMechanism: Workflow
 runTag: mosh-phase1-resumable-session-20261024T052906
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -81,3 +81,5 @@ scope-filter: 2 in-scope · 1 punch-listed
 stepBackCode-round-4: local — cap round; all three findings are test-only ordering races in one new test (dqw.33), no design decision owns them (step-back not dispatched; see friction log)
 roastCodeExit: capped
 friction: 17 events
+- finish · 2026-10-28 human choice: merge into `mosh` (footprint 12 lines accepted; stderr relay fix 33d7c01f landed first; escalations checked, evidence/escalation-checks/)
+- cleanup · task worktrees: directories already absent, registrations pruned 2026-10-27 · stop-run-processes exit 4: unknown (uninspectable, not run-owned by other evidence): systemd --user 1901/1938, defunct codex 1709587/1891001, sshd-session 403694/1097853 (LAN client), sshd-session 515289/515317 (loopback leftovers of the ProxyJump spike; kill refused by permission layer) · retained per process-unknown: run worktree, review worktrees scratchpad/rv-conc, scratchpad/wt, /tmp/claude-1001/wtv
