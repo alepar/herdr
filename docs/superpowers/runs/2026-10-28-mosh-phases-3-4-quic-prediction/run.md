@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-28-mosh-phases-3-4-quic-prediction
 
 flags: planOneShot=f skipPlanRoast=f skipCodeRoast=f autonomous=t
-phase: design
+phase: roast-design
 codeMechanism: Workflow
 runTag: mosh-phases-3-4-quic-prediction-20261028T144321
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -16,3 +16,4 @@ approvals:
 - top-split · auto · mosh-19g.1 PROMOTE, mosh-19g.2 PROMOTE, mosh-19g.3 PROMOTE, mosh-19g.4 LEAF, mosh-19g.5 LEAF, mosh-19g.6 LEAF
 - coverage-round-1 · canonical R-list: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/coverage-round-1-requirements.md (R1–R13; R14, R15 appended from r-new) · requirements: 13 · mapped: 13 · unmapped: 0 · NEEDS-SPEC re-runs: both reviewers (one each); reviewer 2's re-run asked again for mosh-19g.2, not honored · auto applied C1–C6, C8–C19 (coverage-ledger.md); auto rejected C7
 - coverage-round-2 · requirements: 16 · mapped: 14 · unmapped: 2 (R15, R16) — both applied this round · divergence: findings 19 → 15 · novel 10/15 (67%) · widening: no · auto applied C20–C23, C25, C27–C33; auto rejected C24, C26, C34 · integration sweep: mosh-19g.7 (deps on all 24 leaves) · coverage loop ended (cap 2)
+roastDesignRound: 1
