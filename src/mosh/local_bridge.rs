@@ -1137,7 +1137,10 @@ impl Conn<'_> {
         }
         self.update_delivered(now);
         self.pump_sends(now);
-        if self.client.is_some() && !self.client_closed {
+        // The client's handshake reads the first server frame as the endpoint welcome, so no
+        // link frame may precede it. A leg with its own RTT probe (QUIC) knows its SRTT at
+        // once, before the server has answered.
+        if self.client.is_some() && !self.client_closed && self.frames_end > 0 {
             if let Some(ms) = self.srtt_report.update(self.srtt()) {
                 self.inject(LinkStatus::Linked {
                     srtt_ms: Some(ms),
@@ -2428,6 +2431,29 @@ mod tests {
             injected.extend(round(at, Duration::from_millis(400)));
         }
         assert!(injected.len() >= 2 && injected.windows(2).all(|w| w[0] < w[1]), "{injected:?}");
+    }
+
+    #[test]
+    fn rtt_probe_srtt_is_not_injected_before_the_first_server_frame() {
+        let (dialer, keeper) = (MemDialer::new(), FakeKeeper::default());
+        dialer.script(decorated(LegScript::Keeper(keeper.clone(), KLeg::new(Answer::New)), |leg| {
+            leg.with_rtt_probe(Box::new(|| Some(Duration::from_millis(5))))
+        }));
+        let harness = Harness::start(&dialer, secs(30));
+        let client = harness.connect();
+        wait_until("hello", WAIT, || keeper.hellos().len() == 1);
+        // Several bridge ticks pass with the leg linked and its SRTT known, but no server frame.
+        thread::sleep(Duration::from_millis(300));
+        keeper.push_down(frame("welcome"));
+        let (_, first) = client.next_seen(WAIT);
+        assert_eq!(first, data("welcome"), "a link frame preceded the first server frame");
+        // Afterwards the probe's SRTT is reported as usual.
+        loop {
+            let (_, got) = client.next_seen(WAIT);
+            if matches!(got, Seen::Link(LinkStatus::Linked { srtt_ms: Some(5), .. })) {
+                break;
+            }
+        }
     }
 
     #[test]
