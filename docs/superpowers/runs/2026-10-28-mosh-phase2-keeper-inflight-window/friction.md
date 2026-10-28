@@ -8,3 +8,4 @@
 - [phase 4] assembler: review input selection: provenance unavailable; captured source available (inherited Phase 1 incomplete collections inv-c723b6b8, inv-ed080a9e). Round 1 code roast run as a separately named bounded direct review over product paths (docs/superpowers/** unreviewed); round/whole-range review stays unavailable for acceptance.
 - [phase 5] scope-dispositions --project --keys returned an empty projection although round-1 punch-listed keys exist; punch-list file written from the scope keys instead (same gap as phase 1)
 - [phase 4] round 2 assembler: same inherited provenance gap; bounded direct review over product paths again
+- [phase 4] round 3 assembler skipped as known-unavailable (same inherited provenance gap twice); bounded direct review over product paths
