@@ -1,6 +1,7 @@
 # Phase 3a: QUIC leg with ssh bootstrap, roaming and fallback
 
-Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§1, §4, §6 3a). Bead: mosh-19g.1.
+Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§1, §4, §6 3a).
+Bead: mosh-19g.1
 Research brief: `inputs/seam-brief.md`.
 
 ## Goal

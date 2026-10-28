@@ -1,6 +1,7 @@
 # Phase 4: predictive local echo with server echo-ack
 
-Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§3, §4, §6 4; gaps a–c in its Key abstractions). Bead: mosh-19g.3.
+Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§3, §4, §6 4; gaps a–c in its Key abstractions).
+Bead: mosh-19g.3
 Builds on: 3a (`--3a-quic-leg-design.md`), 3b (`--3b-supersede-design.md`; the `server_hooks` client EndpointControl dispatch and render lanes), and root seams mosh-19g.5 (`server_hooks`, budget 30) and mosh-19g.6 (SRTT, `LinkStatus.srtt_ms`).
 Research brief: `inputs/seam-brief.md` §3–§4 (client compose, fast path, input path).
 

@@ -1,6 +1,7 @@
 # Phase 3b: render frames on cancellable QUIC streams with resync
 
-Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§2, §6 3b). Bead: mosh-19g.2.
+Parent spec: `2026-10-28-mosh-phases-3-4-quic-prediction-design.md` (§2, §6 3b).
+Bead: mosh-19g.2
 Builds on: `2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md` (QUIC leg, `KeeperLeg`,
 the `Leg` render-lane slot, the render-stream header in the `quic` module).
 Research brief: `inputs/seam-brief.md` §2 (server queue, tags, strict chain).
