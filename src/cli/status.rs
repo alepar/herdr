@@ -301,6 +301,7 @@ fn client_status_json() -> ClientStatusJson {
             crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
             #[cfg(unix)] // mosh-fork hook
             "x-mosh-resume-bridge-v1", // mosh-fork hook
+            "x-mosh-supersede-v1", // mosh-fork hook
             #[cfg(unix)] // mosh-fork hook
             "x-mosh-quic-v1", // mosh-fork hook
         ],
