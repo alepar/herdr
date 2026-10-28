@@ -18,8 +18,17 @@ const READY: Duration = Duration::from_secs(30);
 /// window::INITIAL (src/mosh/window.rs).
 const KEEPER_RESET_WINDOW: u64 = 256 * 1024;
 
-/// Floods the pane until Ctrl-C; the split `MA RKER` keeps the echoed command line from matching.
-const FLOOD_PROBE: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; yes)"#;
+/// Mirror of tests/mosh_pacing.rs `DENSE_SIZE`: wide enough that herdr's screen diffs
+/// saturate the link (about 508 KiB/s on the LAN harness).
+#[cfg(target_os = "linux")]
+const DENSE_SIZE: (u16, u16) = (400, 100);
+/// Mirror of tests/mosh_pacing.rs `SATURATING_FLOOD`: a content-dense flood until Ctrl-C;
+/// the split `MA RKER` keeps the echoed command line from matching.
+#[cfg(target_os = "linux")]
+const SATURATING_FLOOD: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)"#;
+/// One `session::MAX_DATA_CHUNK`: slack for a blip leg repacking the server socket.
+#[cfg(target_os = "linux")]
+const CHUNK: u64 = 64 * 1024;
 const MARKER: &str = "MARKER";
 
 fn attached(remote: &Remote, opts: &ClientOptions) -> Client {
@@ -55,6 +64,64 @@ fn fail_context(remote: &Remote, client: &Client) -> String {
         remote.keeper_events(),
         remote.session_legs(&client.id)
     )
+}
+
+/// Mirror of tests/mosh_pacing.rs `timing_lock`: the same host-wide flock, so this flood
+/// never runs alongside the pacing measurements. Held until dropped.
+#[cfg(target_os = "linux")]
+struct TimingLock(#[allow(dead_code)] std::fs::File); // held only for its flock
+
+#[cfg(target_os = "linux")]
+fn timing_lock() -> TimingLock {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("herdr-mosh-pacing.lock"))
+        .expect("open the timing lock");
+    // SAFETY: flock(2) on a file descriptor this function owns.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "flock failed");
+    TimingLock(file)
+}
+
+/// Recv-Q of the keepers' server stream (their `ESTAB` socket with local address `*`): bytes
+/// the server wrote that the keeper has not read, the same quantity as FIONREAD. Mirror of
+/// tests/mosh_pacing.rs `keeper_server_backlog`. `None` when `ss` fails or the stream is gone.
+#[cfg(target_os = "linux")]
+fn server_backlog(keepers: &[libc::pid_t]) -> Option<u64> {
+    let tags: Vec<String> = keepers.iter().map(|pid| format!("pid={pid},")).collect();
+    let out = std::process::Command::new("ss").arg("-xpn").output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| tags.iter().any(|tag| line.contains(tag.as_str())))
+        .filter_map(|line| {
+            // Netid State Recv-Q Send-Q Local-Address Local-Inode Peer-Address ...
+            let f: Vec<&str> = line.split_whitespace().collect();
+            (f.get(1) == Some(&"ESTAB") && f.get(4) == Some(&"*"))
+                .then(|| f.get(2)?.parse::<u64>().ok())
+                .flatten()
+        })
+        .max()
+}
+
+/// Wait (up to `READY`) until two `server_backlog` samples 500 ms apart are equal and
+/// non-zero: the server socket is full and the server is blocked. Returns that value.
+#[cfg(target_os = "linux")]
+fn backlog_plateau(keepers: &[libc::pid_t]) -> Option<u64> {
+    let mut last = None;
+    let mut plateau = None;
+    mosh_harness::wait_for(READY, || {
+        let now = server_backlog(keepers);
+        let hit = matches!((last, now), (Some(a), Some(b)) if a == b && b > 0);
+        if hit {
+            plateau = now;
+        }
+        last = now;
+        thread_sleep(500);
+        hit
+    });
+    plateau
 }
 
 #[test]
@@ -448,17 +515,55 @@ fn slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session() {
     );
 }
 
+/// A dense flood through a real outage: the keeper stops reading the server at the reset
+/// window, the backlog stays in the (bounded) server socket, the session survives, and after
+/// resume the latest output arrives and Ctrl-C answers.
+#[cfg(target_os = "linux")]
 #[test]
-fn a_long_outage_under_a_flood_keeps_the_session_and_ctrl_c_answers_after_resume() {
+fn a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume() {
+    if std::process::Command::new("ss").arg("-V").output().is_err() {
+        eprintln!("skipped: `ss` is not available to sample the keeper's server backlog");
+        return;
+    }
+    let _lock = timing_lock();
     let remote = Remote::start();
-    let mut client = attached(&remote, &ClientOptions::grace(600));
+    let mut client = attached(
+        &remote,
+        &ClientOptions {
+            size: DENSE_SIZE,
+            ..ClientOptions::grace(600)
+        },
+    );
+    let keepers = remote.keeper_pids();
     remote.set_knob(knob::EOF_WELCOME, "");
     remote.signal_leg(&client.id, libc::SIGKILL);
     assert!(client.wait_event("leg_down", 1, READY));
 
-    // The flood backs up in the server socket, not in the keeper ring.
-    remote.pane_run(FLOOD_PROBE);
-    thread_sleep(15_000);
+    // The flood starts during the outage, so nothing was queued past INITIAL beforehand.
+    let flood_started = Instant::now();
+    remote.pane_run(SATURATING_FLOOD);
+
+    // The keeper stops at INITIAL; the server socket fills to its cap and stays there.
+    let first = backlog_plateau(&keepers);
+    assert!(
+        first.is_some(),
+        "no server backlog plateau while down\n{}",
+        fail_context(&remote, &client)
+    );
+    thread_sleep(1000);
+    let second = backlog_plateau(&keepers);
+    let (first, second) = (first.unwrap_or(0), second.unwrap_or(0));
+    assert!(
+        second > 0 && second <= first + CHUNK,
+        "server backlog grew while down: {first} -> {second}\n{}",
+        fail_context(&remote, &client)
+    );
+    // Hold the outage at least 3 s of flood (well over 1 MiB of output at about 508 KiB/s,
+    // so a keeper draining to its ring cap would exceed INITIAL many times over).
+    let floor = Duration::from_secs(3);
+    if let Some(rest) = floor.checked_sub(flood_started.elapsed()) {
+        std::thread::sleep(rest);
+    }
     let ended: Vec<_> = remote
         .keeper_events()
         .into_iter()
@@ -477,20 +582,22 @@ fn a_long_outage_under_a_flood_keeps_the_session_and_ctrl_c_answers_after_resume
         "{}",
         fail_context(&remote, &client)
     );
-    // Ring bound: at most the reset window queued while down (the slack covers the up-rule read
-    // rounding on a leg that came up and died under the EOF_WELCOME knob).
-    for event in remote.keeper_events() {
-        if event["event"] == "resume" {
-            let replayed = event["replayed_down"].as_u64().unwrap_or(u64::MAX);
-            assert!(
-                replayed <= KEEPER_RESET_WINDOW + 4096,
-                "ring held {replayed} while down\n{}",
-                fail_context(&remote, &client)
-            );
-        }
-    }
+    // Ring bound: at most the reset window queued while down (the slack covers the up-rule
+    // read rounding on blip legs that came up and died under the EOF_WELCOME knob).
+    let resumes: Vec<u64> = remote
+        .keeper_events()
+        .into_iter()
+        .filter(|e| e["event"] == "resume")
+        .map(|e| e["replayed_down"].as_u64().unwrap_or(u64::MAX))
+        .collect();
+    assert!(!resumes.is_empty(), "{}", fail_context(&remote, &client));
+    assert!(
+        resumes.iter().all(|&r| r <= KEEPER_RESET_WINDOW + 4096),
+        "ring held {resumes:?} while down\n{}",
+        fail_context(&remote, &client)
+    );
 
-    // The flood reaches the client, and Ctrl-C answers.
+    // The server stream survived (no write timeout): the flood reaches the client.
     let before = client.output_len();
     assert!(
         wait(|| client.output_len() >= before + 64 * 1024),
