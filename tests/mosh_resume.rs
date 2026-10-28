@@ -15,6 +15,13 @@ use mosh_harness::{knob, Client, ClientOptions, Remote};
 
 const READY: Duration = Duration::from_secs(30);
 
+/// window::INITIAL (src/mosh/window.rs).
+const KEEPER_RESET_WINDOW: u64 = 256 * 1024;
+
+/// Floods the pane until Ctrl-C; the split `MA RKER` keeps the echoed command line from matching.
+const FLOOD_PROBE: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; yes)"#;
+const MARKER: &str = "MARKER";
+
 fn attached(remote: &Remote, opts: &ClientOptions) -> Client {
     let client = remote.spawn_remote_client(opts);
     client.wait_attached(remote, READY);
@@ -442,41 +449,59 @@ fn slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session() {
 }
 
 #[test]
-fn ring_overflow_during_an_outage_ends_the_session_without_a_hang() {
-    // Slow (about 100 s) and CPU heavy: the keeper's 16 MiB ring has to fill with rendered frames.
+fn a_long_outage_under_a_flood_keeps_the_session_and_ctrl_c_answers_after_resume() {
     let remote = Remote::start();
-    // A big terminal makes each rendered frame (and so the keeper's backlog) big.
-    let mut opts = ClientOptions::grace(600);
-    opts.size = (240, 70);
-    let mut client = attached(&remote, &opts);
+    let mut client = attached(&remote, &ClientOptions::grace(600));
     remote.set_knob(knob::EOF_WELCOME, "");
     remote.signal_leg(&client.id, libc::SIGKILL);
     assert!(client.wait_event("leg_down", 1, READY));
 
-    // Output the keeper must hold for a client that is not there until its 16 MiB ring fills.
-    remote.pane_run("while :; do seq 1 100000; done");
+    // The flood backs up in the server socket, not in the keeper ring.
+    remote.pane_run(FLOOD_PROBE);
+    thread_sleep(15_000);
+    let ended: Vec<_> = remote
+        .keeper_events()
+        .into_iter()
+        .filter(|e| e["event"] == "session_end")
+        .collect();
     assert!(
-        mosh_harness::wait_for(Duration::from_secs(170), || {
-            remote
-                .keeper_events()
-                .iter()
-                .any(|e| e["event"] == "session_end" && e["reason"] == "ring-overflow")
-        }),
-        "keeper never overflowed its ring: {}",
+        ended.is_empty(),
+        "{ended:?}\n{}",
         fail_context(&remote, &client)
     );
-    assert!(!client.exited(), "client ended before the leg returned");
+    assert!(!client.exited(), "{}", fail_context(&remote, &client));
 
-    // Today's disconnect path: the client learns of the end once a leg reaches the keeper.
     remote.clear_knob(knob::EOF_WELCOME);
     assert!(
-        client.wait_exit(Duration::from_secs(60)),
-        "client hung after the overflow: {}",
+        wait(|| client.has_welcome("resumed")),
+        "{}",
         fail_context(&remote, &client)
     );
+    // Ring bound: at most the reset window queued while down (the slack covers the up-rule read
+    // rounding on a leg that came up and died under the EOF_WELCOME knob).
+    for event in remote.keeper_events() {
+        if event["event"] == "resume" {
+            let replayed = event["replayed_down"].as_u64().unwrap_or(u64::MAX);
+            assert!(
+                replayed <= KEEPER_RESET_WINDOW + 4096,
+                "ring held {replayed} while down\n{}",
+                fail_context(&remote, &client)
+            );
+        }
+    }
+
+    // The flood reaches the client, and Ctrl-C answers.
+    let before = client.output_len();
     assert!(
-        client.output_text().contains("to reattach"),
+        wait(|| client.output_len() >= before + 64 * 1024),
         "{}",
-        client.output_text()
+        fail_context(&remote, &client)
     );
+    client.type_bytes(b"\x03");
+    assert!(
+        client.wait_screen(MARKER, READY),
+        "{}",
+        fail_context(&remote, &client)
+    );
+    assert!(!client.exited(), "{}", fail_context(&remote, &client));
 }

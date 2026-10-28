@@ -356,7 +356,7 @@ pub(super) enum LinkVerdict {
 }
 
 /// One end of a session: owns offsets, dedup, acks, flow control (the `InflightWindow`'s window,
-/// capped at `WINDOW`, and the ring-cap reading rule), link timers and resume negotiation. Bridge and keeper never do offset arithmetic.
+/// capped at `WINDOW`, and the window reading rule, also applied while down), link timers and resume negotiation. Bridge and keeper never do offset arithmetic.
 pub(super) struct SessionEndpoint {
     role: Role,
     token: Token,
@@ -644,15 +644,15 @@ impl SessionEndpoint {
         self.last_ack_sent = 0;
     }
 
-    /// Bytes the owner may queue from its source now: up to the controller's window while a
-    /// leg is up, up to the ring cap while down. 0 means do not read.
+    /// Bytes the owner may queue from its source now: up to the controller's window (capped by
+    /// the ring), whether or not a leg is up. While down the window is the reset value, so an
+    /// outage backlog stays with the source instead of filling the ring with stale bytes; bytes
+    /// already queued past it are kept and replayed. 0 means do not read.
     pub fn source_room(&self) -> usize {
-        let limit = if self.is_up() {
-            self.window.current().min(self.ring.capacity())
-        } else {
-            self.ring.capacity()
-        };
-        limit.saturating_sub(self.ring.occupancy())
+        self.window
+            .current()
+            .min(self.ring.capacity())
+            .saturating_sub(self.ring.occupancy())
     }
 
     /// Whether the owner may read the source (`source_room() > 0`).
@@ -663,8 +663,8 @@ impl SessionEndpoint {
     /// How many bytes to read from the source now; 0 means wait. While a leg is up:
     /// `source_room()` rounded up to 4 KiB, at most one chunk, so a read cannot overshoot a
     /// small window by a chunk (ring occupancy may exceed the window by under 4 KiB; bytes in
-    /// flight never do). While down: a whole chunk whenever the ring has room (the ring-cap
-    /// rule: a source that writes past the cap overflows and ends the session).
+    /// flight never do). While down: exactly `source_room()`, at most one chunk, so the ring
+    /// never passes the reset window from source reads.
     pub fn source_read_size(&self) -> usize {
         let room = self.source_room();
         if room == 0 {
@@ -673,7 +673,7 @@ impl SessionEndpoint {
             room.next_multiple_of(SOURCE_READ_QUANTUM)
                 .min(MAX_DATA_CHUNK)
         } else {
-            MAX_DATA_CHUNK
+            room.min(MAX_DATA_CHUNK)
         }
     }
 
@@ -688,8 +688,9 @@ impl SessionEndpoint {
     }
 
     /// Queue source bytes (at most `MAX_DATA_CHUNK` per read) for sending. Overflow is reported;
-    /// with the window rule it can only happen while no leg is up (a ring at least `WINDOW` plus
-    /// one chunk never overflows while up).
+    /// a source that reads within `source_room()` never overflows (a ring at least `WINDOW` plus
+    /// one chunk never overflows while up), so it needs a source that pushes past the room, which
+    /// only the local bridge does while down.
     pub fn push_source(&mut self, data: &[u8]) -> Result<(), RingOverflow> {
         let result = self.ring.push(data);
         debug_assert!(
@@ -1345,30 +1346,91 @@ mod tests {
     }
 
     #[test]
-    fn down_reads_to_ring_cap_and_overflow_is_reported() {
-        let cap = 4 * MAX_DATA_CHUNK;
-        let mut p = Pair::new(cap, MIB);
+    fn down_reads_stop_at_initial_and_a_forced_push_still_reports_overflow() {
+        // A ring much larger than INITIAL: while down, reads stop at INITIAL, not at the cap.
+        let mut p = Pair::new(8 * MIB, MIB);
         p.connect();
         p.leg_down();
-        // Whole-chunk reads while down (the ring-cap rule).
-        assert_eq!(p.local.source_read_size(), MAX_DATA_CHUNK);
-        let mut pushed = 0;
+        assert_eq!(p.local.window(), INITIAL);
+        // An odd occupancy first: down reads are sized to the room exactly (no 4 KiB rounding).
+        p.local.push_source(&[1; 1000]).unwrap();
         while p.local.may_read_source() {
-            p.local.push_source(&vec![1; MAX_DATA_CHUNK]).unwrap();
-            pushed += MAX_DATA_CHUNK;
+            let n = p.local.source_read_size();
+            assert!(n > 0 && n <= MAX_DATA_CHUNK && n <= p.local.source_room());
+            p.local.push_source(&vec![1; n]).unwrap();
+            assert!(p.local.ring.occupancy() <= INITIAL);
         }
-        assert_eq!(pushed, cap);
+        assert_eq!(p.local.ring.occupancy(), INITIAL);
         assert_eq!((p.local.source_room(), p.local.source_read_size()), (0, 0));
-        let err = p.local.push_source(&[1]).unwrap_err();
-        assert_eq!((err.capacity, err.attempted), (cap, cap + 1));
-        assert_eq!(p.local.outbound_end(), cap as u64);
 
-        // Down: the 2 MiB window does not apply; the cap does.
-        let mut big = Pair::new(8 * MIB, MIB);
-        big.connect();
-        big.leg_down();
-        push_chunks(&mut big.local, 3 * MIB);
-        assert!(big.local.may_read_source());
+        // The ring cap stays the hard cap: a ring smaller than INITIAL stops at its capacity,
+        // and a push past it (the local bridge reads while down regardless) still overflows.
+        let cap = 2 * MAX_DATA_CHUNK;
+        assert!(cap < INITIAL);
+        let mut small = Pair::new(cap, MIB);
+        small.connect();
+        small.leg_down();
+        while small.local.may_read_source() {
+            let n = small.local.source_read_size();
+            small.local.push_source(&vec![1; n]).unwrap();
+        }
+        assert_eq!(small.local.ring.occupancy(), cap);
+        let err = small.local.push_source(&[1]).unwrap_err();
+        assert_eq!((err.capacity, err.attempted), (cap, cap + 1));
+        assert_eq!(small.local.outbound_end(), cap as u64);
+    }
+
+    #[test]
+    fn bytes_queued_past_initial_before_a_drop_are_kept_and_replayed_in_order() {
+        let mut p = Pair::new(8 * MIB, 8 * MIB);
+        p.connect();
+        let pat: Vec<u8> = (0..MIB).map(|i| (i % 251) as u8).collect();
+        for piece in pat.chunks(MAX_DATA_CHUNK) {
+            p.local.push_source(piece).unwrap();
+        }
+        p.round(&mut None);
+        p.leg_down();
+        assert!(p.local.ring.occupancy() > INITIAL);
+        assert_eq!(p.local.source_room(), 0);
+        assert_eq!(p.local.source_read_size(), 0);
+        assert!(!p.local.may_read_source());
+        assert_eq!(
+            p.connect(),
+            vec![SessionEvent::Welcomed(WelcomeStatus::Resumed)]
+        );
+        assert!(!p.pump(None));
+        assert_eq!(p.up, pat);
+        assert_eq!(p.local.ring.occupancy(), 0);
+        assert!(p.local.may_read_source());
+    }
+
+    #[test]
+    fn after_resume_the_window_rule_governs_reads_again() {
+        let mut p = Pair::new(8 * MIB, MIB);
+        p.connect();
+        p.leg_down();
+        while p.local.may_read_source() {
+            let n = p.local.source_read_size();
+            p.local.push_source(&vec![3; n]).unwrap();
+        }
+        assert_eq!(p.local.ring.occupancy(), INITIAL);
+        p.connect();
+        assert_eq!(
+            p.local.source_room(),
+            p.local.window().saturating_sub(p.local.ring.occupancy())
+        );
+        assert!(!p.pump(None));
+        assert_eq!(p.local.ring.occupancy(), 0);
+        let n = p.local.source_read_size();
+        assert_eq!(
+            n,
+            p.local
+                .source_room()
+                .next_multiple_of(SOURCE_READ_QUANTUM)
+                .min(MAX_DATA_CHUNK)
+        );
+        assert_eq!(n % SOURCE_READ_QUANTUM, 0);
+        assert!(n > 0);
     }
 
     #[test]
