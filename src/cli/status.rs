@@ -301,6 +301,8 @@ fn client_status_json() -> ClientStatusJson {
             crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY,
             #[cfg(unix)] // mosh-fork hook
             "x-mosh-resume-bridge-v1", // mosh-fork hook
+            #[cfg(unix)] // mosh-fork hook
+            "x-mosh-quic-v1", // mosh-fork hook
         ],
         remote_host_bridge: true,
         remote_bridge_idle_timeout: crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED,
