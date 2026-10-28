@@ -1143,3 +1143,250 @@ impl Remote {
         self.set_knob(knob::FAKE_END, "");
     }
 }
+
+// ---- UDP relay (link emulation for QUIC legs) ----
+
+/// Packet counters of a [`UdpRelay`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RelayStats {
+    pub forwarded_up: u64,   // client -> target
+    pub forwarded_down: u64, // target -> client
+    pub dropped_up: u64,
+    pub dropped_down: u64,
+}
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn chance(&mut self, p: f64) -> bool {
+        ((self.next_u64() >> 11) as f64 / (1u64 << 53) as f64) < p
+    }
+}
+
+struct RelayState {
+    delay: Duration,
+    loss_up: f64,
+    loss_down: f64,
+    rng_up: SplitMix64,
+    rng_down: SplitMix64,
+    peer: Option<std::net::SocketAddr>,
+}
+
+#[derive(Default)]
+struct RelayCounters {
+    forwarded_up: std::sync::atomic::AtomicU64,
+    forwarded_down: std::sync::atomic::AtomicU64,
+    dropped_up: std::sync::atomic::AtomicU64,
+    dropped_down: std::sync::atomic::AtomicU64,
+}
+
+type Queued = (Instant, Vec<u8>);
+
+const RELAY_POLL: Duration = Duration::from_millis(20);
+
+fn relay_socket() -> Arc<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind relay socket");
+    socket
+        .set_read_timeout(Some(RELAY_POLL))
+        .expect("relay read timeout");
+    Arc::new(socket)
+}
+
+/// Userspace UDP relay between a client-facing local port and `target`: one-way delay,
+/// seeded random loss per direction, and `rebind` of the upstream-facing socket.
+/// Owns: both relay sockets, the delay queues, the PRNG and the counters. Tests never open raw
+/// sockets for link faults themselves; a new network fault is a new knob here.
+pub struct UdpRelay {
+    client_side: Arc<std::net::UdpSocket>,
+    upstream: Arc<Mutex<Arc<std::net::UdpSocket>>>,
+    state: Arc<Mutex<RelayState>>,
+    counters: Arc<RelayCounters>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl UdpRelay {
+    /// Bind 127.0.0.1:0 on both sides and start forwarding to `target`. `seed` fixes the loss
+    /// sequence. Delay 0, loss 0.
+    pub fn start(target: std::net::SocketAddr, seed: u64) -> UdpRelay {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+
+        let client_side = relay_socket();
+        let upstream = Arc::new(Mutex::new(relay_socket()));
+        let state = Arc::new(Mutex::new(RelayState {
+            delay: Duration::ZERO,
+            loss_up: 0.0,
+            loss_down: 0.0,
+            rng_up: SplitMix64(seed),
+            rng_down: SplitMix64(seed ^ 0x9e37_79b9_7f4a_7c15),
+            peer: None,
+        }));
+        let counters = Arc::new(RelayCounters::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (up_tx, up_rx) = mpsc::channel::<Queued>();
+        let (down_tx, down_rx) = mpsc::channel::<Queued>();
+        let mut threads = Vec::new();
+
+        {
+            let (sock, state, counters, stop) = (
+                client_side.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((n, from)) = sock.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    let due = {
+                        let mut st = state.lock().expect("relay state");
+                        st.peer = Some(from);
+                        let p = st.loss_up;
+                        if st.rng_up.chance(p) {
+                            counters.dropped_up.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        Instant::now() + st.delay
+                    };
+                    let _ = up_tx.send((due, buf[..n].to_vec()));
+                }
+            }));
+        }
+        {
+            let (upstream, counters, stop) = (upstream.clone(), counters.clone(), stop.clone());
+            threads.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((due, bytes)) = up_rx.recv_timeout(RELAY_POLL) else {
+                        continue;
+                    };
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    }
+                    let sock = upstream.lock().expect("relay upstream").clone();
+                    let _ = sock.send_to(&bytes, target);
+                    counters.forwarded_up.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        {
+            let (upstream, state, counters, stop) = (
+                upstream.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                while !stop.load(Ordering::Relaxed) {
+                    let sock = upstream.lock().expect("relay upstream").clone();
+                    let Ok((n, _)) = sock.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    let due = {
+                        let mut st = state.lock().expect("relay state");
+                        let p = st.loss_down;
+                        if st.rng_down.chance(p) {
+                            counters.dropped_down.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        Instant::now() + st.delay
+                    };
+                    let _ = down_tx.send((due, buf[..n].to_vec()));
+                }
+            }));
+        }
+        {
+            let (sock, state, counters, stop) = (
+                client_side.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((due, bytes)) = down_rx.recv_timeout(RELAY_POLL) else {
+                        continue;
+                    };
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    }
+                    let peer = state.lock().expect("relay state").peer;
+                    if let Some(peer) = peer {
+                        let _ = sock.send_to(&bytes, peer);
+                        counters.forwarded_down.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        UdpRelay {
+            client_side,
+            upstream,
+            state,
+            counters,
+            stop,
+            threads,
+        }
+    }
+
+    /// The address clients send to (the "server" address a dialer is pointed at).
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.client_side.local_addr().expect("relay local addr")
+    }
+
+    /// The relay's current upstream-facing address (what the target sees as the source).
+    pub fn upstream_addr(&self) -> std::net::SocketAddr {
+        self.upstream
+            .lock()
+            .expect("relay upstream")
+            .local_addr()
+            .expect("relay upstream addr")
+    }
+
+    /// One-way delay applied to each direction.
+    pub fn set_delay(&self, one_way: Duration) {
+        self.state.lock().expect("relay state").delay = one_way;
+    }
+
+    /// Loss probability in [0, 1] per direction (1.0 blocks UDP).
+    pub fn set_loss(&self, up: f64, down: f64) {
+        let mut st = self.state.lock().expect("relay state");
+        st.loss_up = up;
+        st.loss_down = down;
+    }
+
+    /// Replace the upstream-facing socket with a fresh one on a new local port.
+    pub fn rebind(&self) {
+        *self.upstream.lock().expect("relay upstream") = relay_socket();
+    }
+
+    pub fn stats(&self) -> RelayStats {
+        let c = &self.counters;
+        RelayStats {
+            forwarded_up: c.forwarded_up.load(Ordering::SeqCst),
+            forwarded_down: c.forwarded_down.load(Ordering::SeqCst),
+            dropped_up: c.dropped_up.load(Ordering::SeqCst),
+            dropped_down: c.dropped_down.load(Ordering::SeqCst),
+        }
+    }
+}
+
+impl Drop for UdpRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
