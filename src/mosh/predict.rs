@@ -6,7 +6,7 @@
 //! read point; the (endpoint, connection generation) keying of prediction state.
 //! Does not own: link transport, painting onto the frame, or the server-side ack emission.
 
-// Inert until mosh-19g.3.2 wires the tap and paint hooks.
+// Some codec helpers stay unused until the server side (mosh-19g.3.3) and bridge probe land.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -206,6 +206,15 @@ pub(crate) struct PaintCell {
 pub(crate) struct PaintOutput {
     pub cells: Vec<PaintCell>,
     pub cursor: Option<(u16, u16)>,
+    /// What judging this paint decided, for the trace.
+    pub judgments: Vec<Judgment>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Judgment {
+    Confirmed,
+    Wrong,
+    Timeout,
 }
 
 #[derive(Debug)]
@@ -357,9 +366,14 @@ impl Predictor {
                 pane.clear(mode == PredictMode::Adaptive);
                 continue;
             }
+            let outstanding = pane.predictions.len();
             if !judge(pane, surface) {
                 pane.clear(true);
+                output.judgments.push(Judgment::Wrong);
                 continue;
+            }
+            if pane.predictions.len() < outstanding {
+                output.judgments.push(Judgment::Confirmed);
             }
             if pane
                 .predictions
@@ -396,7 +410,10 @@ impl Predictor {
             for pane in state.panes.values_mut() {
                 pane.clear(false);
             }
-            return PaintOutput::default();
+            return PaintOutput {
+                judgments: vec![Judgment::Timeout],
+                ..PaintOutput::default()
+            };
         }
         output
     }

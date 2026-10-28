@@ -215,8 +215,8 @@ mod tests {
     fn link_frame_decodes_as_ignored() {
         for status in [
             LinkStatus::Resuming { last_contact_ms: 1500 },
-            LinkStatus::Linked { srtt_ms: None },
-            LinkStatus::Linked { srtt_ms: Some(80) },
+            LinkStatus::Linked { srtt_ms: None, echo: false },
+            LinkStatus::Linked { srtt_ms: Some(80), echo: false },
         ] {
             let bytes = encode_link_frame(&status);
             let msg: ServerMessage =

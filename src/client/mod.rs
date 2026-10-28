@@ -2092,7 +2092,7 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
-                        #[rustfmt::skip] let () = if crate::client::mosh_outage::observe(&endpoint_id, &kind, &data) { if let Some(frame) = state.shell.as_mut().and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1)) { state.present_frame(frame); } continue; }; // mosh-fork hook
+                        #[rustfmt::skip] let () = if crate::client::mosh_outage::observe(&endpoint_id, generation, &kind, &data) { if let Some(frame) = state.shell.as_mut().and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1)) { state.present_frame(frame); } continue; }; // mosh-fork hook
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(

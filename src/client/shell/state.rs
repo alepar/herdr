@@ -1610,6 +1610,7 @@ impl ClientShellState {
         self.pane_surface.is_some()
     }
 
+    #[rustfmt::skip]    pub(crate) fn mosh_surface(&self) -> Option<(&PaneSurfaceFrame, Option<u64>)> { self.pane_surface.as_ref().map(|surface| (surface, self.pane_surface_generation)) } // mosh-fork hook
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
