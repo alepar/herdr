@@ -15,6 +15,8 @@ pub(in crate::remote) mod remote;
 mod quic;
 #[cfg(unix)]
 mod quic_bootstrap;
+#[cfg(unix)]
+mod quic_leg;
 mod ring;
 mod session;
 mod ssh_leg;
