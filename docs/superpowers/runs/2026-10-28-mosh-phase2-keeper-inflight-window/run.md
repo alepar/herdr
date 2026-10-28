@@ -15,6 +15,7 @@ roastDesignRound: 2
 findingsLedgerDesign: findings-ledger-design.md
 roast-design: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1.md, 2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-2.md
 stepBackDesign-round-1: local — seven independent-or-clustered r1 findings, no mechanical triggers; two clusters (C1 sampling bookkeeping, C2 claims derivable from the law) fixed by one rule each
+graph-pass: depth 5→5 · width 1.2→1.2 · applied 0 · parked 1
 stepBackDesign-round-2: local — round 2 converged ([converged], 0 Blocking); punch list of 3 sub-Blocking findings applied inline to spec and beads, not re-roasted
 
 approvals:
@@ -24,3 +25,4 @@ approvals:
 
 parked:
 - 2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-2.md · escalation · "material dissent: does the 1.5 s budget close at R = 256 KiB/s (2-1 confirm, ~4% over on 'about' figures); decided: spec states the budget arithmetic, claims the goal only at the R the acceptance test runs, and mosh-hex.3's predicted budget moves the supported bottom up if 256 KiB/s does not close"
+- coverage-ledger.md#cov-21 · graph-change · "drop mosh-hex.4 <- mosh-hex.3 (safe no): saves one round if the baseline is pinned to a pre-window commit carrying mosh-hex.1; not applied"

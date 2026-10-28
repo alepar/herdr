@@ -17,3 +17,6 @@ cov-16 · r2 · GAP · R1 conditional on D3 · applied — mosh-hex.3 predicts t
 cov-17 · r2 · GAP · backlog metric cap · applied — mosh-hex.3 records the FIONREAD saturation cap; mosh-hex.5 D3 entry states it
 cov-18 · r2 · GAP · harness location · rejected — mosh-hex.1 already names tests/mosh_harness.rs, inside tests/mosh_*
 cov-19 · r2 · UNOWNED-SEAM · trace capture path · applied — mosh-hex.4 owns emission through the existing HERDR_MOSH_TRACE keeper file, read via Remote::keeper_events
+cov-20 · graph · GRAPH-EDGE · mosh-hex.5 <- mosh-hex.4 · kept — adaptive window + keeper window trace events consumed by tests (3) and resume
+cov-21 · graph · GRAPH-EDGE · mosh-hex.4 <- mosh-hex.3 · parked — judge: drop, safe no; baseline would need pinning to a pre-window commit that already carries mosh-hex.1's harness, which the branch base does not; kept as the ordering guarantee
+cov-22 · graph · GRAPH-EDGE · mosh-hex.3 <- mosh-hex.1 · kept — link knob + Remote::set_link/clear_link
