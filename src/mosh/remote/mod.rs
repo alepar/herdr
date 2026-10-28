@@ -11,6 +11,8 @@
 #[cfg(unix)]
 mod attacher;
 #[cfg(unix)]
+mod chain_gate;
+#[cfg(unix)]
 mod keeper;
 #[cfg(unix)]
 mod keeper_leg;

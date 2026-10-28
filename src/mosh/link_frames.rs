@@ -128,7 +128,6 @@ impl FrameSplitter {
     }
 
     /// Bytes of the trailing partial frame (0 at a boundary); bounded by one max frame.
-    #[cfg(test)]
     pub fn held_back(&self) -> usize {
         self.buf.len()
     }
@@ -167,7 +166,6 @@ pub(super) fn encode_link_frame(status: &LinkStatus) -> Vec<u8> {
 }
 
 /// The client's request for a full `PaneSurface`, via the existing frame writer.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn encode_resync_frame() -> Vec<u8> {
     let mut out = Vec::new();
     write_message(

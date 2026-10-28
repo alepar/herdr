@@ -20,10 +20,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::chain_gate::{ChainGate, LegState, Route};
 use super::keeper_leg::{KeeperLeg, LegShutdown};
 use super::quic_acceptor::{OnConn, QuicAcceptor, QuicConn, TokenVerdict};
-use super::render_lane::LaneQueue;
+use super::render_lane::{LaneQueue, Offer};
 use super::rendezvous::{self, KeeperRendezvous};
+use crate::remote::attach::mosh::link_frames::{encode_resync_frame, FrameClass, FrameSplitter};
 use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
 use crate::remote::attach::mosh::quic::{BlockingRecv, BlockingSend, QUIC_SILENCE_WINDOW};
 use crate::remote::attach::mosh::session::{
@@ -107,6 +109,14 @@ struct Shared {
     quic: QuicAcceptor,
 }
 
+/// What `server_writer` is asked to do, in the order it arrives.
+enum ToServer {
+    /// Client bytes, with the client-stream offset reached once they are written.
+    Client { bytes: Vec<u8>, offset: u64 },
+    /// Write one resync request (render-split sessions only); it takes no session offset.
+    Resync,
+}
+
 struct Table {
     sessions: HashMap<Token, Session>,
     empty_since: Option<Instant>,
@@ -118,8 +128,8 @@ struct Session {
     endpoint: SessionEndpoint,
     /// Kept for shutdown; the reader and writer threads own clones.
     server: UnixStream,
-    /// Bytes for the server with the stream offset reached once they are written.
-    to_server: mpsc::Sender<(Vec<u8>, u64)>,
+    /// Work for the server writer, in order.
+    to_server: mpsc::Sender<ToServer>,
     leg: Option<LegSlot>,
     grace: Duration,
     grace_deadline: Option<Instant>,
@@ -130,6 +140,8 @@ struct Session {
     /// Render frames travel on the leg's render lane; fixed by the HELLO that created the
     /// session, never changed by a resume.
     render_split: bool,
+    /// Render routing state; only consulted by render-split sessions.
+    gate: ChainGate,
 }
 
 struct LegSlot {
@@ -229,6 +241,7 @@ impl Shared {
                 lane.close();
             }
         }
+        session.gate.leg_ended();
         session.endpoint.leg_down();
         session.end_sent = false;
         session.grace_deadline = Some(now + session.grace);
@@ -654,6 +667,7 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
                     eof: false,
                     end_sent: false,
                     render_split: hello.render_split,
+                    gate: ChainGate::new(),
                 },
             );
             drop(table);
@@ -661,7 +675,10 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
             let reader = server.try_clone()?;
             let (reader_shared, writer_shared) = (Arc::clone(shared), Arc::clone(shared));
             thread::spawn(move || server_reader(&reader_shared, token, id, reader));
-            thread::spawn(move || server_writer(&writer_shared, token, id, server, from_client));
+            let split = hello.render_split;
+            thread::spawn(move || {
+                server_writer(&writer_shared, token, id, server, from_client, split);
+            });
             Ok(Some(Admitted {
                 leg,
                 token,
@@ -799,7 +816,7 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
             match event {
                 SessionEvent::Deliver(bytes) => {
                     offset += bytes.len() as u64;
-                    let _ = session.to_server.send((bytes, offset));
+                    let _ = session.to_server.send(ToServer::Client { bytes, offset });
                 }
                 SessionEvent::PeerEnd(reason) => {
                     ended = Some(reason);
@@ -873,9 +890,11 @@ fn leg_writer(
 }
 
 /// Reads the server into the ring whenever the endpoint's reading rule allows, sized to the
-/// endpoint's room.
+/// endpoint's room. A render-split session is read as whole frames: reliable frames reach the
+/// ring, render frames go where the chain gate says.
 fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream) {
     let mut buf = vec![0u8; MAX_DATA_CHUNK];
+    let mut splitter = FrameSplitter::new();
     loop {
         let want = {
             let mut table = shared.lock();
@@ -907,7 +926,12 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
             shared.kick.notify_all();
             return;
         }
-        if session.endpoint.push_source(&buf[..n]).is_err() {
+        if session.render_split {
+            if let Err(reason) = route_frames(session, &mut splitter, &buf[..n]) {
+                shared.close_session(&mut table, token, reason);
+                return;
+            }
+        } else if session.endpoint.push_source(&buf[..n]).is_err() {
             shared.close_session(&mut table, token, end_reason::RING_OVERFLOW);
             return;
         }
@@ -915,21 +939,80 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
     }
 }
 
-/// Writes client bytes to the server; acks are released only after the write.
+/// Split `bytes` into whole frames and send each where the gate routes it. `Err` carries the
+/// reason to close the session with.
+fn route_frames(
+    session: &mut Session,
+    splitter: &mut FrameSplitter,
+    bytes: &[u8],
+) -> Result<(), &'static str> {
+    let frames = splitter.push(bytes).map_err(|_| "oversized-frame")?;
+    for frame in frames {
+        let class = FrameClass::of(&frame);
+        let leg = match &session.leg {
+            None => LegState::Down,
+            Some(slot) if slot.lane.is_some() => LegState::UpLane,
+            Some(_) => LegState::UpNoLane,
+        };
+        match session.gate.route(class, leg) {
+            Route::Ring => session
+                .endpoint
+                .push_source(&frame)
+                .map_err(|_| end_reason::RING_OVERFLOW)?,
+            Route::Lane => {
+                let lane = session.leg.as_ref().and_then(|slot| slot.lane.as_ref());
+                if lane.is_some_and(|lane| lane.offer(class, frame) == Offer::Rejected) {
+                    let _inject = session.gate.lane_rejected();
+                    let _ = session.to_server.send(ToServer::Resync);
+                }
+            }
+            Route::Drop => {}
+        }
+    }
+    Ok(())
+}
+
+/// Writes client bytes to the server; acks are released only after the write. A render-split
+/// session writes whole client frames only, so a resync request can be written between any
+/// two of them; the partial tail waits in the splitter and is not acked.
 fn server_writer(
     shared: &Shared,
     token: Token,
     gen: u64,
     mut server: UnixStream,
-    from_client: mpsc::Receiver<(Vec<u8>, u64)>,
+    from_client: mpsc::Receiver<ToServer>,
+    render_split: bool,
 ) {
-    for (bytes, offset) in from_client {
-        if server.write_all(&bytes).is_err() {
+    let mut splitter = FrameSplitter::new();
+    for item in from_client {
+        let (written, acked) = match item {
+            ToServer::Client { bytes, offset } if render_split => match splitter.push(&bytes) {
+                Ok(frames) => {
+                    let held = splitter.held_back() as u64;
+                    (frames.concat(), Some(offset.saturating_sub(held)))
+                }
+                Err(_) => {
+                    let mut table = shared.lock();
+                    if table.sessions.get(&token).is_some_and(|s| s.gen == gen) {
+                        shared.close_session(&mut table, token, "oversized-frame");
+                    }
+                    drop(table);
+                    let _ = server.shutdown(Shutdown::Both);
+                    return;
+                }
+            },
+            ToServer::Client { bytes, offset } => (bytes, Some(offset)),
+            ToServer::Resync => (encode_resync_frame(), None),
+        };
+        if server.write_all(&written).is_err() {
             let _ = server.shutdown(Shutdown::Both);
             return;
         }
         let mut table = shared.lock();
-        if let Some(session) = table.sessions.get_mut(&token).filter(|s| s.gen == gen) {
+        if let (Some(offset), Some(session)) = (
+            acked,
+            table.sessions.get_mut(&token).filter(|s| s.gen == gen),
+        ) {
             session.endpoint.delivered(Instant::now(), offset);
         }
         shared.kick.notify_all();
@@ -941,7 +1024,6 @@ fn server_writer(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::remote::attach::mosh::link_frames::FrameClass;
     use crate::remote::attach::mosh::quic::{self, QuicRuntime};
     use crate::remote::attach::mosh::quic_bootstrap::QuicToken;
     use super::super::render_lane::Offer;
@@ -1227,8 +1309,14 @@ mod tests {
     impl TestLocal {
         fn new(socket: PathBuf) -> TestLocal {
             let stream = UnixStream::connect(&socket).unwrap();
+            let mut local = TestLocal::new_unconnected(stream);
+            local.socket = socket;
+            local
+        }
+
+        fn new_unconnected(stream: UnixStream) -> TestLocal {
             TestLocal {
-                socket,
+                socket: PathBuf::new(),
                 stream,
                 endpoint: SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 8 << 20),
                 received: Vec::new(),
@@ -1238,6 +1326,13 @@ mod tests {
                 closed: false,
                 auto_ack: true,
             }
+        }
+
+        /// A local end over a given stream (no keeper socket to reconnect to).
+        fn over(stream: UnixStream) -> TestLocal {
+            let mut local = TestLocal::new_unconnected(stream);
+            local.socket = PathBuf::new();
+            local
         }
 
         fn token(&self) -> Token {
@@ -1453,6 +1548,7 @@ mod tests {
                 eof: true,
                 end_sent: true,
                 render_split: false,
+                gate: ChainGate::new(),
             },
         );
         run_timers(
@@ -2067,6 +2163,10 @@ mod tests {
         let listener = UnixListener::bind(&server_socket).unwrap();
         // Keep the listener alive for the test's duration; connections wait in its backlog.
         std::mem::forget(listener);
+        shared_at(server_socket)
+    }
+
+    fn shared_at(server_socket: PathBuf) -> Arc<Shared> {
         Arc::new(Shared {
             table: Mutex::new(Table {
                 sessions: HashMap::new(),
@@ -2194,6 +2294,190 @@ mod tests {
         );
         assert_eq!(rt.block_on(first_lane.pop()), None);
         assert_eq!(second_lane.offer(FrameClass::Chained, vec![1]), Offer::Accepted);
+    }
+
+    /// A synthetic herdr frame: u32-LE length, then `tag` and `id` (only the tag is looked at).
+    fn frame(tag: u8, id: u8) -> Vec<u8> {
+        let mut out = 2u32.to_le_bytes().to_vec();
+        out.extend([tag, id]);
+        out
+    }
+
+    const SELF_CONTAINED: u8 = 13;
+    const CHAINED: u8 = 19;
+    const RELIABLE: u8 = 1;
+
+    #[test]
+    fn render_split_leg_drop_mid_burst_never_forwards_chained_before_self_contained() {
+        let h = Harness::new();
+        let mut local = h.local();
+        local.endpoint.set_render_split(true);
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::New);
+        let conn = h.server().conn(0);
+
+        let mut expected = frame(SELF_CONTAINED, 1);
+        for id in 2..7 {
+            expected.extend(frame(CHAINED, id));
+        }
+        conn.write(&expected);
+        local.wait_received(expected.len());
+
+        // The leg drops; the burst continues while no leg is up.
+        local.drop_leg();
+        h.wait_trace("leg_down", "reason", "eof");
+        for id in 100..110 {
+            conn.write(&frame(CHAINED, id));
+        }
+        conn.write(&frame(RELIABLE, 50));
+
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::Resumed);
+        // A chained frame on the new leg is still behind the closed gate.
+        conn.write(&frame(CHAINED, 200));
+        conn.write(&frame(SELF_CONTAINED, 8));
+        conn.write(&frame(CHAINED, 9));
+
+        expected.extend(frame(RELIABLE, 50));
+        expected.extend(frame(SELF_CONTAINED, 8));
+        expected.extend(frame(CHAINED, 9));
+        local.wait_received(expected.len());
+        local.pump(Duration::from_millis(200));
+        assert_eq!(local.received, expected);
+    }
+
+    /// A keeper over `server`, with one render-split session whose leg is a Unix pair
+    /// carrying a lane queue that nobody consumes.
+    struct LaneSession {
+        local: TestLocal,
+        lane: LaneQueue,
+        _shared: Arc<Shared>,
+    }
+
+    fn lane_session(server_socket: PathBuf) -> LaneSession {
+        let shared = shared_at(server_socket);
+        let (leg_end, local_end) = UnixStream::pair().unwrap();
+        let mut local = TestLocal::over(local_end);
+        local.endpoint.set_render_split(true);
+        let hello = hello_for(&mut local.endpoint);
+        let mut leg = KeeperLeg::unix(leg_end).unwrap();
+        let lane = LaneQueue::new();
+        leg.render_lane = Some(lane.clone());
+        let admitted = admit(&shared, leg, hello).unwrap().unwrap();
+        let run_shared = Arc::clone(&shared);
+        thread::spawn(move || run_leg(&run_shared, admitted));
+        local.wait_welcomed(WelcomeStatus::New);
+        LaneSession {
+            local,
+            lane,
+            _shared: shared,
+        }
+    }
+
+    #[test]
+    fn injected_resync_lands_between_client_frames_unsplit() {
+        let dir = TestDir::new();
+        let server = FakeServer::start(&dir.0.join("server.sock"));
+        let LaneSession { mut local, lane, .. } = lane_session(dir.0.join("server.sock"));
+        let conn = server.conn(0);
+
+        let (a, b, c) = (frame(RELIABLE, 1), frame(RELIABLE, 2), frame(RELIABLE, 3));
+        let resync = encode_resync_frame();
+
+        // Frame A whole, then half of B, in two leg writes.
+        local.send_data(&a);
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received() == a),
+            "server saw {:?}",
+            conn.received()
+        );
+        assert!(
+            local.wait(Duration::from_secs(5), |l| l.endpoint.fully_acked()),
+            "an ack for a fully written frame never came"
+        );
+        local.send_data(&b[..3]);
+        local.pump(Duration::from_millis(500));
+        assert!(
+            !local.endpoint.fully_acked(),
+            "the keeper acked bytes it holds back"
+        );
+        assert_eq!(conn.received(), a, "a partial frame reached the server");
+
+        // 65 chained frames overflow the 64-slot lane once: exactly one resync is injected.
+        let burst: Vec<u8> = (0..65).flat_map(|id| frame(CHAINED, id)).collect();
+        conn.write(&burst);
+        let before_b = [a.clone(), resync.clone()].concat();
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received() == before_b),
+            "server saw {:?}, wanted A then the resync",
+            conn.received()
+        );
+        assert!(!local.endpoint.fully_acked(), "the resync moved the ack");
+
+        // The rest of B and a whole C.
+        local.send_data(&[&b[3..], &c[..]].concat());
+        let expected = [a, resync, b, c].concat();
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received() == expected),
+            "server saw {:?}",
+            conn.received()
+        );
+        assert!(
+            local.wait(Duration::from_secs(5), |l| l.endpoint.fully_acked()),
+            "acks never caught up"
+        );
+        // Nothing queued behind the closed gate reached the lane beyond its 64 frames.
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        lane.close();
+        let mut queued = 0;
+        while rt.block_on(lane.pop()).is_some() {
+            queued += 1;
+        }
+        assert_eq!(queued, 64);
+    }
+
+    #[test]
+    fn non_split_session_is_byte_identical() {
+        let h = Harness::new();
+        let mut local = new_session(&h);
+        let conn = h.server().conn(0);
+
+        // Partial frames and a chained-looking frame travel as plain bytes both ways.
+        let down = [frame(CHAINED, 1), frame(SELF_CONTAINED, 2)].concat();
+        let down = &down[..down.len() - 1];
+        conn.write(down);
+        local.wait_received(down.len());
+        assert_eq!(local.received, down);
+
+        let up = frame(RELIABLE, 9);
+        local.send_data(&up[..3]);
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received() == up[..3]),
+            "server saw {:?}",
+            conn.received()
+        );
+        assert!(!h.trace_has("session_end", "", ""));
+    }
+
+    #[test]
+    fn old_hello_json_admits_non_split() {
+        let dir = TestDir::new();
+        let shared = admit_shared(&dir);
+        let json = br#"{"v":1,"token":"000102030405060708090a0b0c0d0e0f","resume":false,"recv_offset":0,"grace_ms":60000}"#;
+        let mut wire = vec![session::HELLO_TYPE];
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(json);
+        let mut decoder = session::Decoder::default();
+        decoder.push(&wire);
+        let Some(SessionMsg::Hello(hello)) = decoder.next().unwrap() else {
+            panic!("not a HELLO");
+        };
+        let token = hello.token;
+        let (leg_end, _peer) = UnixStream::pair().unwrap();
+        assert!(admit(&shared, KeeperLeg::unix(leg_end).unwrap(), hello)
+            .unwrap()
+            .is_some());
+        assert!(!shared.lock().sessions[&token].render_split);
     }
 
     #[test]
