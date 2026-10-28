@@ -198,6 +198,189 @@ the link.
 - Windows support for the QUIC leg (unix only, like Phase 1).
 - Prediction for non-printable editing keys beyond mosh's rules.
 
+## Key abstractions
+
+**QuicLegDialer** — new struct, the second `LegDialer` implementation: a QUIC leg with ssh bootstrap and ssh fallback (`src/mosh/quic_leg.rs`).
+- Owns:
+  - the client quinn endpoint and its tokio runtime thread;
+  - the leg-0 `QuicBootstrap`;
+  - the sticky "fell back to ssh" decision for the session;
+  - the 3 s handshake bound;
+  - fingerprint pinning;
+  - roaming (`Endpoint::rebind` on a failed send or a short silence watchdog, keeping the connection ID);
+  - classification of QUIC leg ends.
+- Hides: QUIC. The bridge sees a `Leg` and never learns about migration, rebinds or fallback.
+- Must not: build ssh commands or read ssh preambles. It composes an `SshLegDialer` for the leg-0 bootstrap and for every leg after fallback. It must not touch session bytes or the give-up deadline (still the `LocalBridge`'s, Phase 1).
+- Relationships: implements `LegDialer`; composes `SshLegDialer` (delegation); uses the `quic` module and `QuicBootstrap`. Dependencies point `local_bridge` → trait ← `quic_leg` → `ssh_leg`.
+- Lifecycle: built by `start_ui_bridge` and owned by the `LocalBridge` behind the existing `Arc<Mutex<Box<dyn LegDialer>>>`. Dropping it shuts the runtime down. On leg 0 it dials ssh, takes the bootstrap, then returns a QUIC leg (tearing the ssh child down) or that same ssh leg as the fallback, so fallback costs no second ssh handshake.
+- Errors:
+  - Leg 0: any QUIC failure (timeout, UDP blocked, fingerprint mismatch, missing line) fails over to ssh and is never surfaced as a `LegError`.
+  - Reconnect legs: an unreachable host or a timeout is `Retryable`; a fingerprint mismatch is `Fatal`.
+  - A keeper `END` keeps Phase 1's classification.
+
+**QuicBootstrap** — new value type, the single definition of `herdr-mosh-quic:1 <port> <fingerprint> <token>` and of the keeper's rendezvous answer that produces it.
+- Owns: encoding (attacher side), parsing (dialer side), validating the fields, and the 32-byte token type.
+- Must not: do I/O.
+- Relationships: shared by Attacher, Keeper and `QuicLegDialer`, like `LinkStatus`.
+- Errors: a malformed or absent line means "no bootstrap", which the dialer turns into the ssh fallback.
+
+**quic module** — new module of QUIC plumbing shared by both ends (`src/mosh/quic.rs`).
+- Owns:
+  - the blocking `Read`/`Write` adapter over quinn streams, driven from a runtime handle;
+  - the TLS configs: rcgen self-signed certificate plus SHA-256 fingerprint on the keeper, a pinning verifier on the client, ring only;
+  - the render-stream header (render sequence number plus `FrameClass`).
+- Hides: async/blocking bridging and rustls setup from the std-thread code.
+- Must not: know session or HELLO semantics, or decide which frames go on render streams.
+- Relationships: used by `QuicLegDialer`, `QuicAcceptor`, `RenderLane` and the bridge's render-lane reader.
+
+**KeeperLeg** — new struct, the keeper's transport-neutral accepted leg: reader and writer halves, a shutdown handle callable from another thread (stealing, the silence verdict, session end), and an optional `RenderLane`.
+- Owns: what `admit`/`run_leg`/`leg_writer`/`LegSlot` take today from a concrete `UnixStream`.
+- Hides: whether the leg is a rendezvous Unix connection or a QUIC stream.
+- Must not: carry session state.
+- Relationships: two producers (the Unix accept loop and `QuicAcceptor`) feed the one `admit` → `run_leg` handler.
+- Lifecycle: per accepted connection, owned by its `run_leg` thread; the `LegSlot` keeps the shutdown handle. Dropping it closes the stream, and for QUIC the connection.
+
+**QuicAcceptor** — new struct, the keeper's UDP endpoint: one per keeper process, on its own tokio runtime thread.
+- Owns:
+  - the certificate, port and fingerprint (answering the bootstrap query through the keeper);
+  - minting and checking per-session tokens;
+  - accepting connections and their first bidirectional stream;
+  - the pre-WELCOME bound;
+  - the connection idle timeout, from `HELLO.grace_ms`;
+  - building a `KeeperLeg` with a `RenderLane`.
+- Hides: QUIC admission. A bad or missing token is refused here, so `admit` stays transport-blind.
+- Must not: apply the HELLO table, steal legs, or touch the token table beyond the token check.
+- Lifecycle: started lazily by the first bootstrap query; dies with the keeper process.
+- Errors: a refused token closes the connection with an END.
+
+**FrameClass** — new closed enum `SelfContained | Chained | Reliable`, plus the one function that classifies a whole herdr frame (`link_frames.rs`, next to `FrameSplitter`).
+- Owns: spec §2's table:
+  - tags 13 and 12 → `SelfContained`;
+  - tag 19 and the tag-20 kinds `endpoint.surface-reuse/delta/scroll.v1` → `Chained`;
+  - everything else → `Reliable`.
+  It decodes the bincode tag, and the kind string for tag 20.
+- Hides: the frozen wire layout from the keeper and the bridge.
+- Must not: decide what happens to a class.
+- Errors: an unparseable frame is `Reliable`, never dropped.
+
+**RenderLane** — new struct, the keeper-side render sender for one QUIC leg.
+- Owns: render sequence numbers; one unidirectional stream per render frame with its header; the in-flight set; supersede. A `SelfContained` frame resets every older in-flight stream; `Chained` frames are only reset with that batch.
+- Hides: QUIC stream reset.
+- Must not: classify frames, touch the ring or the `InflightWindow`, or buffer while the leg is down (the keeper drops render frames with no lane).
+- Relationships: owned by a `KeeperLeg`; fed from the session's `server_reader` through a channel into the keeper runtime. Concrete, QUIC only.
+- Lifecycle: per leg; a new leg starts a fresh sequence.
+
+**RenderReorder** — new struct, the bridge-side render ordering and gap state machine; sans-IO, time as an input.
+- Owns:
+  - in-order delivery by render sequence;
+  - gap detection (a reset stream, or a frame overdue by more than 1 SRTT);
+  - dropping `Chained` frames after a gap until the next `SelfContained` frame;
+  - the once-per-gap `x-mosh.surface-resync.v1` decision.
+  Each leg starts in the gap state, which covers spec §2 "Resume".
+- Hides: supersede and chain rules from `LocalBridge`.
+- Must not: do I/O, encode frames, or interleave with session-stream frames. `LocalBridge` interleaves by arrival at `FrameSplitter` boundaries.
+- Lifecycle: created per leg by `LocalBridge`, only when the `Leg` brings a render lane; single owner on the leg I/O thread.
+- Errors: none; a gap is a state.
+
+**Predictor** — new client fork module (`src/mosh/predict.rs`, mounted in the client), with state per endpoint and per pane.
+- Owns:
+  - the `HERDR_MOSH_PREDICT` mode (`off | on | adaptive`, a closed enum, read once);
+  - the input tap: printable text from `ClientShellPaneInput`, and the per-pane input-event count;
+  - predicted cells placed at the cursor through `inner_rect`;
+  - epochs and mosh's rules: content-only validation against the retained surface at paint time, an epoch ending on a non-printable key, clearing on a confirmed wrong prediction, reset on paste or resize;
+  - consuming `x-mosh.echo-ack.v1`;
+  - the thresholds (shown above 60 ms, underlined above 160 ms);
+  - the "predictions visible" answer the fast-path guard reads.
+- Hides: the prediction rules from every client hook.
+- Must not: mutate the retained surface or the decoder baseline (it paints an overlay only); measure RTT (the bridge supplies SRTT); send anything to the server.
+- Relationships: reached only through the fork's client hooks. The existing `mosh_outage::observe`/`paint` become the fork's client facade: a closed `match` on kind routes `x-mosh.link.v1` → `OutageState` and `x-mosh.echo-ack.v1` → `Predictor`, and paints both overlays. Two new hooks: the input tap and the fast-path guard.
+- Lifecycle: process-global behind a mutex, like `OutageState`; entries go when an endpoint is removed or reset.
+- Errors: a malformed echo-ack is consumed and ignored.
+
+**EchoTracker / server hooks** — new fork module for the server side (`src/mosh/server_hooks.rs`), the bodies behind the server hook statements.
+- Owns:
+  - the resync hook: `x-mosh.surface-resync.v1` marks that client for a full `PaneSurface` through the existing reactivation reset path;
+  - the applied input-event count per client and pane;
+  - the decision to emit `x-mosh.echo-ack.v1 {pane_id, input_seq}` after a render that follows newly applied input.
+- Hides: echo bookkeeping from `client_transport.rs` and `render.rs`.
+- Must not: put the echo-ack in the latest-wins render slot. It follows the render it acknowledges through the ordered lane.
+- Lifecycle: a process-global map keyed by client, with entries removed on client disconnect.
+
+**UdpRelay** — new test helper (`tests/mosh_harness.rs`): a userspace UDP relay with one-way delay, seeded loss and `rebind`; test-only, beside the Phase 2 `link` knob. The fake-ssh wrapper rewrites the bootstrap port to the relay's port, so production code gets no address override.
+
+**Extended:**
+- **Leg** — optionally carries a render-lane receiver (`None` for ssh), taken like the reader and writer. Its end report gains a QUIC close reason in place of an `ExitStatus`. It still never interprets bytes.
+- **SshLegDialer** — in bootstrap mode it reads one line after the ready marker with a short bound and exposes the parsed `QuicBootstrap`; absent or malformed means none.
+- **start_ui_bridge** — still the single registration point. It wraps `SshLegDialer` in `QuicLegDialer` when the probe shows `x-mosh-quic-v1`.
+- **Keeper**:
+  - a pre-HELLO bootstrap query on a rendezvous connection (a closed match on the first byte, not a new `SessionMsg` variant);
+  - legs arrive as `KeeperLeg`;
+  - a per-session render-split flag, fixed by the leg that answered `new` (QUIC lane plus both capabilities). When set, `server_reader` runs `FrameSplitter` + `FrameClass`: `Reliable` frames go to the ring; render frames go to the current leg's `RenderLane`, or are dropped while down.
+- **Attacher** — after the ready marker and before pumping, it queries the keeper and prints the `QuicBootstrap` line.
+- **LocalBridge** — reads the leg's render lane into `RenderReorder`; interleaves delivered frames into the client output without offsets (not acked, not replayed); injects the resync `ClientMessage` frame upstream at a client frame boundary, which needs a client→server `FrameSplitter`.
+- **InflightWindow** — also keeps a smoothed RTT (SRTT), still the only RTT sampler.
+- **LinkStatus** — `Linked` gains an optional `srtt_ms`, re-injected only on meaningful SRTT change; this is how SRTT reaches the right client endpoint.
+- **FrameSplitter / link_frames** — holds `FrameClass` and the resync frame encoder next to the link-frame encoder.
+
+**Variation:**
+- Leg transport (ssh, QUIC) → the `LegDialer` trait, with the kind chosen once in `start_ui_bridge`.
+- Keeper leg sources → `KeeperLeg` producers feeding one `admit`.
+- Render frame kinds are fixed → `FrameClass`, a closed enum.
+- Fork client EndpointControl kinds are fixed → a closed `match` in the client facade.
+- Prediction mode is fixed → an enum in `Predictor`.
+
+**Walk-through.**
+- Setup:
+  1. `start_ui_bridge` sees `x-mosh-quic-v1` and registers `QuicLegDialer(SshLegDialer)`.
+  2. On leg 0, the attacher queries the keeper (starting `QuicAcceptor`) and prints the line.
+  3. `SshLegDialer` parses the bootstrap; `QuicLegDialer` finishes a pinned handshake in under 3 s and returns a `Leg` with a render lane, then the ssh child is torn down.
+  4. The bridge sends HELLO. `QuicAcceptor` checks the token and builds a `KeeperLeg` with a `RenderLane`; `admit` answers `new` and sets render-split.
+- Output:
+  1. Server frames go through `FrameSplitter` + `FrameClass`. `Reliable` frames go to the ring; render frames go to `RenderLane`, where a newer `PaneSurface` resets older streams.
+  2. The bridge's `RenderReorder` sees the gap, drops chained frames, and injects one resync.
+  3. The server hook marks a full surface, which arrives and closes the gap.
+- Input and prediction:
+  1. A keystroke goes through the input tap to `Predictor` and is painted through the facade. The fast-path guard declines while predictions are visible.
+  2. The server input hook counts the input; its render hook sends the echo-ack after the render.
+  3. The facade's `observe` passes it to `Predictor`, which confirms or clears the prediction.
+- Future changes: a new chained surface kind touches one `FrameClass` arm. A third transport adds one `LegDialer` impl plus one `KeeperLeg` producer, registered in `start_ui_bridge`.
+
+**Deliberate exceptions:**
+- Per spec §2: the keeper now classifies herdr frames, overriding Phase 1's "keeper must not parse herdr frames". This is confined to `FrameSplitter` + `FrameClass` in `server_reader`, render-split sessions only.
+- Per spec §2: the server resync hook is a deliberate per-kind branch at the client `EndpointControl` dispatch (client_transport.rs:1349).
+- Per spec §3: `Predictor` is deliberately process-global, like `OutageState`. Painting and observing reuse the existing `mosh_outage` hooks, so that module is now the fork's client facade under its old mount name.
+- Per spec §1: the ssh fallback is leg-0-only and sticky. A QUIC session whose UDP path breaks later retries until give-up and never switches to ssh, because render-split is fixed for the session.
+
+**Gaps for the subepic designs:**
+- (a) Echo-ack ordering. The echo-ack rides the session stream while renders ride separate streams, so it can arrive first. `Predictor` must judge only against a surface received after the ack, for example via an optional surface revision in the echo-ack JSON.
+- (b) SRTT sampling. `InflightWindow` samples only on ACKs advancing ≥ `ACK_EVERY_BYTES`, so a typing-only session gets no samples. SRTT needs its own rule, such as the heartbeat/ACK round trip.
+- (c) Cleanup. `EchoTracker` entries need removing on client disconnect, either via one more hook or by pruning inside the existing ones.
+- (d) QUIC token. The 32-byte QUIC token differs from the 128-bit session `Token`, so it needs a new optional HELLO field, checked only by `QuicAcceptor`.
+
+Digest:
+- QuicLegDialer: owns QUIC legs, ssh bootstrap and fallback, pinning and roaming;
+  new QUIC dial behaviour goes in `quic_leg.rs`; the bridge never knows a leg is QUIC.
+- QuicBootstrap: the one definition of the `herdr-mosh-quic:1` line and the keeper's bootstrap answer;
+  new bootstrap fields go here; no one else formats or parses the line.
+- quic module: owns the blocking adapter over quinn streams, TLS and pinning configs, and the render-stream header;
+  shared QUIC plumbing goes here; callers never touch async or rustls directly.
+- KeeperLeg: owns a keeper-side leg's stream halves, shutdown and optional render lane;
+  a new leg source is a new producer of KeeperLeg; admit/run_leg never name a transport.
+- QuicAcceptor: owns the keeper's UDP endpoint, certificate, token admission and idle timeout;
+  QUIC admission rules go here; admit never checks QUIC tokens.
+- FrameClass: owns which herdr frames are self-contained, chained or reliable;
+  a new render kind is one match arm; no caller inspects tags or kind strings itself.
+- RenderLane: owns render sequence numbers, per-frame streams and supersede resets for one QUIC leg;
+  supersede policy changes go here; never classifies or touches the ring.
+- RenderReorder: owns render ordering, gap detection, chain dropping and the resync decision on the bridge;
+  gap and resync rules go here; LocalBridge never reasons about render chains.
+- Predictor: owns client-side predictive echo (mode, epochs, validation, echo-ack, overlay, fast-path veto);
+  prediction rules go in predict.rs; hooks only call it and never touch prediction state.
+- EchoTracker / server hooks: owns server-side resync marking and per-pane echo-ack bookkeeping;
+  new server-side fork behaviour goes behind these hook functions; upstream lines stay one statement.
+- UdpRelay: owns test-only UDP delay, loss and rebind;
+  new network faults are relay knobs; tests never open raw sockets themselves.
+
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
