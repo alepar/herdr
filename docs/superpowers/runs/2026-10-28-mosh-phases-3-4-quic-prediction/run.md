@@ -23,5 +23,11 @@ stepBackDesign-round-1: local — two sweepable clusters (stale-root, ssh-handof
 parked:
 - 2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md · escalation · "QUIC PTO exponential backoff / persistent-congestion collapse may break the 2 RTT same-connection echo bound after a 20-30 s blackhole (external-unverified); measured by mosh-19g.1.5's opt-in short-idle-gap test"
 - 2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md · escalation · "loss-based QUIC congestion control may not deliver a full PaneSurface within the 3b 2 s bound at 10 % loss / 150 ms one-way (external-unverified); measured by mosh-19g.2.7's opt-in timing test"
+- graph-pass · graph-change · "narrow mosh-19g.2 <- mosh-19g.1 to its existing leaf edges (depth 14→10; safe no: parallel edits to keeper.rs, session.rs Hello fields, mod.rs, status.rs that the merge gate would handle)"
+- graph-pass · graph-change · "narrow mosh-19g.1 <- mosh-19g.5 to mosh-19g.1.7 <- mosh-19g.5 (with the above, depth →9; safe no: shared mod.rs lines)"
+- graph-pass · graph-change · "narrow mosh-19g.2 <- mosh-19g.6 to 2.5/2.9 <- 6 (safe no: shared session.rs)"
+- graph-pass · graph-change · "narrow mosh-19g.2 <- mosh-19g.5 to 2.2 <- 5 (safe no: shared mod.rs)"
+- graph-pass · graph-change · "seam-contract proposal: Hello.quic_token between mosh-19g.1.3 and mosh-19g.1.4 (depth 9→8 after the narrowings)"
 roastDesignReport-2: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-2.md
 roastDesignExit: converged at round 2 (Should-fix (8 confirmed) [converged]; 0 Blocking; 10 resolved, 1 regressed and fixed) · punch list: all 8 applied inline as spec + bead amendments (standby HELLO fresh token + previous_token → 1.4; bootstrap query on its own connection, lazy session connection → 1.3; bound token kept across refreshes → 1.6, 1.5; render streams oldest-first priority → 2.4, 2.7; echo-ack waits for pending renders → 3.3, 3.5; redial wording → specs); no re-roast (converged exit)
+graph-pass: depth 14→14 · width 1.8→1.8 · applied 4 · parked 5

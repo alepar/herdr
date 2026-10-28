@@ -33,3 +33,13 @@ C31 · r2 · GAP · 2.3 no dependents · applied — 2.7 ← 2.3
 C32 · r2 · UNOWNED-SEAM · keeper render-lane slot · applied — 1.2 owns the slot; 2.8 ← 1.2
 C33 · r2 · GAP · R16 exactly-once input · applied — 1.5 exactly-once case across fallback and redial
 C34 · r2 · GAP · C14 generation increment owner · rejected — the generation is the upstream client registry's existing counter, not a fork component; 3.1 verifies the numbering
+G1 · graph · GRAPH-EDGE · mosh-19g.3 <- mosh-19g.5 · applied — narrow to existing leaf edges (3.2, 3.3 <- 5)
+G2 · graph · GRAPH-EDGE · mosh-19g.3 <- mosh-19g.6 · applied — drop; leaf edges 3.1/3.2/3.4 <- 6 exist
+G3 · graph · GRAPH-EDGE · mosh-19g.2 <- mosh-19g.4 · applied — drop; 2.7 <- 4 exists
+G4 · graph · GRAPH-EDGE · mosh-19g.1 <- mosh-19g.4 · applied — drop; 1.5 <- 4 exists
+G5 · graph · GRAPH-EDGE · mosh-19g.2 <- mosh-19g.1 · parked — narrow to existing leaf edges (depth 14→10); safe no: shared keeper.rs/session.rs/mod.rs/status.rs edits
+G6 · graph · GRAPH-EDGE · mosh-19g.1 <- mosh-19g.5 · parked — narrow to 1.7 <- 5 (with G5, depth →9); safe no: shared mod.rs lines
+G7 · graph · GRAPH-EDGE · mosh-19g.2 <- mosh-19g.6 · parked — narrow to 2.5/2.9 <- 6; safe no: shared session.rs
+G8 · graph · GRAPH-EDGE · mosh-19g.2 <- mosh-19g.5 · parked — narrow to 2.2 <- 5; safe no: shared mod.rs
+G9 · graph · PROPOSAL · mosh-19g.1.3 / mosh-19g.1.4 · parked — seam contract for Hello.quic_token (depth 9→8 after G5/G6)
+G10 · graph · GRAPH-EDGE · 14 leaf edges on the critical path · kept — each carries a real artifact
