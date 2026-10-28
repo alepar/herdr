@@ -138,8 +138,9 @@ discards chained frames until the full surface arrives.
   client for a full `PaneSurface` on its next render, through the existing reset path that
   reactivation uses. The server also discards its stale pending render and the transport baseline, so
   the next frame is self-contained.
-- One tagged hook statement at the client `EndpointControl` dispatch (`client_transport.rs:1349`)
-  calls the module's dispatch entry point.
+- Hook lines: one at the client `EndpointControl` dispatch (`client_transport.rs:1349`) mapping the
+  kind to a new `ServerEvent::MoshSurfaceResync`, the variant itself, and one arm in `headless.rs`'s
+  event match calling the body with `&mut Client` (3–4 lines; see Key abstractions).
 - Older servers ignore the kind; the bridge then recovers on the next naturally sent full frame.
 
 ### 6. Acceptance and tests (chosen)
@@ -166,6 +167,99 @@ discards chained frames until the full surface arrives.
 - The server-side surface ring with acked bases (root §2 "Considered").
 - Per-pane supersede: the server sends whole-client surfaces, so per-client is enough.
 - Priority tuning between the lane and the session stream.
+
+## Key abstractions
+
+**ChainGate** — new sans-IO type on the keeper side (`src/mosh/remote/`), the single implementation of §2's render routing table.
+- Owns:
+  - the open/closed bit;
+  - the table:
+    - closed + `Chained` → drop;
+    - closed + `SelfContained` → open, then route;
+    - open + lane → offer to the lane;
+    - open + no lane → ring;
+    - leg down → drop and close;
+  - the transitions:
+    - "lane rejected the offer" → close, and inject a resync (the leg is up);
+    - "leg ended" → close, no inject.
+- Hides: chain rules from `server_reader`, which only acts on its verdicts.
+- Must not: do I/O, touch the ring, know QUIC, or own the queue or eviction policy.
+- Relationships: owned by the keeper `Session` next to `render_split`. `server_reader` consults it under the table lock; `drop_leg` and steal report "leg ended". Depends only on `FrameClass`.
+- Lifecycle: one per render-split session, starting open.
+- Errors: none; drops are verdicts.
+
+**RenderLane** — extended (root-defined). Its producer side is a clearable bounded queue of 64 frames that owns capacity and eviction:
+- a `Chained` frame that does not fit is rejected;
+- a `SelfContained` frame clears the queue and is always accepted.
+The lane also owns:
+- per-leg sequence numbers from 0;
+- writing the new frame's header before resetting older in-flight streams;
+- the 64-concurrent-uni-streams cap, set by `QuicAcceptor` in the leg's transport config.
+The queue handle lives in `LegSlot`.
+
+**KeeperLeg / LegSlot / keeper Session** — extended:
+- `Session` gains `render_split` (fixed from the HELLO that answered `new`) and a `ChainGate`.
+- `LegSlot` gains the optional lane queue handle.
+- `server_reader` (render-split sessions only) runs a `FrameSplitter`, passes only whole frames to `push_source`, and routes render frames through `ChainGate`.
+- `server_writer`'s channel item becomes a closed enum, either client bytes with an offset or a resync. It runs a client→server `FrameSplitter` and writes the resync at the next frame boundary. It acks only `offset − held_back`, keeping "acks released only after the write" (keeper.rs:772). A keeper-injected resync takes no session offset.
+- The gate closes on every leg end. Otherwise a frame accepted into a dead leg's lane leaves it open, and the next chained frame on an ssh leg breaks the chain.
+
+**Hello** — extended: optional `render_split` (`serde(default)`, skipped when false). The bridge sets it on every leg when the probe shows `x-mosh-supersede-v1`; the flag travels from the probe through `BridgeParams`. `SESSION_PROTOCOL_VERSION` is unchanged.
+
+**link_frames** — extended:
+- `encode_resync_frame` is the one builder of `ClientMessage::EndpointControl{x-mosh.surface-resync.v1}`, via `write_message`; the keeper and the bridge both call it.
+- `FrameSplitter` is used in both directions and by the keeper's `server_reader`.
+
+**quic module / Leg render-lane slot** — extended: the bridge-side receiver yields a closed enum `RenderArrival { Header(seq, class), Complete(seq, class, bytes), Reset(seq) }`. One reader thread per leg forwards these to the leg I/O thread.
+
+**RenderReorder** — extended (root-defined).
+- Inputs and outputs: it takes arrivals, `now` and SRTT (or unknown, passed in by `LocalBridge` from mosh-19g.6). It returns frames to deliver, "request resync", and its next deadline, which `LocalBridge` folds into its wait.
+- A `Reset(n)` while a higher-seq `SelfContained` header is known is a supersede: a gap, but with no request.
+- Any other gap requests a resync at once.
+- Each leg starts in the gap state with the request counted as sent: §4's resume resync covers later legs, and on leg 0 the first server frame is a full surface.
+
+**LocalBridge** — extended:
+- An upstream `FrameSplitter` and one `request_resync` path. It writes `encode_resync_frame` between client frames as session DATA, so the resync is offset-bearing and replayed. Its callers are `RenderReorder`'s request and §4's resume rule.
+- Delivered render frames go out as `ClientOut::Injected`, with no offset.
+- `RenderReorder` exists only when the session is render-split and the `Leg` carries a lane.
+- On a lane-bearing leg, render-class frames arriving on the session stream are dropped, and the ack point still advances. These are by construction ring replays from an earlier ssh leg, superseded by the resume resync. Delivering one after the lane's full surface would fail the client's decoder.
+
+**server_hooks** — extended (mosh-19g.5). The dispatch at `client_transport.rs:1349` runs on the transport reader thread, which does not own `Client` render state.
+- The dispatch entry point maps the kind to an optional `ServerEvent`.
+- A new variant `MoshSurfaceResync{client_id}` is handled by one hook arm in `headless.rs`'s event match.
+- That arm calls the resync body with `&mut Client`: `render_state.reset_baseline()`, `writer.discard_pending_render()`, `request_repaint()`. It does no projection bump, foreground or geometry work.
+- Cost: 3–4 hook lines against the budget of 30.
+
+**status.rs** — one more tagged capability line, `x-mosh-supersede-v1`.
+
+**Variation:**
+- Frame kinds → `FrameClass`.
+- Keeper render routing → `ChainGate`.
+- Queue capacity and eviction → the `RenderLane` queue handle.
+- Lane or no lane → the leg's producer. Callers branch on whether a lane exists, never on the transport.
+- Render-split → chosen once (from the probe on the bridge, at `new` on the keeper).
+- Resync bytes → `encode_resync_frame`.
+
+**Walk-through:**
+- Main path, QUIC leg at 10 % loss:
+  1. `server_reader` splits and classifies; `Reliable` frames go to the ring. A patch passes the open gate into the lane as seq k, on its own stream.
+  2. That stream is lost. Once k+1 is overdue by more than max(SRTT, 50 ms), `RenderReorder` declares a gap, drops held chained frames and requests a resync.
+  3. `LocalBridge` injects the resync. The keeper passes it to the server, whose hook arm resets the baseline.
+  4. The next render is a full `PaneSurface`. The lane sends its header, then resets older streams. The reorder delivers it and the gap clears.
+- Burst: the lane queue rejects a chained frame, the gate closes, `server_writer` injects one resync, and chained frames are dropped until the full surface arrives.
+- Leg changes:
+  - QUIC → ssh: `drop_leg` closes the gate, the bridge's resume resync brings the full surface, and the gate opens on it.
+  - ssh → QUIC: stale render replays on the session stream are dropped by the bridge.
+- Future changes: a new chained kind is one `FrameClass` arm. A new eviction policy touches only the lane queue.
+
+**Notes:**
+- Per §1: render-split is a session flag carried in HELLO and independent of the leg type. This overrides the root's "fixed by the leg that answered new (QUIC lane plus both capabilities)".
+- Per §5: the resync needs a `ServerEvent` variant plus a `headless.rs` arm, not one statement, because the transport thread cannot reach `Client` state.
+- Memory ceiling: 64 queued plus 64 in-flight frames of up to 2 MiB each per session. Accepted as a ceiling.
+
+Digest:
+- ChainGate: owns the keeper's render-frame routing table (lane, ring or drop), the open/closed chain state, and the inject-resync verdict on a close while the leg is up;
+  new keeper routing or chain rules go here; server_reader, drop_leg and steal report events and act on its verdicts, never inspecting classes or gate state.
 
 ## Post-Implementation Notes
 
