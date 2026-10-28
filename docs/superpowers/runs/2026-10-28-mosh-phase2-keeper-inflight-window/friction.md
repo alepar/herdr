@@ -7,3 +7,4 @@
 - [phase 3] implementer commits b34b4f85, bf412b27, c2705d1b, 952fcdfd carry Co-Authored-By lines despite AGENTS.md (no AI co-author lines); the global constraint in the epic did not reach implementer commit habits
 - [phase 4] assembler: review input selection: provenance unavailable; captured source available (inherited Phase 1 incomplete collections inv-c723b6b8, inv-ed080a9e). Round 1 code roast run as a separately named bounded direct review over product paths (docs/superpowers/** unreviewed); round/whole-range review stays unavailable for acceptance.
 - [phase 5] scope-dispositions --project --keys returned an empty projection although round-1 punch-listed keys exist; punch-list file written from the scope keys instead (same gap as phase 1)
+- [phase 4] round 2 assembler: same inherited provenance gap; bounded direct review over product paths again
