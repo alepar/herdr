@@ -118,8 +118,9 @@ window) is transport-neutral and moves to a QUIC stream unchanged.
   - Roaming:
     - The client socket binds the wildcard address, so a route change picks the new source address
       per packet and the keeper sees a peer address change, which quinn migrates (path validation).
-    - The dialer additionally calls `Endpoint::rebind` with a fresh socket when a send fails with a
-      network error (the old interface went away).
+    - No error-triggered `Endpoint::rebind`: quinn swallows UDP send errors, and with a wildcard bind
+      migration alone handles route changes (see Key abstractions, quic module). Revisit only if the
+      address-change test fails.
   - RTT probe: the QUIC `Leg` fills the optional RTT probe from mosh-19g.6 with the connection's own
     RTT estimate.
 - **Capability:** the keeper side's support is advertised as `x-mosh-quic-v1` in
