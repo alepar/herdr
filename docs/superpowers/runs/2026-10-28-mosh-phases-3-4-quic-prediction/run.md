@@ -31,3 +31,11 @@ parked:
 roastDesignReport-2: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-2.md
 roastDesignExit: converged at round 2 (Should-fix (8 confirmed) [converged]; 0 Blocking; 10 resolved, 1 regressed and fixed) · punch list: all 8 applied inline as spec + bead amendments (standby HELLO fresh token + previous_token → 1.4; bootstrap query on its own connection, lazy session connection → 1.3; bound token kept across refreshes → 1.6, 1.5; render streams oldest-first priority → 2.4, 2.7; echo-ack waits for pending renders → 3.3, 3.5; redial wording → specs); no re-roast (converged exit)
 graph-pass: depth 14→14 · width 1.8→1.8 · applied 4 · parked 5
+codeBuckets (invocation 2, inv-e338c8bb-cb3c-4e4e-a409-7e73406537a6, stopReason ready-drained):
+  completed: mosh-19g.5 mosh-19g.6 mosh-19g.4 mosh-19g.1.2 mosh-19g.3.1 mosh-19g.1.1 mosh-19g.3.2 mosh-19g.1.9 mosh-19g.1.8 mosh-19g.1.4 mosh-19g.1.6 mosh-19g.1.7 mosh-19g.1.5 mosh-19g.2.1 mosh-19g.2.5 mosh-19g.2.8 mosh-19g.2.2 mosh-19g.2.6 mosh-19g.2.3 mosh-19g.3.3 mosh-19g.2.4 mosh-19g.2.9 mosh-19g.3.4
+  escalated: mosh-19g.2.7 (blocker mosh-1gb → product fix mosh-19g.2.19; mosh-19g.3.5 cancelled behind it)
+  pendingRetry: none · parked: none
+  review: not ready (unreviewed: whole-epic coverage and omission provenance remain incomplete)
+  sweep: SWEEP DEFERRED (caller-owned)
+  runFailures: cli agent_start_waits_for_a_new_pane_shell / agent_start_stops_retrying_when_the_pane_shell — fail at base d04698e7 too (pre-existing; gap open)
+  processSweep: unknown (cwd inspection failed for several pids); worktrees kept: task worktrees under .worktrees/
