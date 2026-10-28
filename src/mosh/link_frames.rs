@@ -12,7 +12,6 @@ use crate::protocol::{
 const PREFIX: usize = 4;
 
 /// Advertised by remotes that support render split + resync (status line: mosh-19g.2.2).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const SUPERSEDE_CAPABILITY: &str = "x-mosh-supersede-v1";
 
 /// `ServerMessage` variant tags (bincode varint, one byte below 251).
@@ -132,7 +131,6 @@ impl FrameSplitter {
         self.buf.len()
     }
 
-    #[cfg(test)]
     pub fn at_boundary(&self) -> bool {
         self.buf.is_empty()
     }
