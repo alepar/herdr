@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::keeper_leg::{KeeperLeg, LegShutdown};
 use super::rendezvous::{self, KeeperRendezvous};
 use crate::remote::attach::mosh::session::{
     self, end_reason, End, Hello, HelloAnswer, Role, SessionEndpoint, SessionEvent, SessionMsg,
@@ -124,8 +125,8 @@ struct Session {
 
 struct LegSlot {
     id: u64,
-    /// Clone, for shutdown on steal, verdict or end.
-    stream: UnixStream,
+    /// For shutdown on steal, verdict or end.
+    shutdown: LegShutdown,
 }
 
 impl Shared {
@@ -192,7 +193,7 @@ impl Shared {
     fn close_session(&self, table: &mut Table, token: Token, reason: &str) {
         if let Some(session) = table.sessions.remove(&token) {
             if let Some(leg) = session.leg {
-                let _ = leg.stream.shutdown(Shutdown::Both);
+                (leg.shutdown)();
             }
             let _ = session.server.set_write_timeout(Some(CLOSE_BUDGET));
             let server = session.server;
@@ -209,7 +210,7 @@ impl Shared {
     /// the grace. Callers decide removal with `should_remove` first.
     fn detach_leg(&self, session: &mut Session, token: Token, now: Instant, reason: &str) {
         if let Some(leg) = session.leg.take() {
-            let _ = leg.stream.shutdown(Shutdown::Both);
+            (leg.shutdown)();
         }
         session.endpoint.leg_down();
         session.end_sent = false;
@@ -404,7 +405,7 @@ fn spawn_handler(shared: &Arc<Shared>, stream: UnixStream) {
     shared.pending.fetch_add(1, Ordering::SeqCst);
     let shared = Arc::clone(shared);
     thread::spawn(move || {
-        let admitted = admit(&shared, stream);
+        let admitted = accept_leg(&shared, stream);
         shared.pending.fetch_sub(1, Ordering::SeqCst);
         if let Ok(Some(admitted)) = admitted {
             run_leg(&shared, admitted);
@@ -412,26 +413,47 @@ fn spawn_handler(shared: &Arc<Shared>, stream: UnixStream) {
     });
 }
 
+/// The Unix producer: reads the first byte under `PRE_WELCOME_BOUND` and dispatches on it
+/// with a closed match. `Ok(None)`: the connection was closed or answered.
+fn accept_leg(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admitted>> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(PRE_WELCOME_BOUND))?;
+    let mut first = [0u8; 1];
+    stream.read_exact(&mut first)?;
+    match first[0] {
+        session::HELLO_TYPE => {
+            let hello = read_hello_after(&mut stream, first[0])?;
+            stream.set_read_timeout(None)?;
+            admit(shared, KeeperLeg::unix(stream)?, hello)
+        }
+        // Reserved for the QUIC acceptor's bootstrap query (mosh-19g.1.3): until it lands the
+        // connection closes, like an unknown first byte.
+        session::BOOTSTRAP_QUERY => Ok(None),
+        _ => Ok(None),
+    }
+}
+
 /// A leg that passed the HELLO table and is attached to a session.
 struct Admitted {
-    stream: UnixStream,
+    leg: KeeperLeg,
     token: Token,
     id: u64,
     status: WelcomeStatus,
     welcome: Vec<u8>,
 }
 
-/// Reads exactly one message, which must be a HELLO. Consumes nothing after it.
-fn read_hello(stream: &mut UnixStream) -> io::Result<Hello> {
+/// Reads the rest of a HELLO whose type byte `first` the producer already consumed. Consumes
+/// nothing after it.
+fn read_hello_after(reader: &mut dyn Read, first: u8) -> io::Result<Hello> {
     let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_string());
-    let mut header = [0u8; 5];
-    stream.read_exact(&mut header)?;
+    let mut header = [first, 0, 0, 0, 0];
+    reader.read_exact(&mut header[1..])?;
     let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
     if len > MAX_CONTROL_PAYLOAD {
         return Err(bad("HELLO too long"));
     }
     let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
+    reader.read_exact(&mut payload)?;
     let mut decoder = session::Decoder::default();
     decoder.push(&header);
     decoder.push(&payload);
@@ -442,10 +464,14 @@ fn read_hello(stream: &mut UnixStream) -> io::Result<Hello> {
 }
 
 /// Write an answer that does not bring a leg up, then close the leg.
-fn answer_and_close(mut stream: UnixStream, bytes: &[u8]) {
-    let _ = stream.write_all(bytes);
-    let _ = stream.flush();
-    let _ = stream.shutdown(Shutdown::Both);
+fn answer_and_close(mut leg: KeeperLeg, bytes: &[u8]) {
+    let _ = leg.writer.write_all(bytes);
+    let _ = leg.writer.flush();
+    (leg.shutdown)();
+}
+
+fn connect_server(shared: &Shared) -> io::Result<UnixStream> {
+    UnixStream::connect(&shared.server_socket)
 }
 
 fn end_bytes(reason: &str) -> Vec<u8> {
@@ -460,15 +486,11 @@ fn is_end(message: &[u8]) -> bool {
 }
 
 /// Apply the per-HELLO table. `Ok(None)`: the leg was answered and closed.
-fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admitted>> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(PRE_WELCOME_BOUND))?;
-    let hello = read_hello(&mut stream)?;
-    stream.set_read_timeout(None)?;
+fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Option<Admitted>> {
     let token = hello.token;
-    let refuse = |stream: UnixStream, reason: &str| {
+    let refuse = |leg: KeeperLeg, reason: &str| {
         shared.trace("welcome", token, json!({"status": "refused", "reason": reason}));
-        answer_and_close(stream, &end_bytes(reason));
+        answer_and_close(leg, &end_bytes(reason));
         Ok(None)
     };
 
@@ -481,11 +503,11 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
     match session::answer_hello(&hello, table.sessions.contains_key(&token)) {
         HelloAnswer::RefuseVersion => {
             drop(table);
-            refuse(stream, end_reason::PROTOCOL_VERSION)
+            refuse(leg, end_reason::PROTOCOL_VERSION)
         }
         HelloAnswer::RefuseTokenInUse => {
             drop(table);
-            refuse(stream, end_reason::TOKEN_IN_USE)
+            refuse(leg, end_reason::TOKEN_IN_USE)
         }
         HelloAnswer::Welcome(WelcomeStatus::Unknown) => {
             drop(table);
@@ -495,23 +517,24 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
                 status: WelcomeStatus::Unknown,
                 recv_offset: 0,
             });
-            answer_and_close(stream, &unknown.encode());
+            answer_and_close(leg, &unknown.encode());
             Ok(None)
         }
         HelloAnswer::Welcome(WelcomeStatus::New) => {
             drop(table);
-            let server = match UnixStream::connect(&shared.server_socket) {
+            let server = match connect_server(shared) {
                 Ok(server) => server,
-                Err(_) => return refuse(stream, end_reason::SERVER_CONNECT_FAILED),
+                Err(_) => return refuse(leg, end_reason::SERVER_CONNECT_FAILED),
             };
             let mut table = shared.lock();
             if table.sessions.contains_key(&token) {
                 drop(table);
                 let _ = server.shutdown(Shutdown::Both);
-                return refuse(stream, end_reason::TOKEN_IN_USE);
+                return refuse(leg, end_reason::TOKEN_IN_USE);
             }
             let now = Instant::now();
             let mut endpoint = SessionEndpoint::new(Role::Keeper, token, KEEPER_RING_CAP);
+            endpoint.set_silence_timeout(leg.silence_timeout);
             let welcome = match endpoint.welcome(now, WelcomeStatus::New, 0) {
                 Ok(bytes) => bytes,
                 Err(_) => return Ok(None),
@@ -527,7 +550,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
                     to_server,
                     leg: Some(LegSlot {
                         id,
-                        stream: stream.try_clone()?,
+                        shutdown: Arc::clone(&leg.shutdown),
                     }),
                     grace: Duration::from_millis(u64::from(hello.grace_ms)),
                     grace_deadline: None,
@@ -542,7 +565,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
             thread::spawn(move || server_reader(&reader_shared, token, id, reader));
             thread::spawn(move || server_writer(&writer_shared, token, id, server, from_client));
             Ok(Some(Admitted {
-                stream,
+                leg,
                 token,
                 id,
                 status: WelcomeStatus::New,
@@ -550,10 +573,10 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
             }))
         }
         HelloAnswer::Welcome(WelcomeStatus::Resumed) => {
-            let clone = stream.try_clone()?;
             let now = Instant::now();
             let session = table.sessions.get_mut(&token).expect("checked by answer_hello");
             shared.detach_leg(session, token, now, "stolen");
+            session.endpoint.set_silence_timeout(leg.silence_timeout);
             session.grace = Duration::from_millis(u64::from(hello.grace_ms));
             session.grace_deadline = None;
             let replayed_down = session.endpoint.outbound_end().saturating_sub(hello.recv_offset);
@@ -574,7 +597,10 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
                 session.endpoint.queue_final_end(end_reason::SERVER_EOF);
             }
             let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-            session.leg = Some(LegSlot { id, stream: clone });
+            session.leg = Some(LegSlot {
+                id,
+                shutdown: Arc::clone(&leg.shutdown),
+            });
             shared.trace(
                 "resume",
                 token,
@@ -582,7 +608,7 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
             );
             shared.kick.notify_all();
             Ok(Some(Admitted {
-                stream,
+                leg,
                 token,
                 id,
                 status: WelcomeStatus::Resumed,
@@ -595,13 +621,19 @@ fn admit(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option<Admi
 /// Answer WELCOME, then pump: a writer thread for the leg and this thread as its reader.
 fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
     let Admitted {
-        mut stream,
+        leg,
         token,
         id,
         status,
         welcome,
     } = admitted;
-    if stream.write_all(&welcome).is_err() {
+    let KeeperLeg {
+        mut reader,
+        mut writer,
+        shutdown,
+        ..
+    } = leg;
+    if writer.write_all(&welcome).and_then(|()| writer.flush()).is_err() {
         let mut table = shared.lock();
         shared.drop_leg(&mut table, token, id, "write");
         return;
@@ -624,14 +656,14 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
             shared.trace_window(token, id, reset, &session.server);
         }
     }
-    if let Ok(writer) = stream.try_clone() {
+    {
         let shared = Arc::clone(shared);
-        thread::spawn(move || leg_writer(&shared, token, id, writer));
+        thread::spawn(move || leg_writer(&shared, token, id, writer, shutdown));
     }
 
     let mut buf = vec![0u8; MAX_DATA_CHUNK + 64];
     let reason = loop {
-        let n = match stream.read(&mut buf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break "eof",
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -682,7 +714,13 @@ fn run_leg(shared: &Arc<Shared>, admitted: Admitted) {
 }
 
 /// Writes whatever the endpoint wants sent on leg `id` until the leg is replaced or gone.
-fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
+fn leg_writer(
+    shared: &Shared,
+    token: Token,
+    id: u64,
+    mut writer: Box<dyn Write + Send>,
+    shutdown: LegShutdown,
+) {
     loop {
         let (message, is_final) = {
             let mut table = shared.lock();
@@ -710,8 +748,8 @@ fn leg_writer(shared: &Shared, token: Token, id: u64, mut stream: UnixStream) {
                     .0;
             }
         };
-        if stream.write_all(&message).is_err() {
-            let _ = stream.shutdown(Shutdown::Both);
+        if writer.write_all(&message).is_err() {
+            shutdown();
             return;
         }
         if is_final {
@@ -1292,7 +1330,10 @@ mod tests {
                 endpoint,
                 server,
                 to_server,
-                leg: Some(LegSlot { id: 1, stream: leg }),
+                leg: Some(LegSlot {
+                    id: 1,
+                    shutdown: KeeperLeg::unix(leg).unwrap().shutdown,
+                }),
                 grace: Duration::from_secs(60),
                 grace_deadline: None,
                 eof: true,
@@ -1715,6 +1756,96 @@ mod tests {
         // The table is non-empty (parked within its 60 s grace), so the keeper stays up.
         thread::sleep(Duration::from_millis(600));
         assert!(!h.keeper.as_ref().unwrap().is_finished());
+    }
+
+    /// Connect, send `bytes` and report whether the keeper closed the connection within 1 s.
+    fn closed_by_keeper(h: &Harness, bytes: &[u8]) -> bool {
+        let mut stream = UnixStream::connect(&h.rdv.socket).unwrap();
+        stream.write_all(bytes).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        // Unread bytes on the keeper's side make its close surface as a reset.
+        match stream.read(&mut buf) {
+            Ok(n) => n == 0,
+            Err(err) => err.kind() == io::ErrorKind::ConnectionReset,
+        }
+    }
+
+    #[test]
+    fn first_byte_neither_hello_nor_query_closes() {
+        let h = Harness::new();
+        assert!(closed_by_keeper(&h, &[0x07, 1, 2, 3, 4, 5, 6]));
+        assert_eq!(h.server().connections(), 0);
+        assert!(h.trace().iter().all(|line| line["event"] != "welcome"));
+    }
+
+    #[test]
+    fn bootstrap_query_byte_closes_until_acceptor_lands() {
+        let h = Harness::new();
+        assert!(closed_by_keeper(&h, &[session::BOOTSTRAP_QUERY]));
+        assert_eq!(h.server().connections(), 0);
+    }
+
+    fn hello_for(endpoint: &mut SessionEndpoint) -> Hello {
+        let bytes = endpoint.hello(Instant::now(), 60_000, None);
+        let mut decoder = session::Decoder::default();
+        decoder.push(&bytes);
+        let Some(SessionMsg::Hello(hello)) = decoder.next().unwrap() else {
+            panic!("endpoint produced a non-HELLO");
+        };
+        hello
+    }
+
+    #[test]
+    fn admit_sets_leg_silence_override() {
+        let dir = TestDir::new();
+        let server_socket = dir.0.join("server.sock");
+        let _listener = UnixListener::bind(&server_socket).unwrap();
+        let shared = Arc::new(Shared {
+            table: Mutex::new(Table {
+                sessions: HashMap::new(),
+                empty_since: None,
+            }),
+            kick: Condvar::new(),
+            server_socket,
+            trace_dir: None,
+            next_id: AtomicU64::new(1),
+            pending: AtomicUsize::new(0),
+        });
+        let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        let token = local.token();
+        let hello = hello_for(&mut local);
+
+        // New session: the leg's 30 s override replaces the 8 s Phase 1 verdict.
+        let (leg_end, _peer) = UnixStream::pair().unwrap();
+        let mut leg = KeeperLeg::unix(leg_end).unwrap();
+        leg.silence_timeout = Some(Duration::from_secs(30));
+        let before = Instant::now();
+        let admitted = admit(&shared, leg, hello).unwrap().unwrap();
+        let after = Instant::now();
+        {
+            let table = shared.lock();
+            let endpoint = &table.sessions[&token].endpoint;
+            assert_eq!(endpoint.poll_timers(before + Duration::from_secs(10)), None);
+            assert!(endpoint.poll_timers(after + Duration::from_secs(30)).is_some());
+        }
+
+        // Resumed on a leg without an override: back to the Phase 1 value.
+        let (leg_end, _peer2) = UnixStream::pair().unwrap();
+        local
+            .on_leg_bytes(Instant::now(), &admitted.welcome)
+            .unwrap();
+        let resume = hello_for(&mut local);
+        let before = Instant::now();
+        assert!(admit(&shared, KeeperLeg::unix(leg_end).unwrap(), resume)
+            .unwrap()
+            .is_some());
+        let table = shared.lock();
+        let endpoint = &table.sessions[&token].endpoint;
+        assert_eq!(endpoint.poll_timers(before + Duration::from_secs(7)), None);
+        assert!(endpoint.poll_timers(Instant::now() + Duration::from_secs(8)).is_some());
     }
 
     #[test]

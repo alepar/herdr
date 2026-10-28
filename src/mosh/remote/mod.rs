@@ -12,6 +12,8 @@
 mod attacher;
 #[cfg(unix)]
 mod keeper;
+#[cfg(unix)]
+mod keeper_leg;
 
 use std::io;
 
