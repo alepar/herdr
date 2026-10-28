@@ -32,6 +32,10 @@ use std::time::Duration;
 pub(in crate::remote) const STATUS_CAPABILITY: &str = "x-mosh-resume-bridge-v1";
 /// Remote session-attacher flag (`remote-client-bridge` argument).
 pub(in crate::remote) const SESSION_FLAG: &str = "--x-mosh-session-v1";
+/// Remote attacher flag that asks for the QUIC bootstrap line. It goes FIRST in the argument
+/// list: upstream's `remote-client-bridge` gate admits a list only when its first argument
+/// starts with `--x-mosh-`.
+pub(in crate::remote) const QUIC_FLAG: &str = "--x-mosh-quic-v1";
 /// Remote keeper flag (`remote-client-bridge` argument).
 pub(in crate::remote) const KEEPER_FLAG: &str = "--x-mosh-keeper-v1";
 
