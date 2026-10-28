@@ -24,8 +24,10 @@ pub(in crate::remote) fn dispatch(args: &[String]) -> Option<io::Result<()>> {
     match route(args) {
         Route::NotMosh => None,
         #[cfg(unix)]
-        Route::Attacher { idle } if !idle || crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED => {
-            Some(attacher::run(idle))
+        Route::Attacher { idle, quic }
+            if !idle || crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED =>
+        {
+            Some(attacher::run(idle, quic))
         }
         #[cfg(unix)]
         Route::Keeper => Some(keeper::run(args)),
@@ -42,8 +44,10 @@ pub(in crate::remote) fn dispatch(args: &[String]) -> Option<io::Result<()>> {
 enum Route {
     /// `[SESSION_FLAG]`, or `["--idle-timeout-v1", SESSION_FLAG]` (upstream's idle opt-in,
     /// which comes first so the resume command keeps upstream's `remote-client-bridge
-    /// --idle-timeout-v1` prefix).
-    Attacher { idle: bool },
+    /// --idle-timeout-v1` prefix). `quic` (`QUIC_FLAG`) goes before both, because upstream's
+    /// arg-shape gate needs a `--x-mosh-` flag first: `[QUIC_FLAG, SESSION_FLAG]` or
+    /// `[QUIC_FLAG, "--idle-timeout-v1", SESSION_FLAG]`.
+    Attacher { idle: bool, quic: bool },
     Keeper,
     /// A `--x-mosh-` flag in position 0 or 1 that matches no valid shape (or non-Unix).
     Reject,
@@ -54,10 +58,30 @@ fn route(args: &[String]) -> Route {
     const IDLE: &str = "--idle-timeout-v1";
     match args {
         #[cfg(unix)]
-        [flag] if flag == super::SESSION_FLAG => Route::Attacher { idle: false },
+        [flag] if flag == super::SESSION_FLAG => Route::Attacher {
+            idle: false,
+            quic: false,
+        },
         #[cfg(unix)]
-        [idle, flag] if idle == IDLE && flag == super::SESSION_FLAG => {
-            Route::Attacher { idle: true }
+        [idle, flag] if idle == IDLE && flag == super::SESSION_FLAG => Route::Attacher {
+            idle: true,
+            quic: false,
+        },
+        #[cfg(unix)]
+        [quic, flag] if quic == super::QUIC_FLAG && flag == super::SESSION_FLAG => {
+            Route::Attacher {
+                idle: false,
+                quic: true,
+            }
+        }
+        #[cfg(unix)]
+        [quic, idle, flag]
+            if quic == super::QUIC_FLAG && idle == IDLE && flag == super::SESSION_FLAG =>
+        {
+            Route::Attacher {
+                idle: true,
+                quic: true,
+            }
         }
         #[cfg(unix)]
         [flag] if flag == super::KEEPER_FLAG => Route::Keeper,
@@ -84,14 +108,32 @@ mod tests {
     fn idle_flag_precedes_session_flag() {
         use super::super::{KEEPER_FLAG, SESSION_FLAG};
         let r = |list: &[&str]| route(&args(list));
-        assert_eq!(r(&["--idle-timeout-v1", SESSION_FLAG]), Route::Attacher { idle: true });
-        assert_eq!(r(&[SESSION_FLAG]), Route::Attacher { idle: false });
+        assert_eq!(
+            r(&["--idle-timeout-v1", SESSION_FLAG]),
+            Route::Attacher { idle: true, quic: false }
+        );
+        assert_eq!(r(&[SESSION_FLAG]), Route::Attacher { idle: false, quic: false });
         assert_eq!(r(&[KEEPER_FLAG]), Route::Keeper);
         assert_eq!(r(&["--idle-timeout-v1", KEEPER_FLAG]), Route::Reject);
         assert_eq!(r(&["junk", SESSION_FLAG]), Route::Reject);
         assert_eq!(r(&[SESSION_FLAG, "--idle-timeout-v1"]), Route::Reject);
         assert_eq!(r(&["--idle-timeout-v1"]), Route::NotMosh);
         assert_eq!(r(&[]), Route::NotMosh);
+    }
+
+    #[test]
+    fn quic_flag_route_shapes() {
+        use super::super::{KEEPER_FLAG, QUIC_FLAG, SESSION_FLAG};
+        let r = |list: &[&str]| route(&args(list));
+        assert_eq!(r(&[QUIC_FLAG, SESSION_FLAG]), Route::Attacher { idle: false, quic: true });
+        assert_eq!(
+            r(&[QUIC_FLAG, "--idle-timeout-v1", SESSION_FLAG]),
+            Route::Attacher { idle: true, quic: true }
+        );
+        assert_eq!(r(&[SESSION_FLAG, QUIC_FLAG]), Route::Reject);
+        assert_eq!(r(&["--idle-timeout-v1", SESSION_FLAG, QUIC_FLAG]), Route::Reject);
+        assert_eq!(r(&[QUIC_FLAG]), Route::Reject);
+        assert_eq!(r(&[QUIC_FLAG, KEEPER_FLAG]), Route::Reject);
     }
 
     #[test]

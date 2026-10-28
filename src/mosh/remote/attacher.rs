@@ -5,8 +5,9 @@
 use super::rendezvous::{
     ensure_private_dir, lock, resolve, try_lock, validate_private_dir_for, KeeperRendezvous,
 };
-use crate::remote::attach::mosh::session::{end_reason, End, SessionMsg};
-use std::io::{self, Write};
+use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
+use crate::remote::attach::mosh::session::{end_reason, End, SessionMsg, BOOTSTRAP_QUERY};
+use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -17,22 +18,36 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// `idle_timeout`: the caller opted into upstream's 60 s idle watchdog (`--idle-timeout-v1`).
 /// Session heartbeats keep a live leg busy; a dead leg's attacher is reaped like a plain bridge.
-pub(super) fn run(idle_timeout: bool) -> io::Result<()> {
+/// `quic`: the caller passed `--x-mosh-quic-v1`; the attacher prints one bootstrap line first
+/// and opens the session connection lazily (see `run_quic_with`).
+pub(super) fn run(idle_timeout: bool, quic: bool) -> io::Result<()> {
     let session = crate::session::active_name();
     let rdv = resolve(
         session
             .as_deref()
             .unwrap_or(crate::session::DEFAULT_SESSION_NAME),
     );
-    let mut spawn = || keeper_command(&std::env::current_exe()?, session.as_deref()).spawn().map(drop);
-    match bring_up(&rdv, geteuid(), &mut spawn) {
-        Ok(stream) => {
+    let spawn = || keeper_command(&std::env::current_exe()?, session.as_deref()).spawn().map(drop);
+    let connect = || bring_up(&rdv, geteuid(), &mut || spawn());
+    // The forwarder reads the same global `io::stdin()`, so what the QUIC path's lock
+    // buffers is not lost; both locks are released before forwarding starts.
+    let opened = open_session(
+        quic,
+        &mut io::stdin().lock(),
+        &mut io::stdout().lock(),
+        connect,
+        connect,
+    );
+    match opened {
+        Ok(Some(stream)) => {
             use interprocess::os::unix::uds_local_socket::Stream as UdStream;
             crate::platform::forward_remote_bridge_stdio(
                 crate::ipc::LocalStream::UdSocket(UdStream::from(stream)),
                 idle_timeout,
             )
         }
+        // stdin closed before any byte: nothing to attach.
+        Ok(None) => Ok(()),
         Err(err) => {
             let _ = report_unavailable(&mut io::stdout().lock());
             Err(io::Error::new(
@@ -41,6 +56,83 @@ pub(super) fn run(idle_timeout: bool) -> io::Result<()> {
             ))
         }
     }
+}
+
+/// Without `quic`: connect and write nothing, byte-for-byte the pre-QUIC attacher.
+fn open_session(
+    quic: bool,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+    connect_query: impl FnOnce() -> io::Result<UnixStream>,
+    connect_session: impl FnOnce() -> io::Result<UnixStream>,
+) -> io::Result<Option<UnixStream>> {
+    if quic {
+        run_quic_with(stdin, stdout, connect_query, connect_session, QUERY_TIMEOUT)
+    } else {
+        connect_session().map(Some)
+    }
+}
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Upper bound on the keeper's one-line bootstrap reply.
+const QUERY_REPLY_MAX: usize = 4096;
+
+/// Asks the keeper for its QUIC bootstrap on a short-lived connection of its own. EOF, error,
+/// timeout (`timeout` is a deadline for the whole reply, not per read) or an unparseable
+/// reply is `None`. The connection is closed on return, so a late reply never reaches anyone.
+fn query_bootstrap(
+    connect: impl FnOnce() -> io::Result<UnixStream>,
+    timeout: Duration,
+) -> Option<QuicBootstrap> {
+    let mut stream = connect().ok()?;
+    let deadline = Instant::now() + timeout;
+    stream.write_all(&[BOOTSTRAP_QUERY]).ok()?;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        stream.set_read_timeout(Some(remaining.max(Duration::from_millis(1)))).ok()?;
+        match stream.read(&mut byte) {
+            Ok(0) => return None,
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) if line.len() < QUERY_REPLY_MAX => line.push(byte[0]),
+            Ok(_) => return None,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    QuicBootstrap::parse_reply(std::str::from_utf8(&line).ok()?)
+}
+
+/// The `--x-mosh-quic-v1` path up to (not including) the forwarder: query the keeper, write
+/// exactly one bootstrap line (`none` on any failure), block for the first stdin chunk, and
+/// only then open the session connection and write that chunk to it. `Ok(None)` is stdin EOF
+/// before any byte, with no session connection opened. A session bring-up failure is `Err`.
+fn run_quic_with(
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+    connect_query: impl FnOnce() -> io::Result<UnixStream>,
+    connect_session: impl FnOnce() -> io::Result<UnixStream>,
+    timeout: Duration,
+) -> io::Result<Option<UnixStream>> {
+    let bootstrap = query_bootstrap(connect_query, timeout);
+    stdout.write_all(QuicBootstrap::encode_line(bootstrap.as_ref()).as_bytes())?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()?;
+    let mut chunk = [0u8; 8192];
+    let n = loop {
+        match stdin.read(&mut chunk) {
+            Ok(n) => break n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    let mut stream = connect_session()?;
+    stream.write_all(&chunk[..n])?;
+    Ok(Some(stream))
 }
 
 fn geteuid() -> u32 {
@@ -256,27 +348,102 @@ mod tests {
     struct FakeKeeper {
         stop: Arc<AtomicBool>,
         accepted: Arc<Mutex<Vec<UnixStream>>>,
+        /// Bytes that arrived on connections whose first byte was not `Q` (query mode only).
+        received: Arc<Mutex<Vec<u8>>>,
         handle: Option<std::thread::JoinHandle<()>>,
         _live: Arc<RendezvousLock>,
+    }
+
+    /// How a query-mode `FakeKeeper` answers the bootstrap query byte.
+    #[derive(Clone)]
+    enum QueryReply {
+        Reply { delay: Duration, line: String },
+        CloseOnQ,
+    }
+
+    /// Per-connection handler: `Q` gets `reply`; any other first byte starts a "session"
+    /// whose bytes are recorded in `received`.
+    fn handle_conn(
+        mut stream: UnixStream,
+        reply: QueryReply,
+        received: Arc<Mutex<Vec<u8>>>,
+        stop: Arc<AtomicBool>,
+    ) {
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let mut first = true;
+        let mut buf = [0u8; 256];
+        while !stop.load(Ordering::Relaxed) {
+            match stream.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) if first && buf[0] == BOOTSTRAP_QUERY => {
+                    match &reply {
+                        QueryReply::Reply { delay, line } => {
+                            let until = Instant::now() + *delay;
+                            while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            let _ = stream.write_all(format!("{line}\n").as_bytes());
+                        }
+                        QueryReply::CloseOnQ => {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        }
+                    }
+                    let _ = n;
+                    return;
+                }
+                Ok(n) => {
+                    first = false;
+                    received.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
     }
 
     impl FakeKeeper {
         fn start(rdv: &KeeperRendezvous) -> FakeKeeper {
             let live = Arc::new(try_lock(&rdv.live_lock).unwrap().expect("live lock free"));
-            Self::listen(rdv, live)
+            Self::listen(rdv, live, None)
         }
 
-        fn listen(rdv: &KeeperRendezvous, live: Arc<RendezvousLock>) -> FakeKeeper {
+        /// A keeper that answers the bootstrap query byte like `reply` says.
+        fn answering(rdv: &KeeperRendezvous, reply: QueryReply) -> FakeKeeper {
+            let live = Arc::new(try_lock(&rdv.live_lock).unwrap().expect("live lock free"));
+            Self::listen(rdv, live, Some(reply))
+        }
+
+        fn listen(
+            rdv: &KeeperRendezvous,
+            live: Arc<RendezvousLock>,
+            reply: Option<QueryReply>,
+        ) -> FakeKeeper {
             let listener = UnixListener::bind(&rdv.socket).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let accepted = Arc::new(Mutex::new(Vec::new()));
+            let received = Arc::new(Mutex::new(Vec::new()));
             let handle = {
-                let (stop, accepted) = (stop.clone(), accepted.clone());
+                let (stop, accepted, received) = (stop.clone(), accepted.clone(), received.clone());
                 std::thread::spawn(move || {
                     while !stop.load(Ordering::Relaxed) {
                         match listener.accept() {
-                            Ok((stream, _)) => accepted.lock().unwrap().push(stream),
+                            Ok((stream, _)) => {
+                                if let Some(reply) = &reply {
+                                    let clone = stream.try_clone().unwrap();
+                                    let (reply, received, stop) =
+                                        (reply.clone(), received.clone(), stop.clone());
+                                    std::thread::spawn(move || {
+                                        handle_conn(clone, reply, received, stop)
+                                    });
+                                }
+                                accepted.lock().unwrap().push(stream);
+                            }
                             Err(_) => std::thread::sleep(Duration::from_millis(5)),
                         }
                     }
@@ -285,6 +452,7 @@ mod tests {
             FakeKeeper {
                 stop,
                 accepted,
+                received,
                 handle: Some(handle),
                 _live: live,
             }
@@ -312,6 +480,283 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("keeper accepted {} of {count}", keeper.accepted_count());
+    }
+
+    fn sample_bootstrap() -> QuicBootstrap {
+        let line = format!("herdr-mosh-quic:1 40123 {} {}", "ab".repeat(32), "cd".repeat(32));
+        QuicBootstrap::parse_line(&line).expect("valid sample line")
+    }
+
+    fn connect_to(env: &Env) -> impl FnOnce() -> io::Result<UnixStream> + '_ {
+        || bring_up(&env.rdv, geteuid(), &mut || panic!("must not spawn"))
+    }
+
+    fn wait_received(keeper: &FakeKeeper, want: &[u8]) {
+        for _ in 0..200 {
+            if keeper.received.lock().unwrap().as_slice() == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("keeper received {:?}, wanted {want:?}", keeper.received.lock().unwrap());
+    }
+
+    #[test]
+    fn no_flag_prints_no_bootstrap_line() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::answering(&env.rdv, QueryReply::CloseOnQ);
+        let mut stdout = Vec::new();
+        let stream = open_session(
+            false,
+            &mut io::empty(),
+            &mut stdout,
+            || panic!("the no-flag path must not query"),
+            connect_to(&env),
+        )
+        .unwrap();
+        assert!(stream.is_some());
+        assert!(stdout.is_empty(), "stdout: {stdout:?}");
+        wait_accepted(&keeper, 1);
+    }
+
+    #[test]
+    fn flag_prints_exactly_one_line_before_session_bytes() {
+        let env = Env::new();
+        env.prepare_dir();
+        let served = sample_bootstrap();
+        let keeper = FakeKeeper::answering(
+            &env.rdv,
+            QueryReply::Reply {
+                delay: Duration::ZERO,
+                line: QuicBootstrap::encode_reply(Some(&served)),
+            },
+        );
+        let mut stdout = Vec::new();
+        let stream = run_quic_with(
+            &mut &b"x"[..],
+            &mut stdout,
+            connect_to(&env),
+            connect_to(&env),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+        assert!(stream.is_some());
+        let text = String::from_utf8(stdout).unwrap();
+        assert_eq!(text.matches('\n').count(), 1, "{text:?}");
+        assert!(text.ends_with('\n'));
+        assert_eq!(QuicBootstrap::parse_line(&text), Some(served));
+        wait_received(&keeper, b"x");
+    }
+
+    #[test]
+    fn withheld_reply_prints_one_none_line() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::answering(
+            &env.rdv,
+            QueryReply::Reply {
+                delay: Duration::from_secs(10),
+                line: "{}".into(),
+            },
+        );
+        let mut stdout = Vec::new();
+        let started = Instant::now();
+        let stream = run_quic_with(
+            &mut &b"x"[..],
+            &mut stdout,
+            connect_to(&env),
+            connect_to(&env),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed >= QUERY_TIMEOUT, "gave up early: {elapsed:?}");
+        assert!(elapsed < QUERY_TIMEOUT + Duration::from_secs(2), "too slow: {elapsed:?}");
+        assert!(stream.is_some());
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+        wait_received(&keeper, b"x");
+    }
+
+    #[test]
+    fn late_reply_prints_none_and_never_reaches_stdout() {
+        let env = Env::new();
+        env.prepare_dir();
+        let served = sample_bootstrap();
+        let _keeper = FakeKeeper::answering(
+            &env.rdv,
+            QueryReply::Reply {
+                delay: Duration::from_millis(700),
+                line: QuicBootstrap::encode_reply(Some(&served)),
+            },
+        );
+        let mut stdout = Vec::new();
+        run_quic_with(
+            &mut &b"x"[..],
+            &mut stdout,
+            connect_to(&env),
+            connect_to(&env),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+        // Past the late reply: the query connection is gone, nothing else was written.
+        std::thread::sleep(Duration::from_millis(900));
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+    }
+
+    #[test]
+    fn trickled_reply_is_bounded_by_one_deadline() {
+        let env = Env::new();
+        env.prepare_dir();
+        let listener = std::os::unix::net::UnixListener::bind(&env.rdv.socket).unwrap();
+        let _live = try_lock(&env.rdv.live_lock).unwrap().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let trickler = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut q = [0u8; 1];
+                let _ = s.read(&mut q);
+                // One byte every 100 ms, never a newline: per-read timeouts alone never fire.
+                while !stop.load(Ordering::Relaxed) && s.write_all(b" ").is_ok() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+        let started = Instant::now();
+        let got = query_bootstrap(connect_to(&env), Duration::from_millis(400));
+        stop.store(true, Ordering::Relaxed);
+        trickler.join().unwrap();
+        assert_eq!(got, None);
+        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn old_keeper_closing_on_q_yields_none_and_session_works() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::answering(&env.rdv, QueryReply::CloseOnQ);
+        let mut stdout = Vec::new();
+        let stream = run_quic_with(
+            &mut &b"x"[..],
+            &mut stdout,
+            connect_to(&env),
+            connect_to(&env),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+        assert!(stream.is_some());
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+        wait_received(&keeper, b"x");
+    }
+
+    /// Blocks in `read` until the test sends a chunk; EOF once the sender is dropped.
+    struct ChannelReader(std::sync::mpsc::Receiver<Vec<u8>>);
+
+    impl Read for ChannelReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.recv() {
+                Ok(chunk) => {
+                    buf[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn no_session_connection_until_first_stdin_byte() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::answering(
+            &env.rdv,
+            QueryReply::Reply {
+                delay: Duration::ZERO,
+                line: "{}".into(),
+            },
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut stdout = Vec::new();
+                let stream = run_quic_with(
+                    &mut ChannelReader(rx),
+                    &mut stdout,
+                    connect_to(&env),
+                    connect_to(&env),
+                    QUERY_TIMEOUT,
+                )
+                .unwrap();
+                (stream.is_some(), stdout)
+            });
+            wait_accepted(&keeper, 1);
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(keeper.accepted_count(), 1, "session connection opened before stdin");
+            tx.send(b"x".to_vec()).unwrap();
+            wait_accepted(&keeper, 2);
+            let (opened, stdout) = worker.join().unwrap();
+            assert!(opened);
+            assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+        });
+        wait_received(&keeper, b"x");
+    }
+
+    #[test]
+    fn stdin_eof_before_any_byte_opens_no_session() {
+        let env = Env::new();
+        env.prepare_dir();
+        let keeper = FakeKeeper::answering(
+            &env.rdv,
+            QueryReply::Reply {
+                delay: Duration::ZERO,
+                line: "{}".into(),
+            },
+        );
+        let mut stdout = Vec::new();
+        let stream = run_quic_with(
+            &mut io::empty(),
+            &mut stdout,
+            connect_to(&env),
+            || panic!("no session connection without stdin"),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+        assert!(stream.is_none());
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+        wait_accepted(&keeper, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(keeper.accepted_count(), 1);
+    }
+
+    #[test]
+    fn query_bring_up_failure_yields_none_line() {
+        let mut stdout = Vec::new();
+        let stream = run_quic_with(
+            &mut io::empty(),
+            &mut stdout,
+            || Err(io::Error::other("no keeper")),
+            || panic!("no session connection without stdin"),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+        assert!(stream.is_none());
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
+    }
+
+    #[test]
+    fn session_bring_up_failure_is_an_error() {
+        let mut stdout = Vec::new();
+        let result = run_quic_with(
+            &mut &b"x"[..],
+            &mut stdout,
+            || Err(io::Error::other("no keeper")),
+            || Err(io::Error::other("no keeper")),
+            QUERY_TIMEOUT,
+        );
+        assert!(result.is_err());
+        assert_eq!(stdout, b"herdr-mosh-quic:1 none\n");
     }
 
     #[test]
@@ -377,7 +822,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
-                *keeper.lock().unwrap() = Some(FakeKeeper::listen(&env.rdv, live));
+                *keeper.lock().unwrap() = Some(FakeKeeper::listen(&env.rdv, live, None));
             });
             let mut spawn = || panic!("must not spawn");
             bring_up(&env.rdv, geteuid(), &mut spawn).unwrap();
