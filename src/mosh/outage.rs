@@ -12,6 +12,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::{color_to_u32, modifier_to_u16, FrameData};
 
+/// Server-side fork hooks (mosh-19g.5). Mounted here because this is the only fork mount the
+/// server can name; costs no upstream line. Reached as `crate::client::mosh_outage::server_hooks`.
+#[path = "server_hooks.rs"]
+pub(crate) mod server_hooks;
+
 pub(crate) const LINK_KIND: &str = "x-mosh.link.v1";
 const STALE_AFTER: Duration = Duration::from_secs(2);
 
