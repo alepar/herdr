@@ -10,7 +10,7 @@
 //! valid for their session's whole life, so QUIC redials within grace need no ssh round trip.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::UdpSocket;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::str::FromStr;
@@ -20,10 +20,13 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
 use crate::remote::attach::mosh::quic::{
-    self, QuicRuntime, ServerIdentity, KEEPER_IDLE_TIMEOUT,
+    self, QuicRuntime, ServerIdentity, KEEPER_IDLE_TIMEOUT, QUIC_SILENCE_WINDOW,
 };
 use crate::remote::attach::mosh::quic_bootstrap::{Fingerprint, QuicBootstrap, QuicToken};
 use crate::remote::attach::mosh::session::{Token, PRE_WELCOME_BOUND};
+
+use super::keeper_leg::KeeperLeg;
+use super::render_lane::{LaneQueue, RenderLane};
 
 /// An unbound token older than this is refused.
 const UNBOUND_TTL: Duration = Duration::from_secs(60);
@@ -92,6 +95,30 @@ pub(super) struct QuicConn {
     pub conn: quinn::Connection,
     pub send: quinn::SendStream,
     pub recv: quinn::RecvStream,
+}
+
+/// The keeper leg for an admitted QUIC connection: it carries the render-lane queue (with its
+/// sender task already running on `handle`), and shutting it down closes the connection and
+/// the lane. Unix legs have no lane (`KeeperLeg::unix`).
+pub(super) fn keeper_leg(
+    handle: &Handle,
+    conn: quinn::Connection,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+) -> KeeperLeg {
+    let lane = LaneQueue::new();
+    RenderLane::spawn(handle, conn.clone(), lane.clone());
+    let closing = lane.clone();
+    KeeperLeg {
+        reader,
+        writer,
+        shutdown: Arc::new(move || {
+            closing.close();
+            conn.close(0u32.into(), b"leg");
+        }),
+        render_lane: Some(lane),
+        silence_timeout: Some(QUIC_SILENCE_WINDOW),
+    }
 }
 
 /// Called on the acceptor's runtime for each connection; it must not block.
@@ -313,5 +340,31 @@ mod tests {
         assert_eq!(tokens.check(None, session(1), now), TokenVerdict::Refuse);
         assert_eq!(tokens.check(Some("not hex"), session(1), now), TokenVerdict::Refuse);
         assert_eq!(tokens.check(Some(""), session(1), now), TokenVerdict::Refuse);
+    }
+
+    #[test]
+    fn quic_legs_carry_a_lane_and_shutdown_closes_it() {
+        use crate::remote::attach::mosh::link_frames::FrameClass;
+        use super::super::render_lane::{loopback, Offer};
+
+        let pair = loopback::pair();
+        let leg = keeper_leg(
+            &pair.rt.handle(),
+            pair.server.clone(),
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+        );
+        assert_eq!(leg.silence_timeout, Some(QUIC_SILENCE_WINDOW));
+        let lane = leg.render_lane.clone().expect("QUIC legs carry a lane");
+        assert_eq!(lane.offer(FrameClass::Chained, vec![1]), Offer::Accepted);
+        (leg.shutdown)();
+        assert_eq!(lane.offer(FrameClass::Chained, vec![2]), Offer::Rejected);
+        assert!(pair.server.close_reason().is_some());
+        assert!(KeeperLeg::unix(
+            std::os::unix::net::UnixStream::pair().unwrap().0
+        )
+        .unwrap()
+        .render_lane
+        .is_none());
     }
 }
