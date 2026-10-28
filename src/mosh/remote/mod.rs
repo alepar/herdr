@@ -14,6 +14,8 @@ mod attacher;
 mod keeper;
 #[cfg(unix)]
 mod keeper_leg;
+#[cfg(unix)]
+mod quic_acceptor;
 
 use std::io;
 
