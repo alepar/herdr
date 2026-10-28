@@ -124,6 +124,7 @@ impl QuicClient {
             *cell.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason);
         });
         let probe = conn.clone();
+        let stats_conn = conn.clone();
         let render_lane = spawn_render_reader(&handle, conn.clone());
         let client = Arc::clone(self);
         Leg::new(
@@ -141,6 +142,17 @@ impl QuicClient {
         )
         .with_admission_token(token.token.to_string())
         .with_rtt_probe(Box::new(move || Some(probe.rtt())))
+        .with_stats_probe(Box::new(move || {
+            let stats = stats_conn.stats();
+            serde_json::json!({
+                "cwnd": stats.path.cwnd,
+                "rtt_ms": stats.path.rtt.as_millis() as u64,
+                "lost_packets": stats.path.lost_packets,
+                "congestion_events": stats.path.congestion_events,
+                "udp_tx": stats.udp_tx.datagrams,
+                "udp_rx": stats.udp_rx.datagrams,
+            })
+        }))
         .with_silence_timeout(QUIC_SILENCE_WINDOW)
         .with_close_reason(close_reason)
         .with_render_lane(render_lane)

@@ -465,6 +465,10 @@ struct Conn<'a> {
     echo_injected: bool,
     /// A `Linked` carrying `echo` is owed to the client.
     echo_report_due: bool,
+    /// When the last gap resync was requested and has not yet been answered by a full surface.
+    resync_at: Option<Instant>,
+    /// When the transport counters were last traced.
+    last_stats: Instant,
     /// WELCOMEs received this connection (the resume rule fires on every one after the first).
     welcomes: u32,
     /// The client stream until the client threads take it (and for the leg-0 fallback).
@@ -528,6 +532,8 @@ impl<'a> Conn<'a> {
             echo_requested: false,
             echo_injected: false,
             echo_report_due: false,
+            resync_at: None,
+            last_stats: Instant::now(),
             welcomes: 0,
             stream,
             client: None,
@@ -1213,6 +1219,7 @@ impl Conn<'_> {
             return;
         }
         self.trace.emit("resync", serde_json::json!({ "reason": reason }));
+        self.resync_at = Some(Instant::now());
         self.inject_upstream(encode_resync_frame(), InjectAt::AfterFirstFrame);
     }
 
@@ -1230,7 +1237,24 @@ impl Conn<'_> {
         else {
             return;
         };
+        let (seq, kind, class, bytes) = match &arrival {
+            RenderArrival::Header { seq, class } => (*seq, "header", Some(*class), 0),
+            RenderArrival::Complete { seq, class, bytes } => {
+                (*seq, "complete", Some(*class), bytes.len())
+            }
+            RenderArrival::Reset { seq } => (*seq, "reset", None, 0),
+        };
+        let next_before = reorder.next_seq();
         let out = reorder.on_arrival(arrival, now, srtt);
+        if kind != "header" || class == Some(FrameClass::SelfContained) {
+            self.trace.emit(
+                "lane_in",
+                serde_json::json!({
+                    "seq": seq, "kind": kind, "class": class.map(|c| format!("{c:?}")),
+                    "bytes": bytes, "next": next_before,
+                }),
+            );
+        }
         self.apply_reorder(out);
     }
 
@@ -1252,11 +1276,29 @@ impl Conn<'_> {
                 GapCause::Overdue => "overdue",
                 GapCause::Supersede => "supersede",
             };
-            self.trace
-                .emit("render_gap", serde_json::json!({ "cause": cause }));
+            let missing = self
+                .leg
+                .as_ref()
+                .and_then(|io| io.reorder.as_ref())
+                .map(|r| (r.next_seq(), r.header_seen(r.next_seq())));
+            self.trace.emit(
+                "render_gap",
+                serde_json::json!({
+                    "cause": cause,
+                    "missing_seq": missing.map(|m| m.0),
+                    "header_seen": missing.map(|m| m.1),
+                }),
+            );
         }
         if !self.client_closed {
             for frame in out.deliver {
+                if FrameClass::of(&frame) == FrameClass::SelfContained {
+                    let since = self.resync_at.take().map(|at| at.elapsed().as_millis() as u64);
+                    self.trace.emit(
+                        "surface_delivered",
+                        serde_json::json!({ "bytes": frame.len(), "ms_since_resync": since }),
+                    );
+                }
                 self.client_send(ClientOut::Injected(frame));
             }
         }
@@ -1317,6 +1359,7 @@ impl Conn<'_> {
         }
         self.feed_client();
         self.poll_reorder(now);
+        self.trace_stats(now);
         match self.stage {
             Stage::Dialing => {}
             Stage::Welcome => {
@@ -1357,6 +1400,18 @@ impl Conn<'_> {
             if client.go_tx.send(size).is_ok() {
                 self.client_idle = false;
             }
+        }
+    }
+
+    /// Once a second: the transport's counters, for diagnosing render recovery.
+    fn trace_stats(&mut self, now: Instant) {
+        if self.trace.file.is_none() || now.duration_since(self.last_stats) < Duration::from_secs(1)
+        {
+            return;
+        }
+        self.last_stats = now;
+        if let Some(stats) = self.leg.as_ref().and_then(|io| io.leg.stats()) {
+            self.trace.emit("quic_stats", stats);
         }
     }
 

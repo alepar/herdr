@@ -2,8 +2,10 @@
 //!
 //! Owns: the bounded, clearable queue of render frames between the keeper's `server_reader`
 //! thread (producer) and a leg's lane task on the runtime (consumer), the offer semantics
-//! that implement supersede, and `RenderLane`, the consumer that sends each frame on its own
-//! QUIC uni stream, numbers them per leg and resets superseded streams.
+//! that implement supersede, the budget that tells the producer to stop reading the server
+//! (unsettled bytes against the leg's congestion window), and `RenderLane`, the consumer that
+//! sends each frame on its own QUIC uni stream (twice, on a lossy leg), numbers them per leg
+//! and resets superseded streams.
 //! Hides: the lock and the wake-up of the waiting consumer, quinn stream handling.
 //! Must not: classify frames (the caller passes the `FrameClass`), or know about sessions.
 //! Lifecycle: the queue is created with a QUIC leg, shared by `KeeperLeg` and its `LegSlot`,
@@ -13,6 +15,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, Notify};
@@ -25,6 +28,14 @@ use crate::remote::attach::mosh::quic::RenderHeader;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) const LANE_CAPACITY: usize = 64;
 
+/// The least the budget is, whatever the congestion window: one big patch must fit.
+pub(super) const LANE_MIN_BUDGET: u64 = 64 * 1024;
+/// The most the budget is, however large the congestion window grows.
+pub(super) const LANE_MAX_BUDGET: u64 = 1024 * 1024;
+/// Frames outstanding at which the producer pauses: with two copies each, well under the
+/// peer's limit of concurrent streams.
+pub(super) const LANE_BUDGET_FRAMES: u64 = 24;
+
 /// What `offer` did with a frame.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
@@ -33,14 +44,28 @@ pub(super) enum Offer {
     Rejected,
 }
 
-struct State {
-    frames: VecDeque<(FrameClass, Vec<u8>)>,
+pub(super) struct State {
+    pub(super) frames: VecDeque<(FrameClass, Vec<u8>)>,
     closed: bool,
+    /// Queued frames a self-contained offer cleared, over the leg's life.
+    cleared: u64,
+    /// Chained offers turned away at capacity, over the leg's life.
+    rejected: u64,
+    /// Bytes of frames offered and not yet settled (queued, or streaming and unacknowledged).
+    outstanding: u64,
+    /// Frames counted in `outstanding`.
+    outstanding_frames: u64,
+    /// The leg's congestion window as last read by the lane task (0 until the first read).
+    window: u64,
 }
+
+/// Where lane trace lines go (`HERDR_MOSH_TRACE`); `None` records nothing.
+pub(super) type LaneTrace = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
 struct Inner {
     state: Mutex<State>,
     notify: Notify,
+    trace: Option<LaneTrace>,
 }
 
 /// Producer side: the keeper's `server_reader` thread. Consumer side: the lane's runtime task.
@@ -50,16 +75,38 @@ pub(super) struct LaneQueue {
 }
 
 impl LaneQueue {
+    #[cfg(test)]
     pub(super) fn new() -> LaneQueue {
+        LaneQueue::with_trace(None)
+    }
+
+    pub(super) fn with_trace(trace: Option<LaneTrace>) -> LaneQueue {
         LaneQueue {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
                     frames: VecDeque::new(),
                     closed: false,
+                    cleared: 0,
+                    rejected: 0,
+                    outstanding: 0,
+                    outstanding_frames: 0,
+                    window: 0,
                 }),
                 notify: Notify::new(),
+                trace,
             }),
         }
+    }
+
+    fn trace(&self, event: &str, fields: serde_json::Value) {
+        if let Some(trace) = &self.inner.trace {
+            trace(event, fields);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn lock_for_test(&self) -> MutexGuard<'_, State> {
+        self.lock()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -78,17 +125,50 @@ impl LaneQueue {
                 return Offer::Rejected;
             }
             match class {
-                FrameClass::SelfContained => state.frames.clear(),
+                FrameClass::SelfContained => {
+                    let queued = state.frames.len() as u64;
+                    let bytes: u64 = state.frames.iter().map(|(_, b)| b.len() as u64).sum();
+                    state.frames.clear();
+                    state.cleared += queued;
+                    state.outstanding -= bytes;
+                    state.outstanding_frames -= queued;
+                }
                 FrameClass::Chained | FrameClass::Reliable => {
                     if state.frames.len() >= LANE_CAPACITY {
+                        state.rejected += 1;
                         return Offer::Rejected;
                     }
                 }
             }
+            state.outstanding += bytes.len() as u64;
+            state.outstanding_frames += 1;
             state.frames.push_back((class, bytes));
         }
         self.inner.notify.notify_one();
         Offer::Accepted
+    }
+
+    /// Enough is outstanding that the producer should stop feeding the lane: the server then
+    /// backs up and coalesces its own renders instead of the keeper queueing frames the link
+    /// cannot carry (and a newer self-contained frame would only throw away).
+    ///
+    /// The budget follows the congestion window: unacknowledged data beyond what the window
+    /// lets out would only wait in quinn's send buffer, in front of everything newer.
+    pub(super) fn saturated(&self) -> bool {
+        let state = self.lock();
+        let budget = state.window.clamp(LANE_MIN_BUDGET, LANE_MAX_BUDGET);
+        state.outstanding >= budget || state.outstanding_frames >= LANE_BUDGET_FRAMES
+    }
+
+    fn set_window(&self, window: u64) {
+        self.lock().window = window;
+    }
+
+    /// A popped frame of `len` bytes is finished with (acknowledged, reset or abandoned).
+    pub(super) fn settle(&self, len: usize) {
+        let mut state = self.lock();
+        state.outstanding = state.outstanding.saturating_sub(len as u64);
+        state.outstanding_frames = state.outstanding_frames.saturating_sub(1);
     }
 
     /// Waits for the next frame; `None` once the lane is closed and drained. One consumer.
@@ -119,9 +199,9 @@ impl LaneQueue {
 const HEADER_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 const HEADER_WAIT_POLLS: u32 = 5;
 
-/// Streams still being sent (or awaiting the peer's acknowledgement), by sequence number;
-/// the sender cancels one to reset its stream.
-type InFlight = Arc<Mutex<BTreeMap<u64, oneshot::Sender<()>>>>;
+/// Streams still being sent (or awaiting the peer's acknowledgement), by sequence number and
+/// copy; the sender cancels one to reset its stream.
+type InFlight = Arc<Mutex<BTreeMap<(u64, u8), oneshot::Sender<()>>>>;
 
 /// Keeper-side render sender for one QUIC leg (runs on the QuicAcceptor runtime).
 pub(super) struct RenderLane;
@@ -148,57 +228,213 @@ fn priority(seq: u64, class: FrameClass) -> i32 {
     }
 }
 
+/// Chained frames go out twice while at least this share of the leg's packets are being lost
+/// (and once again when the share falls to `SINGLE_BELOW_PERCENT`).
+///
+/// Frames are delivered in order, so the one frame that needs a third or fourth round of
+/// retransmission holds up every frame behind it: at 10 % loss, 150 ms each way and 45-packet
+/// frames that was one second without a screen change roughly once in 20 s. The two copies
+/// ride separate streams and lose packets independently, so the later of the two is far less
+/// likely to be late; the bridge keeps whichever completes first.
+const DOUBLE_ABOVE_PERCENT: u64 = 3;
+const SINGLE_BELOW_PERCENT: u64 = 1;
+/// Fewer packets than this in the last second say nothing about the loss rate.
+const MIN_LOSS_SAMPLE: u64 = 20;
+
+/// Whether chained frames are sent twice, given the packets sent and lost in the last second.
+fn lossy(sent: u64, lost: u64, was_lossy: bool) -> bool {
+    if sent < MIN_LOSS_SAMPLE {
+        was_lossy
+    } else if lost * 100 >= sent * DOUBLE_ABOVE_PERCENT {
+        true
+    } else if lost * 100 <= sent * SINGLE_BELOW_PERCENT {
+        false
+    } else {
+        was_lossy
+    }
+}
+
 async fn run(conn: quinn::Connection, queue: LaneQueue) {
     let in_flight: InFlight = Arc::default();
     let mut seq = 0u64;
+    let mut tick = tokio::time::interval(TICK);
+    let mut ticks = 0u32;
+    let mut double = false;
+    let mut counted = (0u64, 0u64);
     loop {
         let frame = tokio::select! {
             frame = queue.pop() => frame,
             _ = conn.closed() => None,
+            _ = tick.tick() => {
+                let stats = conn.stats();
+                queue.set_window(stats.path.cwnd);
+                ticks += 1;
+                if ticks.is_multiple_of(TICKS_PER_SECOND) {
+                    let (sent, lost) = (stats.path.sent_packets, stats.path.lost_packets);
+                    double = lossy(sent - counted.0, lost - counted.1, double);
+                    counted = (sent, lost);
+                    if queue.inner.trace.is_some() {
+                        trace_stats(&conn, &queue, &in_flight, double);
+                    }
+                }
+                continue;
+            }
         };
         let Some((class, bytes)) = frame else { break };
-        let opened = tokio::select! {
-            opened = conn.open_uni() => opened.ok(),
-            _ = conn.closed() => None,
-        };
-        let Some(mut send) = opened else { break };
+        let settle = Settle(queue.clone(), bytes.len());
+        let popped = Instant::now();
         let this = seq;
         seq += 1;
-        // Before any data is written: a priority change does not move data already queued.
-        let _ = send.set_priority(priority(this, class));
         let header = RenderHeader {
             seq: this,
             class: class.wire_byte(),
         };
-        let sent_before = conn.stats().udp_tx.datagrams;
-        if send.write_all(&header.encode()).await.is_err() {
-            continue;
-        }
+        let first = tokio::select! {
+            opened = open_stream(&conn, this, class, &header) => opened,
+            _ = conn.closed() => None,
+        };
+        let Some(first) = first else { break };
         if class == FrameClass::SelfContained {
-            header_on_the_wire(&conn, sent_before).await;
+            // The header is on its way; now everything older is superseded.
+            let resets = supersede(&in_flight);
+            queue.trace(
+                "lane_supersede",
+                serde_json::json!({"seq": this, "resets": resets}),
+            );
         }
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        {
-            let mut streams = in_flight.lock().unwrap_or_else(|e| e.into_inner());
-            if class == FrameClass::SelfContained {
-                // The new header is written; now everything older is superseded.
-                for (_, cancel) in std::mem::take(&mut *streams) {
-                    let _ = cancel.send(());
+        let copies = if double && class == FrameClass::Chained { 2u8 } else { 1 };
+        queue.trace(
+            "lane_frame",
+            serde_json::json!({
+                "seq": this,
+                "class": format!("{class:?}"),
+                "bytes": bytes.len(),
+                "open_ms": popped.elapsed().as_millis() as u64,
+                "copies": copies,
+            }),
+        );
+        let mut settle = Some(settle);
+        let mut first = Some(first);
+        for copy in 0..copies {
+            let mut send = match first.take() {
+                Some(stream) => stream,
+                None => {
+                    let second = tokio::select! {
+                        opened = open_stream(&conn, this, class, &header) => opened,
+                        _ = conn.closed() => None,
+                    };
+                    match second {
+                        Some(stream) => stream,
+                        None => break,
+                    }
                 }
-            }
-            streams.insert(this, cancel_tx);
+            };
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((this, copy), cancel_tx);
+            let in_flight = Arc::clone(&in_flight);
+            let queue = queue.clone();
+            let bytes = bytes.clone();
+            // The frame is settled when its first copy is: the second one adds no latency.
+            let settle = settle.take();
+            tokio::spawn(async move {
+                let _settle = settle;
+                let len = bytes.len();
+                let outcome = tokio::select! {
+                    acked = send_body(&mut send, bytes) => if acked { "acked" } else { "error" },
+                    _ = cancel_rx => {
+                        let _ = send.reset(0u32.into());
+                        "reset"
+                    }
+                };
+                in_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(this, copy));
+                queue.trace(
+                    "lane_stream",
+                    serde_json::json!({
+                        "seq": this,
+                        "copy": copy,
+                        "outcome": outcome,
+                        "bytes": len,
+                        "ms_open": popped.elapsed().as_millis() as u64,
+                    }),
+                );
+            });
         }
-        let in_flight = Arc::clone(&in_flight);
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = send_body(&mut send, bytes) => {}
-                _ = cancel_rx => {
-                    let _ = send.reset(0u32.into());
-                }
-            }
-            in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&this);
-        });
     }
+}
+
+/// Opens a uni stream for frame `seq` and writes its header. Before any data is written: a
+/// priority change does not move data already queued. A self-contained frame's header is
+/// then waited onto the wire, ahead of the resets it precedes.
+async fn open_stream(
+    conn: &quinn::Connection,
+    seq: u64,
+    class: FrameClass,
+    header: &RenderHeader,
+) -> Option<quinn::SendStream> {
+    let mut send = conn.open_uni().await.ok()?;
+    let _ = send.set_priority(priority(seq, class));
+    let sent_before = conn.stats().udp_tx.datagrams;
+    send.write_all(&header.encode()).await.ok()?;
+    if class == FrameClass::SelfContained {
+        header_on_the_wire(conn, sent_before).await;
+    }
+    Some(send)
+}
+
+/// Cancels every stream in flight; returns how many.
+fn supersede(in_flight: &InFlight) -> usize {
+    let streams = std::mem::take(&mut *in_flight.lock().unwrap_or_else(|e| e.into_inner()));
+    let resets = streams.len();
+    for (_, cancel) in streams {
+        let _ = cancel.send(());
+    }
+    resets
+}
+
+/// Settles a frame's bytes in the queue's budget when its stream task (or an early exit) ends.
+struct Settle(LaneQueue, usize);
+
+impl Drop for Settle {
+    fn drop(&mut self) {
+        self.0.settle(self.1);
+    }
+}
+
+/// How often the lane reads the congestion window for its budget and the loss rate.
+const TICK: Duration = Duration::from_millis(100);
+const TICKS_PER_SECOND: u32 = 10;
+
+fn trace_stats(conn: &quinn::Connection, queue: &LaneQueue, in_flight: &InFlight, double: bool) {
+    let stats = conn.stats();
+    let (queued, cleared, rejected, outstanding) = {
+        let state = queue.lock();
+        (state.frames.len(), state.cleared, state.rejected, state.outstanding)
+    };
+    let streams = in_flight.lock().unwrap_or_else(|e| e.into_inner()).len();
+    queue.trace(
+        "lane_stats",
+        serde_json::json!({
+            "cwnd": stats.path.cwnd,
+            "rtt_ms": stats.path.rtt.as_millis() as u64,
+            "sent_packets": stats.path.sent_packets,
+            "lost_packets": stats.path.lost_packets,
+            "congestion_events": stats.path.congestion_events,
+            "udp_tx": stats.udp_tx.datagrams,
+            "udp_rx": stats.udp_rx.datagrams,
+            "queued": queued,
+            "cleared": cleared,
+            "rejected": rejected,
+            "streams": streams,
+            "outstanding": outstanding,
+            "double": double,
+        }),
+    );
 }
 
 /// Waits (bounded) until the connection has sent a datagram since `sent_before`, so the
@@ -216,11 +452,11 @@ async fn header_on_the_wire(conn: &quinn::Connection, sent_before: u64) {
 
 /// Writes the body, finishes the stream, then waits for the peer to acknowledge it all, so
 /// the stream stays resettable while any of it is unacknowledged on a lossy link.
-async fn send_body(send: &mut quinn::SendStream, bytes: Vec<u8>) {
+async fn send_body(send: &mut quinn::SendStream, bytes: Vec<u8>) -> bool {
     if send.write_all(&bytes).await.is_err() || send.finish().is_err() {
-        return;
+        return false;
     }
-    let _ = send.stopped().await;
+    send.stopped().await.is_ok()
 }
 
 /// A loopback QUIC connection pair for lane tests: the server side with a lane spawned on
@@ -392,6 +628,72 @@ mod tests {
         queue.close();
         assert_eq!(queue.offer(FrameClass::SelfContained, vec![1]), Offer::Rejected);
         assert_eq!(queue.offer(FrameClass::Chained, vec![1]), Offer::Rejected);
+    }
+
+    #[test]
+    fn frame_budget_saturates_at_24_frames() {
+        let queue = LaneQueue::new();
+        for _ in 0..LANE_BUDGET_FRAMES - 1 {
+            queue.offer(FrameClass::Chained, vec![1]);
+        }
+        assert!(!queue.saturated());
+        queue.offer(FrameClass::Chained, vec![1]);
+        assert!(queue.saturated());
+    }
+
+    #[test]
+    fn byte_budget_is_the_window_between_its_bounds() {
+        let queue = LaneQueue::new();
+        // No window read yet: the floor.
+        queue.offer(FrameClass::Chained, vec![0; LANE_MIN_BUDGET as usize - 1]);
+        assert!(!queue.saturated());
+        queue.offer(FrameClass::Chained, vec![0]);
+        assert!(queue.saturated(), "{LANE_MIN_BUDGET} bytes fill the floor");
+        // A window of 300 kB lets more in ...
+        queue.set_window(300_000);
+        assert!(!queue.saturated());
+        queue.offer(FrameClass::Chained, vec![0; 235_000]);
+        assert!(queue.saturated());
+        // ... and a window past the ceiling does not.
+        queue.set_window(u64::MAX);
+        queue.offer(FrameClass::Chained, vec![0; LANE_MAX_BUDGET as usize]);
+        assert!(queue.saturated());
+    }
+
+    #[test]
+    fn settling_frees_the_budget_and_a_self_contained_offer_resets_it() {
+        let queue = LaneQueue::new();
+        queue.offer(FrameClass::Chained, vec![0; LANE_MIN_BUDGET as usize]);
+        assert!(queue.saturated());
+        let rt = runtime();
+        let (_, frame) = rt.block_on(queue.pop()).unwrap();
+        // Popped is not settled: the bytes are on their way and unacknowledged.
+        assert!(queue.saturated());
+        queue.settle(frame.len());
+        assert!(!queue.saturated());
+        // Queued frames a self-contained one clears leave the count with it.
+        for _ in 0..LANE_BUDGET_FRAMES {
+            queue.offer(FrameClass::Chained, vec![0]);
+        }
+        assert!(queue.saturated());
+        queue.offer(FrameClass::SelfContained, vec![0]);
+        assert!(!queue.saturated());
+        assert_eq!(queue.lock().outstanding_frames, 1);
+        assert_eq!(queue.lock().outstanding, 1);
+    }
+
+    #[test]
+    fn loss_decides_when_frames_go_twice() {
+        // 10 % lost: double. Under 1 %: single. In between: whatever it was.
+        assert!(lossy(100, 10, false));
+        assert!(!lossy(100, 0, true));
+        assert!(!lossy(1000, 10, true));
+        assert!(lossy(100, 2, true));
+        assert!(!lossy(100, 2, false));
+        assert!(lossy(100, 3, false), "3 % is the threshold");
+        // Too few packets to tell: keep the previous answer.
+        assert!(lossy(MIN_LOSS_SAMPLE - 1, 19, true));
+        assert!(!lossy(MIN_LOSS_SAMPLE - 1, 19, false));
     }
 
     mod lane {

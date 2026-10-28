@@ -1,0 +1,27 @@
+== mosh_supersede
+        PASS [   7.271s] (18/21) herdr::mosh_supersede patch_burst_under_20pct_loss_on_ssh_no_disconnect
+        PASS [   8.352s] (19/21) herdr::mosh_supersede plain_client_receives_no_fork_frames
+        PASS [  15.227s] (20/21) herdr::mosh_supersede stripped_supersede_capability_no_split
+        PASS [  54.660s] (21/21) herdr::mosh_supersede quic_ssh_quic_under_loss_one_resync_per_resume
+────────────
+     Summary [  54.676s] 21 tests run: 21 passed, 4 skipped
+== mosh_quic
+        PASS [   0.576s] (10/13) herdr::mosh_quic bootstrap_port_rewrite_produces_a_parseable_line
+        PASS [   0.867s] (11/13) herdr::mosh_quic strip_quic_capability_gives_ssh_only_session
+        PASS [   1.107s] (12/13) herdr::mosh_quic old_keeper_bootstrap_none_plain_ssh_mosh_leg
+        PASS [   1.146s] (13/13) herdr::mosh_quic quic_in_use_no_ssh_child_and_echo_works
+────────────
+     Summary [   1.147s] 13 tests run: 13 passed, 6 skipped
+== mosh_predict
+    remote_attach
+    server_headless
+    session_delete
+    session_restore
+    windows_server_security
+error: command `/var/home/alepar/.rustup/toolchains/1.96.1-x86_64-unknown-linux-gnu/bin/cargo '--color=auto' test --no-run --message-format json-render-diagnostics --test mosh_predict --locked` exited with code 101
+== unit
+        PASS [   8.113s] (382/383) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::health_margin_stall_after_ping
+        PASS [  20.241s] (383/383) herdr::bin/herdr remote::attach::mosh::local_bridge::tests::reconnect_bound_before_welcome_is_retried
+────────────
+     Summary [  20.280s] 383 tests run: 383 passed, 3799 skipped
+DONE

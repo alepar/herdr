@@ -211,6 +211,9 @@ pub mod knob {
     /// Every session leg ends like an unreachable host (`ssh` exit 255, "Connection timed
     /// out": retryable on a reconnect leg), as a network that drops all traffic does.
     pub const SSH_DOWN: &str = "ssh-down";
+    /// Plain bridges started while set tee their server-to-client bytes into `plain-tap`
+    /// (see `Remote::plain_tap`).
+    pub const TAP_PLAIN: &str = "tap-plain";
 }
 
 /// Perl filter the fake `ssh` puts on a session leg's stdout while the `quic-port` knob is set
@@ -537,6 +540,11 @@ impl Remote {
         })
     }
 
+    /// Server-to-client bytes of every plain bridge started under `knob::TAP_PLAIN`.
+    pub fn plain_tap(&self) -> Vec<u8> {
+        fs::read(self.base.join("plain-tap")).unwrap_or_default()
+    }
+
     pub fn trace_dir(&self) -> PathBuf {
         self.base.join("trace")
     }
@@ -609,6 +617,10 @@ if [ "$kind" != other ] && [ -e "$K/throttle" ]; then
   {throttle} | /bin/sh -c "$last" | {throttle}
   exit $?
 fi
+if [ "$kind" = plain ] && [ -e "$K/tap-plain" ]; then
+  /bin/sh -c "$last" | tee -a {tap}
+  exit $?
+fi
 exec /bin/sh -c "$last"
 "#,
                 home = env("home"),
@@ -625,6 +637,7 @@ exec /bin/sh -c "$last"
                 delay_line = delay_line,
                 links = links,
                 port_filter = port_filter,
+                tap = sh_quote(&base.join("plain-tap")),
             ),
         );
         write_executable(

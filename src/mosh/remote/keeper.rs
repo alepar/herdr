@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use super::chain_gate::{ChainGate, LegState, Route};
 use super::keeper_leg::{KeeperLeg, LegShutdown};
 use super::quic_acceptor::{self, OnConn, QuicAcceptor, QuicConn, TokenVerdict};
-use super::render_lane::{LaneQueue, Offer};
+use super::render_lane::{LaneQueue, LaneTrace, Offer};
 use super::rendezvous::{self, KeeperRendezvous};
 use crate::remote::attach::mosh::link_frames::{encode_resync_frame, FrameClass, FrameSplitter};
 use crate::remote::attach::mosh::quic_bootstrap::QuicBootstrap;
@@ -531,7 +531,11 @@ fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Ad
         return Ok(None);
     }
     reader.set_read_timeout(None);
-    let leg = quic_acceptor::keeper_leg(&handle, conn, Box::new(reader), Box::new(writer));
+    let trace: Option<LaneTrace> = shared.trace_dir.is_some().then(|| {
+        let shared = Arc::clone(shared);
+        Arc::new(move |event: &str, fields: Value| shared.trace_keeper(event, fields)) as LaneTrace
+    });
+    let leg = quic_acceptor::keeper_leg(&handle, conn, Box::new(reader), Box::new(writer), trace);
     admit(shared, leg, hello)
 }
 
@@ -895,8 +899,17 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
                 match table.sessions.get(&token) {
                     Some(session) if session.gen == gen => {
                         let size = session.endpoint.source_read_size();
-                        if size > 0 {
+                        if size > 0 && !lane_saturated(session) {
                             break size;
+                        }
+                        if size > 0 {
+                            // The lane frees room without a kick: look again shortly.
+                            table = shared
+                                .kick
+                                .wait_timeout(table, LANE_RECHECK)
+                                .unwrap_or_else(|e| e.into_inner())
+                                .0;
+                            continue;
                         }
                     }
                     _ => return,
@@ -920,7 +933,7 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
             return;
         }
         if session.render_split {
-            if let Err(reason) = route_frames(session, &mut splitter, &buf[..n]) {
+            if let Err(reason) = route_frames(shared, session, &mut splitter, &buf[..n]) {
                 shared.close_session(&mut table, token, reason);
                 return;
             }
@@ -932,37 +945,101 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
     }
 }
 
+/// How often a reader held back by a full render lane looks again.
+const LANE_RECHECK: Duration = Duration::from_millis(5);
+
+/// A render-split session whose lane holds all it should: the server is left unread.
+fn lane_saturated(session: &Session) -> bool {
+    session.render_split
+        && session
+            .leg
+            .as_ref()
+            .and_then(|slot| slot.lane.as_ref())
+            .is_some_and(LaneQueue::saturated)
+}
+
 /// Split `bytes` into whole frames and send each where the gate routes it. `Err` carries the
 /// reason to close the session with.
 fn route_frames(
+    shared: &Shared,
     session: &mut Session,
     splitter: &mut FrameSplitter,
     bytes: &[u8],
 ) -> Result<(), &'static str> {
     let frames = splitter.push(bytes).map_err(|_| "oversized-frame")?;
+    let mut counts = RouteCounts::default();
     for frame in frames {
         let class = FrameClass::of(&frame);
+        counts.add(class, frame.len());
         let leg = match &session.leg {
             None => LegState::Down,
             Some(slot) if slot.lane.is_some() => LegState::UpLane,
             Some(_) => LegState::UpNoLane,
         };
         match session.gate.route(class, leg) {
-            Route::Ring => session
-                .endpoint
-                .push_source(&frame)
-                .map_err(|_| end_reason::RING_OVERFLOW)?,
+            Route::Ring => {
+                counts.ring += 1;
+                session
+                    .endpoint
+                    .push_source(&frame)
+                    .map_err(|_| end_reason::RING_OVERFLOW)?
+            }
             Route::Lane => {
                 let lane = session.leg.as_ref().and_then(|slot| slot.lane.as_ref());
                 if lane.is_some_and(|lane| lane.offer(class, frame) == Offer::Rejected) {
                     let _inject = session.gate.lane_rejected();
                     let _ = session.to_server.send(ToServer::Resync);
+                    counts.rejected += 1;
+                } else {
+                    counts.lane += 1;
                 }
             }
-            Route::Drop => {}
+            Route::Drop => counts.dropped += 1,
         }
     }
+    counts.trace(shared, server_backlog(&session.server));
     Ok(())
+}
+
+/// What one read of the server stream turned into, for the trace (one line per read).
+#[derive(Default)]
+struct RouteCounts {
+    frames: u64,
+    bytes: u64,
+    self_contained: u64,
+    lane: u64,
+    ring: u64,
+    dropped: u64,
+    rejected: u64,
+}
+
+impl RouteCounts {
+    fn add(&mut self, class: FrameClass, len: usize) {
+        self.frames += 1;
+        self.bytes += len as u64;
+        if class == FrameClass::SelfContained {
+            self.self_contained += 1;
+        }
+    }
+
+    fn trace(&self, shared: &Shared, backlog: Option<u64>) {
+        if shared.trace_dir.is_none() || self.frames == 0 {
+            return;
+        }
+        shared.trace_keeper(
+            "route",
+            json!({
+                "frames": self.frames,
+                "bytes": self.bytes,
+                "self_contained": self.self_contained,
+                "lane": self.lane,
+                "ring": self.ring,
+                "dropped": self.dropped,
+                "rejected": self.rejected,
+                "server_backlog": backlog,
+            }),
+        );
+    }
 }
 
 /// Writes client bytes to the server; acks are released only after the write. A render-split
@@ -2427,6 +2504,48 @@ mod tests {
             queued += 1;
         }
         assert_eq!(queued, 64);
+    }
+
+    #[test]
+    fn a_saturated_lane_leaves_the_server_unread_until_it_settles() {
+        use super::super::render_lane::LANE_BUDGET_FRAMES;
+
+        let dir = TestDir::new();
+        let server = FakeServer::start(&dir.0.join("server.sock"));
+        let session = lane_session(dir.0.join("server.sock"));
+        let lane = session.lane.clone();
+        let conn = server.conn(0);
+        let queued = |lane: &LaneQueue| lane.lock_for_test().frames.len();
+        let budget = LANE_BUDGET_FRAMES as usize;
+
+        // One frame at a time, so the keeper has read each before the next is written.
+        for id in 0..budget {
+            conn.write(&frame(CHAINED, id as u8));
+            assert!(
+                wait_until(Duration::from_secs(5), || queued(&lane) == id + 1),
+                "frame {id} never reached the lane"
+            );
+        }
+        assert!(lane.saturated());
+
+        // More frames wait in the server's socket: the keeper does not read them.
+        for id in budget..budget + 3 {
+            conn.write(&frame(CHAINED, id as u8));
+        }
+        thread::sleep(Duration::from_millis(400));
+        assert_eq!(queued(&lane), budget, "the keeper read past a saturated lane");
+
+        // Settling the frames in flight reopens the lane to the waiting ones.
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        for _ in 0..budget {
+            let (_, bytes) = rt.block_on(lane.pop()).unwrap();
+            lane.settle(bytes.len());
+        }
+        assert!(
+            wait_until(Duration::from_secs(5), || queued(&lane) == 3),
+            "the waiting frames never arrived: {}",
+            queued(&lane)
+        );
     }
 
     #[test]
