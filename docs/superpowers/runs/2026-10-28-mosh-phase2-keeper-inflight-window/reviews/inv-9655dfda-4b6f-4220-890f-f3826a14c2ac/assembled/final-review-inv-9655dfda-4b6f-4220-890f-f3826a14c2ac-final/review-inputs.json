@@ -1,0 +1,608 @@
+{
+  "base": "5608de0608918aba2f9d501e7793b984a0ca9cfa",
+  "head": "42b512f7cd8c106032ac69764768d33b55fb4f3e",
+  "sourceAvailable": true,
+  "wholeRangeReady": false,
+  "status": "unavailable",
+  "changed": [
+    "HERDR_MOSH_VISION.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1-step-back.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-design-3.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-final-review-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-punch-list.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-scope-dispositions.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-scope-filter.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-scope-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1-step-back.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-2-final-review-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-2-scope-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-2-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-2-step-back.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-final-review-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-punch-list.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-scope-dispositions.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-scope-filter.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-scope-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3-step-back.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-3.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-4-punch-list.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-4-scope-keys.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/2026-10-24-mosh-phase1-resumable-session-roast-pr-4.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/amend-code-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/amend-design-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-amend-design-1-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-findings-round-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-ledger.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-requirements.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-1-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-requirements.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/coverage-round-2-review-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/README.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/events.log",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/pj-drop.log",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/pj.py",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/ptyrun.py",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/run.sh",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/escalation-checks/run2.sh",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/phase6-attribution.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/phase6-sweep.log",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/evidence/run-start-baseline.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-ledger-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-ledger.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-overrides-design.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/findings-overrides.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/friction.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-mosh-touch-map.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/herdr-remote-report.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/mosh-report.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-amend1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-code-amend1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/inputs/task-tree-r2.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv1.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv2.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv3.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv3.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv4.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/profile-inv4.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/report.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/bounded-coverage.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/bounded-draft.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/diffstat.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/generated-input-provenance.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/review-inputs.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/bounded-coverage.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/bounded-draft.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/diffstat.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/generated-input-provenance.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/review-inputs.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/clusters.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/diffstat.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/digest.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/generated-input-provenance.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/review-inputs.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000001.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000002.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000003.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000004.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000005.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000006.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000007.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000008.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000009.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000010.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000011.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000012.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000013.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000014.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000015.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000016.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000017.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000018.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000019.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000020.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000021.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000022.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000023.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000024.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000025.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000026.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000027.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000028.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000029.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000030.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000031.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000032.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000033.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000034.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000035.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000036.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000037.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000038.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000039.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000040.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000041.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000042.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000043.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000044.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000045.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000046.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000047.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000048.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000049.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000050.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000051.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000052.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000053.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000054.diff",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-1.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-2.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-3.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-4.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-5.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-6.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-7.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-8.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/bounded-coverage.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/bounded-draft.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/diffstat.txt",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/generated-input-provenance.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/review-inputs.json",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+    "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/upstream-feedback-draft.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-design.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1-step-back-keys.txt",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1-step-back.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-1.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/2026-10-28-mosh-phase2-keeper-inflight-window-roast-design-2.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-findings-round-1.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-findings-round-2.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-ledger.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-round-1-requirements.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-round-1-review-1.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/coverage-round-1-review-2.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/evidence/phase2-baseline.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/findings-ledger-design.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/findings-overrides-design.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/friction.md",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/inputs/task-tree-r1.json",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/inputs/task-tree-r2.json",
+    "docs/superpowers/runs/2026-10-28-mosh-phase2-keeper-inflight-window/run.md",
+    "docs/superpowers/specs/INDEX.md",
+    "scripts/mosh-diff-budget.sh",
+    "src/cli/status.rs",
+    "src/client/mod.rs",
+    "src/client/shell/composition.rs",
+    "src/mosh/link_frames.rs",
+    "src/mosh/local_bridge.rs",
+    "src/mosh/mod.rs",
+    "src/mosh/outage.rs",
+    "src/mosh/remote/attacher.rs",
+    "src/mosh/remote/keeper.rs",
+    "src/mosh/remote/mod.rs",
+    "src/mosh/ring.rs",
+    "src/mosh/session.rs",
+    "src/mosh/ssh_leg.rs",
+    "src/mosh/window.rs",
+    "src/remote/attach.rs",
+    "src/remote/host.rs",
+    "src/remote/saved.rs",
+    "src/update.rs",
+    "tests/mosh_fallback.rs",
+    "tests/mosh_harness.rs",
+    "tests/mosh_integration.rs",
+    "tests/mosh_multi_client.rs",
+    "tests/mosh_pacing.rs",
+    "tests/mosh_resume.rs",
+    "tests/mosh_status.rs"
+  ],
+  "slices": [],
+  "archives": [
+    {
+      "revision": "42b512f7cd8c106032ac69764768d33b55fb4f3e",
+      "run": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+      "recordLine": 43,
+      "invocationId": "inv-c723b6b8-ffc9-416e-96bd-5c1052097e03",
+      "archive": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03",
+      "report": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-c723b6b8-ffc9-416e-96bd-5c1052097e03/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.md",
+      "files": [
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/clusters.json",
+          "sha256": "478b4a3816844473bbd0cd260a14665dc7571201418096fb93f5ae6ca86b53ee"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/diffstat.txt",
+          "sha256": "71cc7455ea085f6c1d94f67bac2a3e43e2a8e9949d717388673d232c691a5222"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/digest.md",
+          "sha256": "325a69312a0aef8cd0b2f2568735894fa5289dd71b308d17be8524b97f0e4205"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/generated-input-provenance.md",
+          "sha256": "1fcb2c66dfca84d44fe185d3334526d6d9fef5a7fc22efd9634a1351e8c8fc57"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/review-inputs.json",
+          "sha256": "50e3cfe30e5b78aac98eaf9dd9dca1b45ca0338fcf9b71ae11c556ad1c0f344e"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000001.diff",
+          "sha256": "cca8bff95e4cbe2495c5ee42f1e66d161b31ea8e1e84be69647d0a0518c08f7d"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000002.diff",
+          "sha256": "76d5f0a7057dac3bce57c2693af45f6cacf786eacf1bcf19d06c8a59f9d0cd27"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000003.diff",
+          "sha256": "0ebab315b162023fc7469325778e18072c277cc5dd056f0cbcc189fa2f45bb53"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000004.diff",
+          "sha256": "121fcdbae6efa2d5906f2f55849f468729b6935b72725df8c583847476fa2276"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000005.diff",
+          "sha256": "7796600bfde58bcae5e35ed313190c6378f1eb7ce9c23ce0e2f3896ea59d9b87"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000006.diff",
+          "sha256": "d46e28ec0bdb2fdd1e3a983ba87523a35b6e6eace851227c315863763f46fd1c"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000007.diff",
+          "sha256": "ddb2f5d466c791b7ec5637006ef00bc8ff7347d1c40e9c42d6434d71cae60fd4"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000008.diff",
+          "sha256": "c21a4a39cf1d31675581cc0faa806e0a75c93c9f75ab2e280ffacb2614b5b7f9"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000009.diff",
+          "sha256": "1738bb6f1c7ed523484e4f1374069f63ec38b332e42d95bef91cc14e154f7e72"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000010.diff",
+          "sha256": "913cf936b15d606b509b3f983403f89b7d775db8e3675c9b79dacb86deb0e897"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000011.diff",
+          "sha256": "4a5a0ed9ad5b244931c8f8f1020c6bfb2d20eaa2a55edd980d322d409db9d871"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000012.diff",
+          "sha256": "bb4bee7507c71e7bf340b23a3ecccbc1845b32207ce288c0ce80aa56eb828d38"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000013.diff",
+          "sha256": "41b6e3f466712f38fdaf7da2c153ef9cec8233cf251c9533e65ff04da29fb9dd"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000014.diff",
+          "sha256": "8bc2b58fa9fe0bf43247670dd6d54ce6da784109af4ca34090eb543763b1341a"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000015.diff",
+          "sha256": "5a8c4914207628f8ab6dd5b0ed9e76ae8b0bc358cf5ce3046958f0326f428d97"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000016.diff",
+          "sha256": "a083e0ed91b125da1556dd09f55761aadc02073d7c4fcec7beab2820f03f8a22"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000017.diff",
+          "sha256": "c48879e8904e94266a88974e4ca65992e32bcc5bd69dd40c32382d27992d9110"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000018.diff",
+          "sha256": "4ffbde26c8a5ab80037c9abbd396372982b3c36a81eb90327f03024c31d28f92"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000019.diff",
+          "sha256": "1db7d1fd6bef829e19047292860f419c83ea20c568f3fd6b342155ccef39c408"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000020.diff",
+          "sha256": "6d46bea8928e3a00fc89d9b876d5c13ae60699a1d0db1e3776fa8606daf541e2"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000021.diff",
+          "sha256": "9f72f6a429164042d25afa0eb84ffcfbfe71f412b36946bedf416b9394bf2b16"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000022.diff",
+          "sha256": "33837b075e6379bd165a76e5c8634c96e3acb098620ada381f271f553678b29a"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000023.diff",
+          "sha256": "aadd00ad04950f7d64f7b071abbad7de6532407d520ba1dfb8389e9eb8315e9f"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000024.diff",
+          "sha256": "401c216843f125d4a2119c5572b4b9ba5249ef6a6af5bc274d766a002e2c62c9"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000025.diff",
+          "sha256": "cc0c79b985df6050704530103412edca797f1a086782a60bdd675c8e1a6e6971"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000026.diff",
+          "sha256": "a38cb7973b3ec6ee8e98bcbd2650d5b6d567d91e03ad52e150ac1d11f579b208"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000027.diff",
+          "sha256": "75d26d674f50e7e3aaffc850d93a643544ba827eb5ee89ad7a8d96db799bc1b8"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000028.diff",
+          "sha256": "8d58de9c6064206c13d0d958c214f1c7165dceec33a70752862d3c929eea362d"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000029.diff",
+          "sha256": "656e88f62b0f998749e114916081f6b51ea6497b517d27b6712ba80dcb501c58"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000030.diff",
+          "sha256": "6e45fd20875898056d65d45ed603824bb3a4925ef767eb6d3c33f165e91a9b33"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000031.diff",
+          "sha256": "bd166855cc1317bf99c56e46d0e03a814d7ebaaa8bb410e428eba4a5bbda4e71"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000032.diff",
+          "sha256": "d03a5ef81dc100a9342d1585b02ae657f8dac7967ed183ce1af05e1def9514ad"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000033.diff",
+          "sha256": "d38c2b610f43ea9ce1f6b2ce2674b76eb7366453b3da61cec5a9d852174ffdd4"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000034.diff",
+          "sha256": "42353cc9dbf82aec41c29577ac8e1ee1b364ed9599bfc73bf6d9f17354e94a09"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000035.diff",
+          "sha256": "993e90609136fae4272363a36e037deeb10e31ba3c19b22a3ba74c44a897d0d0"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000036.diff",
+          "sha256": "c1aa91182d0d4b3c12106bbb6ba7098b5f08b063f56f8001f4fb8401b9ab7d4a"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000037.diff",
+          "sha256": "42d9a8b4a6de12788679a3b62d060935ac9f9c01b3bcd2b0a880a868760c043e"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000038.diff",
+          "sha256": "42a546a98533b9f5b60ff1b77b537c0e0e1f800f2e4e00bbe6585290844b0f2c"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000039.diff",
+          "sha256": "477d3b0d405275078a1dbd7bf54756020af03234e2c6bfda9359d3628dcd681d"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000040.diff",
+          "sha256": "44d2a1b93bcf6a85f67b4321891976b7014c16ace149bcfa2a8ce768843ce2fd"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000041.diff",
+          "sha256": "61a9e462d3857005c2e2a37b63a96930c89b3eb1bf9a56f0db3c69ddcd753f96"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000042.diff",
+          "sha256": "f6ebc7e379afaf607966084eed34b6e8fbffde0041ea9dc8e8ef21d57743461b"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000043.diff",
+          "sha256": "89a816e9c22114b1570505caa776853e99fd294220de58824320ded84209623d"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000044.diff",
+          "sha256": "c5355cbc3f7fa8157d319fe41db986199970465430fc4b399908cbd4bab62672"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000045.diff",
+          "sha256": "d4ae79051d3d71ca6dd3582869b018464f106e8db153d4a64d572ade7b62e803"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000046.diff",
+          "sha256": "bf0d0fa547f092f1c7284637b1f0e7c5a91efbb3c54df2296339ec01e93295e2"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000047.diff",
+          "sha256": "ebca5a7d6fb87002fda5cced51f348ed290bf02e53c27764d222ca62a7443894"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000048.diff",
+          "sha256": "734ffe175f8375ed7b5acce29221bd27f8b3c5535480ea56994c73075443a109"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000049.diff",
+          "sha256": "b1e6f743c80ee7f2b9006277040a6a57a400d470b467df91b15f7615d566fed3"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000050.diff",
+          "sha256": "8f4a121349a2ee783a42aa1538afb9681a6383da724639d6739503d3e3d1f601"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000051.diff",
+          "sha256": "39406ae67674a5b1547db7f0d1a1dcda863e69a1938c5572a76085910a1c5a68"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000052.diff",
+          "sha256": "efa87f3aab8a6c7f16420883d9aae38655a109574492d0da11e0fe19cffb5d52"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000053.diff",
+          "sha256": "319bff7db50e5a11393f9906efe500d4d10308d0d51e8fdc6d769a973cf22a34"
+        },
+        {
+          "path": "assembled/final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03-final/slices/000054.diff",
+          "sha256": "b9930f86593b0551ccc8f12785d87f0a2f317d58b6dc3fb5c1ccee84a4fe7bc6"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-1.md",
+          "sha256": "998cc62705ab593845fe34765e98753017f6cd95e4577acb233784ef952f7d32"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-2.md",
+          "sha256": "aff6816c24cf58877fc5a811cd41fe5d47692564d2a1662fbd041e8eb9c9a66a"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-3.md",
+          "sha256": "fb80fdc053b1ba05d80c222214a3318426ba2195149e8f456797d76c2e6f9d1e"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-4.md",
+          "sha256": "9a5bd47946460921770bdd4fff5344c8d16c9a0c080666ca5eae727412f5d2cb"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-5.md",
+          "sha256": "3b9bba1e6973271c5387a68f78cefcc5f1cbb41f03c77b3f5d746fc443d8e4e8"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-6.md",
+          "sha256": "a68e5c7bf380891334f1b2a5e6b5d605a836d2507fe251f0d30432e4895a1e36"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-7.md",
+          "sha256": "0f659eef7bee896a29e181156a2681b91adbe6f0ca9448bcd1b30457a56683ef"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.cluster-8.md",
+          "sha256": "00685721b0397740b9ee779abe6ff9f85a73c9500d06992cb49b14478d263d66"
+        },
+        {
+          "path": "final-review-inv-c723b6b8-ffc9-416e-96bd-5c1052097e03.md",
+          "sha256": "a9219cb2299d59c815dc0ada590e0b02343d62e0d938bda77479d2913b7f6b93"
+        }
+      ]
+    },
+    {
+      "revision": "42b512f7cd8c106032ac69764768d33b55fb4f3e",
+      "run": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+      "recordLine": 48,
+      "invocationId": "inv-29e12973-5528-4a80-9636-b7c81b87f820",
+      "archive": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820",
+      "report": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-29e12973-5528-4a80-9636-b7c81b87f820/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820.md",
+      "files": [
+        {
+          "path": "assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/bounded-coverage.json",
+          "sha256": "c5c9611e9471138d1d6642a46cde6a6183d45628b665f5184e17fecaa1c6d4bc"
+        },
+        {
+          "path": "assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/bounded-draft.md",
+          "sha256": "ad0f5ec18cc6fc358aecb6bb4ad063c926e9527786a6f266cfcbb2585db4529e"
+        },
+        {
+          "path": "assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/diffstat.txt",
+          "sha256": "7a32b0973c31eb556ef73a0c5de7d71fe56a8619603a3393af31351a2f3f3d44"
+        },
+        {
+          "path": "assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/generated-input-provenance.md",
+          "sha256": "c203927a78788be274e0eb474d0406e4e9717d2fd07519d46265c7b6d2f357b3"
+        },
+        {
+          "path": "assembled/final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820-final/review-inputs.json",
+          "sha256": "d654e4b12e9d6613b467c80b122958093a51eb15d6fdd19fb3e5731c49c1a1a8"
+        },
+        {
+          "path": "final-review-inv-29e12973-5528-4a80-9636-b7c81b87f820.md",
+          "sha256": "ded79eeb0e45dc85ea9ba4007699c7a3964f6823732150af288f74fc88a04273"
+        }
+      ]
+    },
+    {
+      "revision": "42b512f7cd8c106032ac69764768d33b55fb4f3e",
+      "run": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+      "recordLine": 53,
+      "invocationId": "inv-9350a065-92b6-4559-8456-5c7f474804bb",
+      "archive": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb",
+      "report": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-9350a065-92b6-4559-8456-5c7f474804bb/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb.md",
+      "files": [
+        {
+          "path": "assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/bounded-coverage.json",
+          "sha256": "ae31c1746c7c06c345a0c59c8a17968778218673bb4c9701d2cc9a5ab0e40a46"
+        },
+        {
+          "path": "assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/bounded-draft.md",
+          "sha256": "17a87ac6cf23ffe3ecd7b9413b2bc4d101abef138eeb3ddb73681948e6319b91"
+        },
+        {
+          "path": "assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/diffstat.txt",
+          "sha256": "caa635fcb48431bffa5e1fe2abc8df0ec5d399a895d5ccb44450397d2671fa73"
+        },
+        {
+          "path": "assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/generated-input-provenance.md",
+          "sha256": "28688cd146fd1269ab2b47b38d843edc31075f85e956a59f5fa545763bcdf9a0"
+        },
+        {
+          "path": "assembled/final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb-final/review-inputs.json",
+          "sha256": "61e18b324cef2035f02e147e303d9c00166a6090fe1409818d502339ab970f70"
+        },
+        {
+          "path": "final-review-inv-9350a065-92b6-4559-8456-5c7f474804bb.md",
+          "sha256": "52c1971cb0394de6aafa9e7d6db93a987fa4e86ba9c622a4ba01789362ed98dc"
+        }
+      ]
+    },
+    {
+      "revision": "42b512f7cd8c106032ac69764768d33b55fb4f3e",
+      "run": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md",
+      "recordLine": 56,
+      "invocationId": "inv-ed080a9e-8cc4-431e-9718-215f84dd7131",
+      "archive": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131",
+      "report": "docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/reviews/inv-ed080a9e-8cc4-431e-9718-215f84dd7131/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131.md",
+      "files": [
+        {
+          "path": "assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/bounded-coverage.json",
+          "sha256": "5947d1c1c7f245ba01c9316749e898897c4f4b429833e6cf67414d11d1550d07"
+        },
+        {
+          "path": "assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/bounded-draft.md",
+          "sha256": "fcf20833ca997f78fd876bee1822252226c23677de0cf7d8dfcf66ed7330d407"
+        },
+        {
+          "path": "assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/diffstat.txt",
+          "sha256": "08aef5faa70e27e03e9f9145a8617d675ee053cb27e51d4d8379e7a27f5e0d78"
+        },
+        {
+          "path": "assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/generated-input-provenance.md",
+          "sha256": "85b8fdcc3fc9bc2c9d9d5635d1613a24d6fd9a1f297041798be70a2fcba2aa5f"
+        },
+        {
+          "path": "assembled/final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131-final/review-inputs.json",
+          "sha256": "9fa3883718b733be3e205dfca15dc9204347224da9115ce3a8a8719ca6d2f99a"
+        }
+      ]
+    }
+  ],
+  "collectionOrigins": [],
+  "omitted": [],
+  "gaps": [
+    "42b512f7cd8c106032ac69764768d33b55fb4f3e:docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:43 inv-c723b6b8-ffc9-416e-96bd-5c1052097e03: incomplete claimed collection",
+    "42b512f7cd8c106032ac69764768d33b55fb4f3e:docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:56 inv-ed080a9e-8cc4-431e-9718-215f84dd7131: incomplete claimed collection",
+    "42b512f7cd8c106032ac69764768d33b55fb4f3e:docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:56 inv-ed080a9e-8cc4-431e-9718-215f84dd7131: incomplete claimed final report",
+    "42b512f7cd8c106032ac69764768d33b55fb4f3e:docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:56 inv-ed080a9e-8cc4-431e-9718-215f84dd7131: invalid failed assembly archive: missing bounded evidence: final-review-inv-ed080a9e-8cc4-431e-9718-215f84dd7131.md",
+    "42b512f7cd8c106032ac69764768d33b55fb4f3e:docs/superpowers/runs/2026-10-24-mosh-phase1-resumable-session/run.md:56 inv-ed080a9e-8cc4-431e-9718-215f84dd7131: incomplete assembled bundle: digest.md"
+  ]
+}
