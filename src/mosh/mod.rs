@@ -17,6 +17,8 @@ mod quic;
 mod quic_bootstrap;
 #[cfg(unix)]
 mod quic_leg;
+#[cfg(unix)]
+mod render_reorder;
 mod ring;
 mod session;
 #[cfg(unix)]
