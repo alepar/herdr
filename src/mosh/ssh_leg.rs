@@ -90,7 +90,6 @@ pub(super) struct Leg {
 }
 
 impl Leg {
-    #[cfg(test)]
     pub(super) fn new(
         reader: Box<dyn io::Read + Send>,
         writer: Box<dyn io::Write + Send>,
@@ -471,6 +470,9 @@ pub(super) struct SshLegDialer {
     bootstrap_command: String,
     options: Option<ManagedSshOptions>,
     noninteractive: bool,
+    /// Test seam: builds each leg's command instead of ssh (the QUIC dialer's tests script legs).
+    #[cfg(test)]
+    pub(super) scripted: Option<Box<dyn Fn(LegKind) -> Command + Send>>,
 }
 
 /// How long bootstrap mode waits for the attacher's one line before treating it as `none`.
@@ -553,6 +555,8 @@ impl SshLegDialer {
             bootstrap_command: remote_command(quic),
             options: options.cloned(),
             noninteractive,
+            #[cfg(test)]
+            scripted: None,
         }
     }
 
@@ -563,6 +567,10 @@ impl SshLegDialer {
     }
 
     fn leg_command_for(&self, kind: LegKind, remote_command: &str) -> Command {
+        #[cfg(test)]
+        if let Some(scripted) = &self.scripted {
+            return scripted(kind);
+        }
         let mut command = Command::new("ssh");
         match kind {
             LegKind::Initial => {
