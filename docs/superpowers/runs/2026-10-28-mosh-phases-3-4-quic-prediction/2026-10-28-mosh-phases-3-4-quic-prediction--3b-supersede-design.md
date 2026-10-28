@@ -275,3 +275,27 @@ Digest:
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-10-28: measured timing at 10 % loss / 150 ms one-way (mosh-19g.2.7)
+
+Measured with `tests/mosh_supersede.rs` (`--run-ignored all`), dense flood (`base64 /dev/urandom`),
+QUIC leg through `UdpRelay` at 10 % loss in both directions and 150 ms one-way delay, loopback host.
+The bounds of section 6 are **missed**, and so is the parked escalation (loss-based congestion
+control against the 2 s bound):
+
+| pane (cols x rows) | typed marker visible after | seconds of 20 with no screen change | resyncs (gap) |
+|---|---|---|---|
+| 400 x 100 (the test's size) | not within 20 s | 18 | 1 to 2 |
+| 200 x 50 | 17.6 s | 14 | 3 |
+| 120 x 40 | 3.1 s | 10 | 2 to 4 |
+| 80 x 24 | 4.4 s | 9 | 9 to 11 |
+
+The full `PaneSurface` delivery time is not traced directly; the marker latency above is its
+upper bound whenever a resync was pending, and the resync counts show it was. The relay forwarded
+only about 8 to 40 packets/s down in these runs (cwnd at its floor under loss at 300 ms RTT), so
+the miss is congestion control and gap recovery, not the relay. Unmissed: at 0 % loss and 150 ms
+one-way a 20 s dense flood over QUIC (400 x 100) gave zero overdue-declared gaps and 11 MB
+delivered. Comparison, no loss possible on the leg: a Phase 1 ssh-only leg (150 ms one-way,
+1.3 MB/s) showed the marker after 0.6 s and no stalled second at 400 x 100. Follow-up needed:
+either relax the 2 s / 1 s bounds for lossy links or improve recovery (for example resync
+without waiting for overdue, a smaller render rate under loss).
