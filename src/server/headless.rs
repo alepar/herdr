@@ -2654,6 +2654,7 @@ impl HeadlessServer {
                 };
                 client.take_deferred_render() != DeferredRender::None
             }
+            #[rustfmt::skip] ServerEvent::MoshSurfaceResync { client_id } => crate::client::mosh_outage::server_hooks::surface_resync(self.clients.get_mut(&client_id)), // mosh-fork hook
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
                 // No render needed — the next iteration will initiate shutdown.
