@@ -14,6 +14,10 @@ pub(in crate::remote) mod remote;
 mod ring;
 mod session;
 mod ssh_leg;
+// mosh-hex.4 wires InflightWindow into SessionEndpoint and removes this allow; until then
+// only the module's own tests use it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod window;
 
 use super::{ManagedSshOptions, RemoteHerdr, RemoteSsh, SshStdioBridge};
 use std::io;
