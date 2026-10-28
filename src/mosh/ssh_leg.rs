@@ -3,10 +3,10 @@
 
 use super::super as attach;
 use attach::{ManagedSshOptions, RemoteClientStatusJson, RemoteHerdr, RemoteSsh};
-use std::io::{self, BufReader};
-use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::io::{self, BufReader, Read, Write};
+use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,6 +59,8 @@ pub(super) struct Leg {
     teardown: Option<Teardown>,
     welcome_reached: bool,
     pre_welcome_end: Option<String>,
+    /// Open while leg-0 stderr is relayed to the terminal; closed at `WELCOME`.
+    stderr_gate: Option<Arc<AtomicBool>>,
 }
 
 impl Leg {
@@ -74,6 +76,7 @@ impl Leg {
             teardown: Some(teardown),
             welcome_reached: false,
             pre_welcome_end: None,
+            stderr_gate: None,
         }
     }
 
@@ -106,6 +109,9 @@ impl Leg {
 
     pub(super) fn mark_welcome(&mut self) {
         self.welcome_reached = true;
+        if let Some(gate) = &self.stderr_gate {
+            gate.store(false, Ordering::Release);
+        }
     }
 
     pub(super) fn record_pre_welcome_end(&mut self, reason: String) {
@@ -202,26 +208,37 @@ fn reap_child(child: &mut std::process::Child, kill: bool, deadline: Instant) ->
 }
 
 /// Spawn `command` as a leg: stdin/stdout piped (the leg's duplex stream), stderr piped and
-/// drained on a thread when `capture_stderr` (capped like `capture_ssh_stderr`), else as set on
-/// the command. Returns the leg (reader not yet attached) and the child's buffered stdout, so
+/// drained on a thread when `capture_stderr` (capped like `capture_ssh_stderr`), else relayed
+/// to our stderr until `WELCOME` (`relay_stderr`). Returns the leg (reader not yet attached) and the child's buffered stdout, so
 /// the caller can consume the ready marker before handing the same buffer to the leg.
 fn spawn_leg(
     mut command: Command,
     capture_stderr: bool,
 ) -> io::Result<(Leg, BufReader<ChildStdout>)> {
-    command.stdin(Stdio::piped()).stdout(Stdio::piped());
-    if capture_stderr {
-        command.stderr(Stdio::piped());
-    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill();
         let _ = child.wait();
         return Err(io::Error::other("leg child has no piped stdio"));
     };
-    let stderr_thread = child.stderr.take().map(|stderr| {
-        thread::spawn(move || attach::capture_ssh_stderr(stderr).unwrap_or_default())
-    });
+    let stderr = child.stderr.take();
+    let mut stderr_gate = None;
+    let stderr_thread = if capture_stderr {
+        stderr.map(|stderr| {
+            thread::spawn(move || attach::capture_ssh_stderr(stderr).unwrap_or_default())
+        })
+    } else {
+        if let Some(stderr) = stderr {
+            let gate = Arc::new(AtomicBool::new(true));
+            relay_stderr(stderr, Arc::clone(&gate), io::stderr());
+            stderr_gate = Some(gate);
+        }
+        None
+    };
     let leg = Leg {
         reader: None,
         writer: Some(Box::new(stdin)),
@@ -241,8 +258,36 @@ fn spawn_leg(
         })),
         welcome_reached: false,
         pre_welcome_end: None,
+        stderr_gate,
     };
     Ok((leg, BufReader::new(stdout)))
+}
+
+/// Relay leg-0 stderr to `sink` while `gate` is open, then discard it. Before `WELCOME` ssh's
+/// messages (auth failures, host key warnings) belong on the terminal as they do today; after
+/// it the TUI owns the screen, and a late keepalive timeout, from ssh or from a ProxyJump
+/// helper that outlives it and inherits this pipe, would paint over it. Detached: it ends when
+/// the last writer (ssh or a helper) closes the pipe.
+fn relay_stderr(
+    mut stderr: ChildStderr,
+    gate: Arc<AtomicBool>,
+    mut sink: impl Write + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if gate.load(Ordering::Acquire) {
+                let _ = sink.write_all(&buffer[..read]);
+                let _ = sink.flush();
+            }
+        }
+    })
 }
 
 /// Classify a leg that ended before the session was established (or after, which is always
@@ -805,6 +850,50 @@ mod tests {
     fn leg_without_capture_reports_no_stderr() {
         let (leg, _reader) = spawn_leg(sh("exit 0"), false).unwrap();
         assert!(leg.finish(false, soon()).stderr.is_none());
+    }
+
+    #[test]
+    fn welcome_closes_relayed_stderr_gate() {
+        let (mut leg, _reader) = spawn_leg(sh("exit 0"), false).unwrap();
+        let gate = Arc::clone(leg.stderr_gate.as_ref().unwrap());
+        assert!(gate.load(Ordering::Acquire));
+        leg.mark_welcome();
+        assert!(!gate.load(Ordering::Acquire));
+        let (leg, _reader) = spawn_leg(sh("exit 0"), true).unwrap();
+        assert!(leg.stderr_gate.is_none());
+    }
+
+    #[test]
+    fn relay_forwards_stderr_only_while_gate_is_open() {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // The child writes "before", waits for a line on stdin, then writes "after".
+        let mut child = sh("echo before >&2; read _; echo after >&2")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let sink = Sink::default();
+        let gate = Arc::new(AtomicBool::new(true));
+        let relay = relay_stderr(child.stderr.take().unwrap(), Arc::clone(&gate), sink.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sink.0.lock().unwrap().is_empty() && Instant::now() < deadline {
+            thread::sleep(REAP_POLL);
+        }
+        gate.store(false, Ordering::Release);
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        child.wait().unwrap();
+        relay.join().unwrap();
+        assert_eq!(sink.0.lock().unwrap().as_slice(), b"before\n");
     }
 
     #[test]
