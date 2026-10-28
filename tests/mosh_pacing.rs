@@ -488,8 +488,11 @@ fn baseline_ctrl_c_latency_at_the_profile() {
 /// Mirrors of `src/mosh/window.rs` (`FLOOR`, `INITIAL`) and `session::MAX_DATA_CHUNK`; test
 /// crates cannot import crate-private items. Test (3) asserts the first traced window equals
 /// `INITIAL`, which catches drift.
+#[cfg(target_os = "linux")]
 const FLOOR: u64 = 128 * 1024;
+#[cfg(target_os = "linux")]
 const INITIAL: u64 = 256 * 1024;
+#[cfg(target_os = "linux")]
 const CHUNK: u64 = 64 * 1024;
 /// Amended bound (bead mosh-hex.5 amendment 2026-10-28): the spec's 1.5 s goal is recorded as
 /// an agent check in the evidence file, not asserted.
@@ -516,10 +519,12 @@ fn window_events(remote: &Remote) -> Vec<serde_json::Value> {
 }
 
 /// The convergence bound: `max(FLOOR, 2 * R * 0.3 s)` plus one chunk.
+#[cfg(target_os = "linux")]
 fn window_bound(rate: u64) -> u64 {
     FLOOR.max(rate * 6 / 10) + CHUNK
 }
 
+#[cfg(target_os = "linux")]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -835,6 +840,7 @@ fn saturating_flood_evidence() {
 // ---- Phase 2 integration sweep (mosh-hex.6) ---------------------------------------------
 
 /// Distinct keeper leg ids that traced a `window` event for `token`, in first-seen order.
+#[cfg(target_os = "linux")]
 fn window_legs(remote: &Remote, token: &str) -> Vec<u64> {
     let mut legs = Vec::new();
     for line in window_events(remote) {
@@ -850,6 +856,7 @@ fn window_legs(remote: &Remote, token: &str) -> Vec<u64> {
 }
 
 /// Tokens of every keeper session that traced a `window` event.
+#[cfg(target_os = "linux")]
 fn window_tokens(remote: &Remote) -> std::collections::BTreeSet<String> {
     window_events(remote)
         .iter()
