@@ -1,141 +1,98 @@
-# Phase 2 acceptance: adaptive in-flight window (mosh-hex.5)
+# Phase 2 acceptance: adaptive in-flight window (mosh-hex.5, amended)
 
-Headline: the acceptance tests as specified cannot be satisfied, and the reason is the flood, not
-the window. The spec probe (`yes`) delivers about 3-6 KB/s, so test (3) fails (window never leaves
-`INITIAL`, goodput is 2% of R) and test (1) passes without discriminating anything (it also passed
-with the fixed window, 0.31 s). A content-dense flood (`base64 /dev/urandom`, 400x100) does
-saturate the 256 KiB/s link, and under it the adaptive window cuts Ctrl-C from 8.7-9.2 s (fixed
-window) to 1.5-1.9 s, but still misses the 1.5 s bound in 3 of 3 runs with the window converged.
-Residual latency is server-socket backlog (the R1-miss path). D3 evidence for server pacing is met.
-The bead is reported failed/blocked; no bound was relaxed and no pacing was built.
+Headline: with the amended dense-flood probe, tests (1), (2) and (3) pass 5 of 5 consecutive runs;
+the resume-under-flood test fails deterministically (15.8 s and 16.7 s against the 2.5 s bound).
+The spec's 1.5 s Ctrl-C goal is an unmet agent check (median 1.6-2.1 s). Server pacing is the
+measured follow-up (D3), parked, not built.
 
 ## Header
 
-- Measured source: branch `task-mosh-hex.5` = integration tip `eb8583cf` plus the mosh-hex.4 branch
-  (`af57c1a8`, merge `e8955401`) plus this task's test changes. Before-numbers: `eb8583cf`
-  (fixed 2 MiB window, mosh-hex.3 baseline code) with the same test file copied in.
-- Date: 2026-10-28. Host: `Linux blacky 7.0.12-201.fc44.x86_64`, quiet host.
-- Constants (from `phase2-baseline.md`, provisional there): `ONE_WAY_DELAY_MS = 150`,
-  `PROFILE_RATE = 262144` (256 KiB/s), `PROFILE_SIZE = (80, 24)`. Dense-flood evidence runs use 400x100.
-- Window constants mirrored in the test file: `FLOOR` 128 KiB, `INITIAL` 256 KiB, `CHUNK` 64 KiB;
-  bound for test (3) = `max(FLOOR, 2*R*0.3 s) + CHUNK` = 222,822 B at R = 256 KiB/s.
-- All runs: `TMPDIR=/tmp/sp-fd54fa48/mosh-hex.5 PATH=$HOME/.local/bin:$PATH cargo nextest run --locked --test mosh_pacing --no-capture`.
+- Measured source: branch `task-mosh-hex.5` = integration tip `eb8583cf` + mosh-hex.4 (merge `e8955401`) + this task's tests.
+- Date 2026-10-28. Host `Linux blacky 7.0.12-201.fc44.x86_64`, quiet host. All runs under `TMPDIR=/tmp/sp-fd54fa48/mosh-hex.5`.
+- Profile: `ONE_WAY_DELAY_MS = 150`, `PROFILE_RATE = 262144` (256 KiB/s), dense flood size 400x100.
+- Flood: `(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)`, about 508 KiB/s on LAN (about 1.98 x R), so the link saturates.
+  The `yes` probe (about 3 KB/s) is kept only for `flood_probe_prints_the_marker_after_ctrl_c_under_interactive_sh`.
+- Window constants mirrored in the test file: `FLOOR` 128 KiB, `INITIAL` 256 KiB, `CHUNK` 64 KiB; test (3) bound = `max(FLOOR, 2*R*0.3 s) + CHUNK` = 222,822 B.
+- Command: `cargo nextest run --locked --test mosh_pacing --no-capture --no-fail-fast` (run 1, all tests), then `-E 'not test(a_leg_killed)'` for runs 2-5.
 
-## Test results with the spec probe (`yes`), adaptive window
+## Fixed-window figure (measured once)
 
-| test | result | numbers |
-|---|---|---|
-| (1) `ctrl_c_under_a_flood_answers_within_1_5_s_at_300_ms_rtt` | pass | 311, 324, 324 ms; trace `server_backlog` p95 0 |
-| (2) `lan_flood_throughput_matches_the_plain_bridge` | pass | plain 3027 / 2976 B/s, adaptive 3057 / 3276 B/s (means 3002 vs 3167) |
-| (3) `the_window_converges_near_the_bandwidth_delay_product_under_a_slow_flood` | FAIL | median window 262144 > bound 222822; goodput 6318 B/s vs 0.8 R = 209715 |
-| resume `a_leg_killed_mid_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time` | pass | new-leg `window` event = 262144 (`INITIAL`); after-resume Ctrl-C 309 ms |
+`saturating_flood_evidence` (ignored) at the same profile against source `b9ea542` (src identical to `eb8583cf`; verified with `git diff --stat b9ea542 eb8583cf -- src` empty), test files copied in:
 
-Why (3) fails: with a 3-6 KB/s source the window is never the limit, so no epoch is window-limited,
-the controller never grows or shrinks, and the window stays at `INITIAL` (256 KiB), which is above
-the `2*R*0.3 s + CHUNK` bound (INITIAL is 262144, the bound is 222822). Goodput is the source rate.
-Neither assertion exercises the controller. This is the missing amendment noted in the mosh-hex.3
-report: "the spec R rule has no solution; plan owner must decide D3/spec amendment before
-mosh-hex.5". No decision was recorded in the bead or its comments.
+| | run 1 | run 2 | run 3 | median |
+|---|---|---|---|---|
+| fixed 2 MiB window, Ctrl-C | 9400 ms | 9182 ms | 8437 ms | **9182 ms** |
+| fixed goodput | 262,419 B/s | 260,163 B/s | 262,373 B/s | |
+| fixed server backlog (ss) p95 | 214,515 B | 231,049 B | 231,321 B | |
 
-## Ctrl-C latency, before and after
+`FIXED_WINDOW_CTRL_C_MS = 9182` in the test; 0.35 x 9182 = 3213 ms, so the 2.5 s bound is the binding one. (The first attempt measured 8733-9195 ms at `eb8583cf`.)
 
-Spec probe, 80x24, 150 ms one way, 256 KiB/s (3 runs each):
+## Test (1): Ctrl-C, adaptive window (3 runs per test run, median asserted <= 2500 ms and <= 0.35 x fixed)
 
-| | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| before (fixed window, `phase2-baseline.md` (c)) | 325 ms | 311 ms | 309 ms |
-| after (adaptive window, test (1)) | 311 ms | 324 ms | 324 ms |
+| test run | latencies (ms) | median | server_backlog p95 (trace) | result |
+|---|---|---|---|---|
+| 1 | 1813, 1894, 1620 | 1813 | 215,913 B (0.82 s) | pass |
+| 2 | 1865, 1468, 1610 | 1609 | 215,037-231,286 B (0.82-0.88 s) | pass |
+| 3 | 2083, 2578, 2069 | 2082 | 160,445-215,857 B | pass |
+| 4 | 1728, 2069, 1843 | 1842 | 160,460-215,664 B | pass |
+| 5 | 1542, 1998, 1730 | 1730 | 215,765-215,823 B | pass |
 
-Identical within noise: the probe never fills any window.
+Before/after: median 9182 ms fixed vs 1609-2082 ms adaptive (4.4x-5.7x). **Agent check, unmet:** the spec's 1.5 s goal is exceeded by the median in 5 of 5 runs (1.6-2.1 s). The spec text is not edited.
 
-Dense flood (`SATURATING_FLOOD`, `base64 /dev/urandom`), 400x100, same link
-(`saturating_flood_evidence`, ignored, run by hand against each code version):
+## Test (2): LAN parity, dense flood 400x100, no link knob (2 rounds each, means)
 
-| | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| before (fixed 2 MiB window, `eb8583cf`) | 9195 ms | 9170 ms | 8733 ms |
-| after (adaptive window) | 1856 ms | 1538 ms | 1703 ms |
+| test run | plain bridge (B/s) | adaptive (B/s) | ratio | result |
+|---|---|---|---|---|
+| 1 | 534,057 | 534,415 | 1.00 | pass |
+| 2 | 434,366 | 485,669 | 1.12 | pass |
+| 3 | 428,830 | 453,898 | 1.06 | pass |
+| 4 | 528,375 | 534,159 | 1.01 | pass |
+| 5 | 532,229 | 534,012 | 1.00 | pass |
 
-Command: `cargo nextest run --locked --test mosh_pacing --run-ignored ignored-only --no-capture saturating_flood`.
-The adaptive window is a 5x improvement and removes the 8-9 s drain of 2 MiB at 256 KiB/s, but the
-1.5 s bound is missed in 3 of 3 runs (1538 ms is 38 ms over).
+## Test (3): convergence under the dense flood (20 s, median over the last 5 s; goodput over the last 10 s at the downstream delay line)
 
-Link goodput (bytes written by the downstream delay line, `/proc/<pid>/io` wchar, 8 s):
+| test run | median window (B) | bound | goodput (B/s) | goodput / R | result |
+|---|---|---|---|---|---|
+| 1 | 131,072 | 222,822 | 235,251 | 0.90 | pass |
+| 2 | 131,072 | 222,822 | 183,163 | 0.70 | pass |
+| 3 | 196,608 | 222,822 | 227,311 | 0.87 | pass |
+| 4 | 159,744 | 222,822 | 240,297 | 0.92 | pass |
+| 5 | 196,608 | 222,822 | 239,533 | 0.91 | pass |
 
-| | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| before (fixed window) | 262,195 B/s | 262,216 B/s | 260,165 B/s |
-| after (adaptive window) | 245,877 B/s | 209,566 B/s | 171,958 B/s |
+The window is never below `FLOOR` and the first traced window is `INITIAL` in every run. Asserted goodput is >= 0.6 R (157,286). **Agent check:** the spec's 0.8 R (209,715) is met in 4 of 5 runs and missed in run 2 (0.70 R).
 
-Adaptive goodput is 66-94% of R: runs 2 and 3 are below 0.8 R (209,715), run 3 clearly. The window
-sits at FLOOR (131072) for most epochs (p50 131072 in runs 2 and 3) while the link needs only the
-BDP of 78 KiB, so it is not under-sized by that measure; the dip needs investigation (see Concerns
-in the report).
+## Resume under flood: FAIL (blocker bead mosh-00q)
+
+`a_leg_killed_mid_dense_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time`: the leg is killed mid-flood, a second leg comes up, a `window` event with `window = INITIAL` (262144) appears on the new leg (this part holds), then Ctrl-C takes **15,808 ms** (run 1) and **16,727 ms** (rerun), bound 2,500 ms. Not a measurement artifact: it is deterministic.
+
+Likely cause (read from `src/mosh/session.rs`, not separately instrumented): while the leg is down `SessionEndpoint::source_room()` uses `ring.capacity()` (mosh-hex.4: "ring cap rule unchanged while down"), so the keeper fills the ring with up to about 2 MiB of stale flood during the outage; after the resume that backlog drains at R (2 MiB / 256 KiB/s is 8 s, plus the data the outage accumulated in the server socket) ahead of the Ctrl-C echo. The window reset to `INITIAL` bounds only what is in flight, not what is queued in the ring. A fix is a production change in mosh-hex.4's code that contradicts its acceptance bullet and unit tests, so it needs an owner decision. Not built here.
 
 ## Server backlog and staleness (D3)
 
-Backlog metric: Recv-Q of the keeper's server stream (= FIONREAD), per `phase2-baseline.md`. The
-two sources agree: `server_backlog` in the keeper `window` trace and external `ss -xpn` sampling.
+Backlog metric: Recv-Q of the keeper's server stream (FIONREAD); the keeper `window` trace and external `ss -xpn` sampling agree (before: ss only, p95 214,515-231,321 B).
 
-| run | trace p50 / p95 / max (B) | ss p50 / p95 / max (B) | window p50 / max (B) | epochs |
-|---|---|---|---|---|
-| after 1 | 160,853 / 214,877 / 215,610 | 159,816 / 231,829 / 232,307 | 140,544 / 327,680 | 20 |
-| after 2 | 160,194 / 214,263 / 231,632 | 123,757 / 231,098 / 231,632 | 131,072 / 131,072 | 23 |
-| after 3 | 160,820 / 214,555 / 215,627 | 160,289 / 231,490 / 231,691 | 131,072 / 131,072 | 20 |
-| before (fixed), ss only | n/a (no trace) | 70,031 / 231,032 / 231,587 | n/a | n/a |
+Adaptive, trace `server_backlog` per Ctrl-C run above: p95 160,445-231,286 B, typically about 215,800 B = **0.82 s** staleness at R (max reading 231,632 B = 0.88 s). This exceeds the 250 ms threshold.
 
-Staleness = backlog / R: p95 of the trace is about 214,500 B / 262,144 B/s = **0.82 s**
-(max 231,632 B = 0.88 s). This exceeds the 250 ms threshold.
+FIONREAD cap: Recv-Q saturates near the server socket buffer (`wmem_default` 212,992; readings up to about 232 KB). The p95 sits at the cap, so 0.82 s is a lower bound; the server also holds up to one rendered frame in userland (`phase2-baseline.md`, slow-client section) that Recv-Q does not count.
 
-FIONREAD cap: Recv-Q saturates near the server socket buffer (`wmem_default` 212,992; readings up
-to 232 KB seen). The p95 sits at the cap, so 0.82 s is a lower bound on the true staleness; the
-server also holds up to one rendered frame in userland beyond the socket (`phase2-baseline.md`,
-slow-client section), which Recv-Q does not count. A saturated reading cannot size a pacing fix; it
-shows that a backlog of at least the cap exists.
-
-## Latency attribution (R1-miss path)
-
-Run 2 (1538 ms), window converged to FLOOR: link propagation 0.30 s (150 up + 150 down), window
-drain FLOOR / R = 131,072 / 262,144 = 0.50 s, server backlog 160-215 KB / R = 0.61-0.82 s. Window
-and backlog overlap in the pipe only partly; the sum 0.30 + 0.50 + 0.6..0.8 = 1.4-1.6 s matches the
-measured 1.5-1.9 s. The part above what the window alone gives (about 0.8 s: 0.30 + 0.50) is the
-server-socket backlog. The window is at its floor and cannot shrink further, so the remaining
-latency is not the window; it is queued bytes in the server socket that the keeper does not
-control. Pre-fill from `phase2-baseline.md` predicted exactly this case (backlog at the cap gives
-1.71 s at 256 KiB/s).
+Latency attribution for the residual above 1.5 s: link propagation 0.30 s + window drain at `FLOOR` / R = 0.50 s + server-socket backlog 0.6-0.82 s = 1.4-1.6 s, matching the measured 1.5-2.1 s. The window is at or near `FLOOR` and cannot shrink further; the remaining latency is queued bytes in the server socket that the keeper does not control.
 
 ## D3 decision
 
-D3 evidence for server pacing is met. Measured at the supported bottom R = 256 KiB/s under a
-saturating flood: `server_backlog` p95 = 214,555 B = 0.82 s staleness (> 250 ms), at the FIONREAD
-cap (lower bound). Server pacing (per-client, `clamp(SRTT/2, 16, 250)` ms) and the per-client
-`SO_SNDBUF` option are **parked as a measured follow-up, not built here**. Alternatively the
-supported bottom moves up: at R = 1 MiB/s the same backlog is 0.2 s and the budget closes
-(`phase2-baseline.md` budget table); that is a spec decision for the plan owner. This task did not
-relax the 1.5 s bound.
+D3's evidence bar for server pacing is met: `server_backlog` p95 about 215,800 B (0.82 s at R = 256 KiB/s), at the FIONREAD cap. **Follow-ups, parked for the human, not built here:** (a) server pacing / per-client `SO_SNDBUF`, which closes the 1.5 s gap; (b) goodput at `FLOOR` below 0.8 R (run 2: 0.70 R although `FLOOR` exceeds the 78 KiB BDP); (c) the resume-time ring backlog above (mosh-00q). The orchestrator parked (a) and (b) in `run.md`.
 
 ## Protocol check
 
-- `git diff 1589edbd -- src/mosh/session.rs | grep -nE '^[-+].*(enum SessionMsg|TYPE_|fn encode|fn next|SESSION_PROTOCOL_VERSION|ACK_EVERY|MAX_DATA_CHUNK|const WINDOW)'`:
-  hits are only uses of `MAX_DATA_CHUNK` and `TYPE_DATA` in new/rewritten code and tests
-  (lines 120, 122, 188, 208, 214, 235, 250, 263, 280 of the diff); no `enum SessionMsg`,
-  `fn encode`, `fn next`, `SESSION_PROTOCOL_VERSION`, `ACK_EVERY` or `const WINDOW` line changes.
-- `cargo nextest run --locked --bin herdr -E 'test(codec_round_trips) | test(wire_layout)'`:
-  `3 tests run: 3 passed` (`codec_round_trips_byte_by_byte_and_in_random_chunks`,
-  `wire_layout_and_json_field_names`, and an unrelated surface-delta decoder test); neither mosh
-  test name appears in the diff, so their expectations are unmodified. (Filter note: these tests
-  live in the `herdr` bin target, not `--lib`.)
+- `git diff 1589edbd -- src/mosh/session.rs | grep -E '^[-+].*(enum SessionMsg|fn encode|fn next|SESSION_PROTOCOL_VERSION|ACK_EVERY|const MAX_DATA_CHUNK|const WINDOW)'`: no output.
+- `cargo nextest run --locked --bin herdr -E 'test(codec_round_trips) | test(wire_layout)'`: `3 tests run: 3 passed`; neither mosh test is in the diff, so expectations are unmodified.
 
 ## Closing check
 
-- `git diff --stat 1589edbd`: `evidence/phase2-baseline.md`, `src/mosh/local_bridge.rs`, `src/mosh/mod.rs`,
-  `src/mosh/remote/keeper.rs`, `src/mosh/session.rs`, `src/mosh/window.rs`, `tests/mosh_harness.rs`,
-  `tests/mosh_pacing.rs` (plus this file): only `src/mosh/**`, `tests/mosh_*` and the run directory.
+- `git diff --stat 1589edbd`: only `src/mosh/**`, `tests/mosh_*` and the run directory (evidence files).
 - `bash scripts/mosh-diff-budget.sh`: `12 inserted upstream lines (budget 20), 0 untagged hunks`.
 - `git diff 1589edbd -- Cargo.toml Cargo.lock`: empty.
-- `cargo clippy --all-targets --locked -- -D warnings`: clean. `cargo fmt --check`: clean.
+- `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --check`: clean.
 
 ## Flakiness (5 consecutive runs)
 
-Not recorded: the five-run criterion requires all tests to pass, and test (3) fails
-deterministically with the specified flood. A repeat would only measure the same failure.
+Tests (1), (2), (3) and the `yes`-probe and link self-tests passed in 5 of 5 consecutive runs (table rows above). The resume test failed in both of its runs, so 5 consecutive all-green runs of the file were not achieved.

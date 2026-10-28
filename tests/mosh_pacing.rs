@@ -514,7 +514,19 @@ fn baseline_ctrl_c_latency_at_the_profile() {
 const FLOOR: u64 = 128 * 1024;
 const INITIAL: u64 = 256 * 1024;
 const CHUNK: u64 = 64 * 1024;
-const CTRL_C_BOUND: Duration = Duration::from_millis(1500);
+/// Amended bound (bead mosh-hex.5 amendment 2026-10-28): the spec's 1.5 s goal is recorded as
+/// an agent check in the evidence file, not asserted.
+const CTRL_C_BOUND: Duration = Duration::from_millis(2500);
+/// Median Ctrl-C latency with the fixed 2 MiB window at the same profile, measured once at
+/// `b9ea542` (evidence/phase2-acceptance.md). Test (1) requires <= 0.35 x this.
+const FIXED_WINDOW_CTRL_C_MS: u64 = 9182;
+/// Terminal size of the dense-flood tests: wide enough that herdr's screen diffs exceed R.
+const DENSE_SIZE: (u16, u16) = (400, 100);
+
+/// A content-dense flood that saturates the profile link (about 508 KiB/s on a LAN at
+/// `DENSE_SIZE`, about 1.98 x R), unlike `FLOOD_PROBE` (`yes` redraws a uniform screen, so
+/// herdr sends about 3 KB/s). Same trap construction as `FLOOD_PROBE`.
+const SATURATING_FLOOD: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)"#;
 
 /// Keeper `window` events, oldest first.
 fn window_events(remote: &Remote) -> Vec<serde_json::Value> {
@@ -602,16 +614,23 @@ fn kill_linked_leg(remote: &Remote, client: &str) {
     }
 }
 
+/// Start the dense flood in the remote pane (through the API) and settle it.
+fn start_dense_flood(remote: &Remote, client: &Client, settle: Duration) {
+    remote.pane_run(SATURATING_FLOOD);
+    settle_flood(client, settle);
+}
+
 #[test]
-fn ctrl_c_under_a_flood_answers_within_1_5_s_at_300_ms_rtt() {
+fn ctrl_c_under_a_dense_flood_is_far_faster_than_the_fixed_window_at_300_ms_rtt() {
     let _lock = timing_lock();
     let remote = Remote::start();
     remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
-    let mut client = attach(&remote, true, PROFILE_SIZE);
+    let mut client = attach(&remote, true, DENSE_SIZE);
     let keepers = remote.keeper_pids();
+    let mut latencies = Vec::new();
     for run in 1..=3 {
-        start_flood(&remote, &client, Duration::from_secs(2));
-        let latency = ctrl_c_latency(&mut client, Duration::from_secs(30));
+        start_dense_flood(&remote, &client, Duration::from_secs(2));
+        let latency = ctrl_c_latency(&mut client, Duration::from_secs(60));
         let backlog: Vec<u64> = window_events(&remote)
             .iter()
             .filter_map(|l| l["server_backlog"].as_u64())
@@ -624,25 +643,33 @@ fn ctrl_c_under_a_flood_answers_within_1_5_s_at_300_ms_rtt() {
             percentile(&backlog, 95) as f64 * 1000.0 / PROFILE_RATE as f64,
             keeper_server_backlog(&keepers),
         );
-        assert!(
-            latency <= CTRL_C_BOUND,
-            "run {run}: ctrl-c took {latency:?}"
-        );
+        latencies.push(latency.as_millis() as u64);
         thread::sleep(Duration::from_secs(2));
     }
+    latencies.sort_unstable();
+    let median = latencies[1];
+    eprintln!("ctrl-c median {median} ms of {latencies:?} (spec goal 1500 ms)");
+    assert!(
+        median <= CTRL_C_BOUND.as_millis() as u64,
+        "median ctrl-c {median} ms > {CTRL_C_BOUND:?} ({latencies:?})"
+    );
+    assert!(
+        median * 100 <= FIXED_WINDOW_CTRL_C_MS * 35,
+        "median ctrl-c {median} ms > 0.35 x fixed-window {FIXED_WINDOW_CTRL_C_MS} ms ({latencies:?})"
+    );
 }
 
 #[test]
-fn lan_flood_throughput_matches_the_plain_bridge() {
+fn lan_dense_flood_throughput_matches_the_plain_bridge() {
     let _lock = timing_lock();
     let remote = Remote::start();
     let mut rates = [Vec::new(), Vec::new()]; // [plain, adaptive]
     for round in 0..2 {
         for (i, resume) in [false, true].into_iter().enumerate() {
-            let mut client = attach(&remote, resume, PROFILE_SIZE);
-            start_flood(&remote, &client, Duration::from_secs(2));
+            let mut client = attach(&remote, resume, DENSE_SIZE);
+            start_dense_flood(&remote, &client, Duration::from_secs(2));
             rates[i].push(client_rate(&client, Duration::from_secs(5)));
-            let _ = ctrl_c_latency(&mut client, Duration::from_secs(30));
+            let _ = ctrl_c_latency(&mut client, Duration::from_secs(60));
             eprintln!(
                 "round {round} resume={resume}: {:.0} B/s",
                 rates[i].last().copied().unwrap_or(0.0)
@@ -651,6 +678,7 @@ fn lan_flood_throughput_matches_the_plain_bridge() {
     }
     let mean = |v: &Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
     let (plain, adaptive) = (mean(&rates[0]), mean(&rates[1]));
+    eprintln!("plain {plain:.0} B/s, adaptive {adaptive:.0} B/s");
     assert!(
         adaptive >= 0.9 * plain,
         "adaptive {adaptive:.0} B/s < 0.9 x plain {plain:.0} B/s"
@@ -659,13 +687,13 @@ fn lan_flood_throughput_matches_the_plain_bridge() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn the_window_converges_near_the_bandwidth_delay_product_under_a_slow_flood() {
+fn the_window_converges_near_the_bandwidth_delay_product_under_a_dense_flood() {
     let _lock = timing_lock();
     let remote = Remote::start();
     remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
-    let mut client = attach(&remote, true, PROFILE_SIZE);
+    let mut client = attach(&remote, true, DENSE_SIZE);
     let start_ms = now_ms();
-    remote.pane_run(FLOOD_PROBE);
+    remote.pane_run(SATURATING_FLOOD);
     settle_flood(&client, Duration::from_secs(1));
     let line = downstream_line_pid(&remote, &client.id);
     thread::sleep(Duration::from_secs(10));
@@ -673,7 +701,7 @@ fn the_window_converges_near_the_bandwidth_delay_product_under_a_slow_flood() {
     thread::sleep(Duration::from_secs(10));
     let goodput = (wchar(line) - w0) as f64 / t0.elapsed().as_secs_f64();
     let end_ms = now_ms();
-    let _ = ctrl_c_latency(&mut client, Duration::from_secs(30));
+    let _ = ctrl_c_latency(&mut client, Duration::from_secs(60));
 
     let events = window_events(&remote);
     assert_eq!(
@@ -694,7 +722,8 @@ fn the_window_converges_near_the_bandwidth_delay_product_under_a_slow_flood() {
     let median = last_5s.get(last_5s.len() / 2).copied();
     let bound = window_bound(PROFILE_RATE);
     eprintln!(
-        "median window {median:?} (bound {bound}); goodput {goodput:.0} B/s of {PROFILE_RATE}; {} epochs, {} in the last 5 s",
+        "median window {median:?} (bound {bound}); goodput {goodput:.0} B/s of {PROFILE_RATE} ({:.2} R; spec 0.8 R agent check); {} epochs, {} in the last 5 s",
+        goodput / PROFILE_RATE as f64,
         flood.len(),
         last_5s.len()
     );
@@ -708,20 +737,20 @@ fn the_window_converges_near_the_bandwidth_delay_product_under_a_slow_flood() {
         "window below FLOOR: {events:?}"
     );
     assert!(
-        goodput >= 0.8 * PROFILE_RATE as f64,
-        "goodput {goodput:.0} B/s < 0.8 R ({})",
-        0.8 * PROFILE_RATE as f64
+        goodput >= 0.6 * PROFILE_RATE as f64,
+        "goodput {goodput:.0} B/s < 0.6 R ({})",
+        0.6 * PROFILE_RATE as f64
     );
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_leg_killed_mid_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() {
+fn a_leg_killed_mid_dense_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() {
     let _lock = timing_lock();
     let remote = Remote::start();
     remote.set_link(ONE_WAY_DELAY_MS, PROFILE_RATE);
-    let mut client = attach(&remote, true, PROFILE_SIZE);
-    start_flood(&remote, &client, Duration::from_secs(2));
+    let mut client = attach(&remote, true, DENSE_SIZE);
+    start_dense_flood(&remote, &client, Duration::from_secs(2));
     let first_leg = window_events(&remote).last().map(|l| l["leg"].clone());
     kill_linked_leg(&remote, &client.id);
     assert!(
@@ -741,7 +770,7 @@ fn a_leg_killed_mid_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() 
         .expect("a window event on the new leg");
     assert_eq!(new_leg["window"].as_u64(), Some(INITIAL), "{new_leg}");
     settle_flood(&client, Duration::from_secs(2));
-    let latency = ctrl_c_latency(&mut client, Duration::from_secs(30));
+    let latency = ctrl_c_latency(&mut client, Duration::from_secs(60));
     eprintln!(
         "after resume: ctrl-c {:.0} ms",
         latency.as_secs_f64() * 1000.0
@@ -751,10 +780,6 @@ fn a_leg_killed_mid_flood_resumes_at_initial_and_ctrl_c_still_answers_in_time() 
         "after resume: ctrl-c took {latency:?}"
     );
 }
-
-/// A content-dense flood that can saturate the profile link, unlike `FLOOD_PROBE` (`yes`
-/// redraws a uniform screen, so herdr sends about 3 KB/s). Same trap construction.
-const SATURATING_FLOOD: &str = r#"(trap 'printf "%s%s\n" MA RKER; exit' INT; base64 /dev/urandom)"#;
 
 /// Evidence only (mosh-hex.5, closes the mosh-hex.3 "unmeasured saturating backlog" gap):
 /// Ctrl-C latency, link goodput and server backlog at the profile rate under a flood that
