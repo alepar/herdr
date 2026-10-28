@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-28-mosh-phase2-keeper-inflight-window
 
 flags: planOneShot=f skipPlanRoast=f skipCodeRoast=f autonomous=t
-phase: roast-code
+phase: fix-loop
 codeMechanism: Workflow
 runTag: mosh-phase2-keeper-inflight-window-20261028T074108
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -13,7 +13,7 @@ branch: super-auto/mosh-phase2-keeper-inflight-window
 base: mosh
 roastDesignRound: 2
 roastCodeRound: 2
-roast-code: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-1.md
+roast-code: 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-1.md, 2026-10-28-mosh-phase2-keeper-inflight-window-roast-pr-2.md
 findingsLedger: findings-ledger.md
 scopeFilter-round-1: 1 in-scope · 3 punch-listed
   scopeFilter-round-1: [Nit] tests/mosh_resume.rs:452; tests/mosh_resume.rs:461 in-scope — The goal's execution decision names the outage read cap at INITIAL, and this end-to-end test cannot exercise it (45 KB flood), which is a missing test for a goal-named behavior.
