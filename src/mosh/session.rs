@@ -1498,6 +1498,46 @@ mod tests {
     }
 
     #[test]
+    fn a_grown_window_resets_to_initial_on_leg_down_and_down_reads_stop_there() {
+        // Grow the keeper's window with the flood loop of
+        // `a_flood_grows_the_window_on_either_side_and_sparse_input_keeps_initial`. The rings are
+        // far larger than any window, so only the window can stop reads.
+        let mut p = Pair::new(8 * MIB, 8 * MIB);
+        p.connect();
+        for _ in 0..60 {
+            while p.keeper.may_read_source() {
+                let n = p.keeper.source_read_size();
+                p.keeper.push_source(&vec![1; n]).unwrap();
+            }
+            p.local.push_source(b"ls\r").unwrap();
+            p.pump(None);
+        }
+        let grown = p.keeper.window();
+        assert!(grown > INITIAL, "the flood did not grow the window: {grown}");
+        // Everything sent was delivered and acked, so the down fill starts at most at INITIAL.
+        let queued = p.keeper.ring.occupancy();
+        assert!(queued <= INITIAL, "queued {queued} before the drop");
+
+        p.leg_down();
+        assert_eq!(
+            p.keeper.window(),
+            INITIAL,
+            "leg_down kept the grown window {grown}"
+        );
+        // While down, reads stop with the ring at the reset window, not at the grown window.
+        while p.keeper.may_read_source() {
+            let n = p.keeper.source_read_size();
+            assert!(n > 0 && n <= p.keeper.source_room());
+            p.keeper.push_source(&vec![2; n]).unwrap();
+        }
+        assert_eq!(p.keeper.ring.occupancy(), INITIAL);
+        assert_eq!(
+            (p.keeper.source_room(), p.keeper.source_read_size()),
+            (0, 0)
+        );
+    }
+
+    #[test]
     fn replayed_bytes_are_never_reported_to_the_controller() {
         let mut p = Pair::new(8 * MIB, MIB);
         p.connect();
