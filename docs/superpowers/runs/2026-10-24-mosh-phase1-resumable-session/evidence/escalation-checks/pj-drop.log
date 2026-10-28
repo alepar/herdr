@@ -1,0 +1,6 @@
+ready line: b'READY'
+ssh pid 515267 jump children [(515268, 'ssh -F /tmp/claude-1001/-var-home-alepar-AleCode-herdr/f90071ef-0086-4b3f-982c-c58ab7dd70ba/scratchpad/sshdrop/cfg-pj -W [127.0.0.6]:22 127.0.0.7 ')]
+ssh reaped after 0.00s
+stderr EOF: 71.23s | stderr: b'Timeout, server 127.0.0.7 not responding.\r\n'
+jump procs alive at end: [] ppid: []
+done
