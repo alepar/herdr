@@ -11,3 +11,6 @@ spec: 2026-10-28-mosh-phases-3-4-quic-prediction-design.md
 epic: mosh-19g
 branch: super-auto/mosh-phases-3-4-quic-prediction
 base: mosh
+
+approvals:
+- top-split · auto · mosh-19g.1 PROMOTE, mosh-19g.2 PROMOTE, mosh-19g.3 PROMOTE, mosh-19g.4 LEAF, mosh-19g.5 LEAF, mosh-19g.6 LEAF
