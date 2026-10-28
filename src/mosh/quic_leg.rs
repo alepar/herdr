@@ -12,8 +12,8 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::quic::{
-    client_config, client_endpoint, BlockingRecv, BlockingSend, QuicRuntime, QUIC_SILENCE_WINDOW,
-    SERVER_NAME,
+    client_config, client_endpoint, spawn_render_reader, BlockingRecv, BlockingSend, QuicRuntime,
+    QUIC_SILENCE_WINDOW, SERVER_NAME,
 };
 use super::quic_bootstrap::QuicBootstrap;
 use super::ssh_leg::{classify_leg, Leg, LegDialer, LegEndReport, LegError, LegKind, SshLegDialer};
@@ -124,6 +124,7 @@ impl QuicClient {
             *cell.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason);
         });
         let probe = conn.clone();
+        let render_lane = spawn_render_reader(&handle, conn.clone());
         let client = Arc::clone(self);
         Leg::new(
             Box::new(HeardRecv {
@@ -142,6 +143,7 @@ impl QuicClient {
         .with_rtt_probe(Box::new(move || Some(probe.rtt())))
         .with_silence_timeout(QUIC_SILENCE_WINDOW)
         .with_close_reason(close_reason)
+        .with_render_lane(render_lane)
     }
 }
 
@@ -617,6 +619,8 @@ mod tests {
         // The standby is a live ssh leg, not yet torn down.
         assert_eq!(echo(&mut standby, "over ssh\n"), "over ssh\n");
         assert_eq!(standby.admission_token(), None);
+        assert!(leg.take_render_lane().is_some(), "QUIC legs carry a render lane");
+        assert!(standby.take_render_lane().is_none());
         assert!(d.last_leg_quic.get());
         standby.finish(true, Instant::now() + Duration::from_secs(5));
     }
