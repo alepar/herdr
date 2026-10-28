@@ -52,6 +52,20 @@ const TYPE_HEARTBEAT: u8 = 5;
 const TYPE_END: u8 = 6;
 const HEADER_LEN: usize = 5;
 
+/// The HELLO type byte, which the keeper's producers read first on a new connection.
+pub(super) const HELLO_TYPE: u8 = TYPE_HELLO;
+/// First byte of a bootstrap query to the keeper. Not a session message type.
+pub(super) const BOOTSTRAP_QUERY: u8 = b'Q';
+
+const _: () = assert!(
+    BOOTSTRAP_QUERY != TYPE_HELLO
+        && BOOTSTRAP_QUERY != TYPE_WELCOME
+        && BOOTSTRAP_QUERY != TYPE_DATA
+        && BOOTSTRAP_QUERY != TYPE_ACK
+        && BOOTSTRAP_QUERY != TYPE_HEARTBEAT
+        && BOOTSTRAP_QUERY != TYPE_END
+);
+
 /// END reasons and the local reaction each requires.
 pub(super) mod end_reason {
     /// Leg 0: plain fallback. Reconnect leg: Fatal.
@@ -388,6 +402,8 @@ pub(super) struct SessionEndpoint {
     established: bool,
     last_contact: Option<Instant>,
     grace_ms: u32,
+    /// Per-leg override of `SILENCE_TIMEOUT`; `None` is the Phase 1 value.
+    silence_timeout: Option<Duration>,
 }
 
 impl SessionEndpoint {
@@ -412,7 +428,17 @@ impl SessionEndpoint {
             established: false,
             last_contact: None,
             grace_ms: 0,
+            silence_timeout: None,
         }
+    }
+
+    /// Sets the inbound silence that kills the current leg; `None` restores `SILENCE_TIMEOUT`.
+    pub fn set_silence_timeout(&mut self, timeout: Option<Duration>) {
+        self.silence_timeout = timeout;
+    }
+
+    fn silence_limit(&self) -> Duration {
+        self.silence_timeout.unwrap_or(SILENCE_TIMEOUT)
     }
 
     pub fn token(&self) -> Token {
@@ -826,7 +852,7 @@ impl SessionEndpoint {
     pub fn poll_timers(&self, now: Instant) -> Option<LinkVerdict> {
         match self.phase {
             LinkPhase::Up { last_inbound, .. }
-                if now.saturating_duration_since(last_inbound) >= SILENCE_TIMEOUT =>
+                if now.saturating_duration_since(last_inbound) >= self.silence_limit() =>
             {
                 Some(LinkVerdict::Silence)
             }
@@ -849,7 +875,7 @@ impl SessionEndpoint {
                 last_heartbeat,
             } => {
                 let mut next =
-                    (last_inbound + SILENCE_TIMEOUT).min(last_heartbeat + HEARTBEAT_INTERVAL);
+                    (last_inbound + self.silence_limit()).min(last_heartbeat + HEARTBEAT_INTERVAL);
                 if self.ack_due(now) {
                     next = now;
                 } else if let Some(since) = self.ack_pending_since {
@@ -1748,6 +1774,19 @@ mod tests {
         assert_eq!(p.local.poll_timers(t0 + ms(14999)), None);
         assert_eq!(p.local.poll_timers(t0 + secs(15)), Some(LinkVerdict::Silence));
         assert_eq!(p.local.last_inbound(), Some(t0 + secs(7)));
+    }
+
+    #[test]
+    fn silence_override_extends_the_verdict() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let t0 = p.now;
+        p.keeper.set_silence_timeout(Some(secs(30)));
+        assert_eq!(p.keeper.poll_timers(t0 + secs(10)), None);
+        assert_eq!(p.keeper.poll_timers(t0 + ms(29999)), None);
+        assert_eq!(p.keeper.poll_timers(t0 + secs(30)), Some(LinkVerdict::Silence));
+        p.keeper.set_silence_timeout(None);
+        assert_eq!(p.keeper.poll_timers(t0 + secs(8)), Some(LinkVerdict::Silence));
     }
 
     #[test]
