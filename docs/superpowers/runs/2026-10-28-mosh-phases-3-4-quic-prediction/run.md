@@ -46,3 +46,5 @@ codeBuckets (invocation 3, inv-a2e7e590-385f-46d8-877c-bbf1b6ffc341, stopReason 
   runFailures: mosh_resume a_dense_flood_through_an_outage… fails and slow_live_leg_carries_16_mib… hangs (also at in-run base c6dfa1f9; checking at run base 59f7d8fc); cli agent_start_* (pre-existing at d04698e7)
 agentChecks:
 - mosh-19g.3.10 acceptance '256 KiB/s without tripping the no-ack timeout' (agent-set) · amended to '0 wrong; timeout disabling prediction acceptable' — spec §5 requirement (no correct prediction cleared) met
+codeBuckets (invocation 4, inv-29be42a9-8cb6-4837-86d2-6c0e13d8f328, stopReason integration-blocked — my stray target-basecheck/ dir; removed):
+  held: mosh-19g.2.21 (implemented, reviewed, suites pass; merge held) · escalated: mosh-19g.3.10 (acceptance amended by comment; re-dispatch)
