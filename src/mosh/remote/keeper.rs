@@ -533,7 +533,10 @@ fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Ad
         let _ = writer.write_all(&end_bytes(end_reason::QUIC_TOKEN));
         let _ = writer.finish();
         // Closing at once would discard the END; give the peer a moment to read it and close.
-        let _ = handle.block_on(tokio::time::timeout(Duration::from_secs(2), conn.closed()));
+        // `timeout` must be built inside the runtime: outside it, it panics for want of a reactor.
+        handle.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+        });
         conn.close(0u32.into(), b"quic-token");
         return Ok(None);
     }
@@ -2171,11 +2174,11 @@ mod tests {
 
     /// A pinned QUIC client dialled at the keeper's endpoint, HELLO sent with `quic_token`.
     /// Returns the first message the keeper answers with (the connection stays up until the
-    /// returned guard drops).
+    /// returned guard drops; the connection is declared before its runtime so it drops first).
     fn quic_hello(
         reply: &QuicBootstrap,
         quic_token: String,
-    ) -> (SessionMsg, (Arc<QuicRuntime>, quinn::Connection)) {
+    ) -> (SessionMsg, (quinn::Connection, Arc<QuicRuntime>)) {
         let rt = QuicRuntime::new("test-quic-client").unwrap();
         let endpoint = quic::client_endpoint(&rt, false).unwrap();
         let config = quic::client_config(reply.fingerprint, Duration::from_secs(30)).unwrap();
@@ -2207,7 +2210,7 @@ mod tests {
         let mut decoder = session::Decoder::default();
         decoder.push(&header);
         decoder.push(&payload);
-        (decoder.next().unwrap().unwrap(), (rt, conn))
+        (decoder.next().unwrap().unwrap(), (conn, rt))
     }
 
     #[test]
@@ -2228,11 +2231,17 @@ mod tests {
         let reply = ask(&mut query_stream(&h));
         let bad = QuicToken::generate().unwrap();
         assert_ne!(bad, reply.token);
-        let (answer, _guard) = quic_hello(&reply, bad.to_string());
+        let (answer, (conn, rt)) = quic_hello(&reply, bad.to_string());
         let SessionMsg::End(end) = answer else {
             panic!("expected END, got {answer:?}");
         };
         assert_eq!(end.reason, end_reason::QUIC_TOKEN);
+        // The keeper lingers (up to 2 s) so the peer can read the END; it must not close the
+        // connection right after writing it.
+        let closed_early = rt
+            .block_on(async { tokio::time::timeout(Duration::from_millis(300), conn.closed()).await })
+            .unwrap();
+        assert!(closed_early.is_err(), "keeper closed the connection without lingering");
         assert_eq!(h.server().connections(), 0);
     }
 
