@@ -78,3 +78,6 @@ scope-filter: 2 in-scope · 0 punch-listed
 fixBeads-round-2: mosh-19g.14 (prediction epoch hiding) mosh-19g.15 (keeper kick notify)
 codeBuckets (invocation 8, inv-66d31eb9-a4c4-4755-b5cc-43225e274a4e, stopReason ready-drained): completed mosh-19g.14 mosh-19g.15
 roastCodeReport-3: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-3.md
+stepBackCode-round-3: local — single test-fallout finding (predict-erase-tests-must-prove-paint); quic-preauth-bounds still punch-listed
+roastCodeExit: capped
+capped-round-3: 0 Blocking open; [Should-fix] tests/mosh_predict.rs:783 (vacuous wrong-prediction-clear assertions in the ignored QUIC acceptance test, fallout of fix 7673aad4) goes to the punch list with the 5 earlier punch-listed items
