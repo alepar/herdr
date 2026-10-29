@@ -19,3 +19,4 @@
 - [2026-10-28 phase 3] invocation 4 integration-blocked by my own bisect CARGO_TARGET_DIR (target-basecheck/) left untracked in the integration worktree; removed and relaunched — use a scratchpad target dir next time
 - [2026-10-28 phase 3] invocation 5 returned recovery-held: the merge-lane hold from invocation 4 needs a caller clear record; appended Recovery clear (worktree clean) and relaunched
 - [2026-10-28 phase 3→4] stripped Co-Authored-By trailers from 5 merge commits by a tree-preserving commit-tree rewrite (backup branch backup/pre-trailer-strip-34); final tree identical
+- [2026-10-28 phase 4] roast-code r1 assembler: review input selection: provenance unavailable; captured source available (inherited Phase 1 incomplete collections) → bounded direct review of product paths; docs/superpowers/** unreviewed; round unavailable for acceptance
