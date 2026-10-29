@@ -6,9 +6,6 @@
 //! read point; the (endpoint, connection generation) keying of prediction state.
 //! Does not own: link transport, painting onto the frame, or the server-side ack emission.
 
-// Some codec helpers stay unused until the server side (mosh-19g.3.3) and bridge probe land.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
