@@ -25,3 +25,4 @@
 - [2026-10-28 phase 5] disk pressure on /var (92 GB free, falling ~36 GB/h, reported by another workspace's agent): removed target/ from 35 merged task worktrees (275 GB -> 30 GB); merge agent again added Co-Authored-By on 2 merges — stripping deferred until after the last super-code invocation to keep landing SHAs stable
 - [2026-10-28 phase 6] full sweep: 14 failures, all pre-existing at run base 59f7d8fc (agent/api tests; environment), 0 introduced
 - [2026-10-28 phase 6] second Co-Authored-By strip (2 merge commits from fix round 2) after the last super-code invocation; tree identical; backup branch backup/pre-trailer-strip-34b
+- [2026-10-28 phase 7] standing practice (user instruction relayed over ht from the durak storage-cleanup session): delete each task worktree's target/ right after its task merges; upstream draft queued to the superpowers seat sQ0Vj7cYH6Jh (offline) as is
