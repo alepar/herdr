@@ -1,7 +1,7 @@
 # super-auto run — 2026-10-28-mosh-phases-3-4-quic-prediction
 
 flags: planOneShot=f skipPlanRoast=f skipCodeRoast=f autonomous=t
-phase: finish
+phase: done
 codeMechanism: Workflow
 runTag: mosh-phases-3-4-quic-prediction-20261028T144321
 context: Context: claude · planner=200K/167K · implementer=200K/167K · reviewer=200K/167K · finalReview=200K/167K · assembler=200K/167K · warn: planner, finalReview on a 200K model → set ANTHROPIC_DEFAULT_OPUS_MODEL=<model>[1m] or config.models.<role> to a 1M model · warn: implementer, reviewer, assembler on a 200K model → set ANTHROPIC_DEFAULT_SONNET_MODEL=<model>[1m] or config.models.<role> to a 1M model
@@ -98,3 +98,6 @@ sweep-after-handback-fix @ 7efaf4150c641b205800b86dc778e08a7fa0a18c: 4746 passed
 paused: by the user ("lets pause at a safe spot") before checking the 2 new agent-test failures at base and before the direct merge confirmation; nothing in flight
 resumed (user, after the AISW switch to claude-1): the 2 new sweep failures (cases::agents::agent_commands_work, cases::agents::agent_wait_tolerates_detection_uncertainty_and_pane_target_rename) pass at base 59f7d8fc (2/2) and pass 3/3 in isolation at tip 13afbc49 — full-suite load flakes in the same agent-test family as the 14 base failures, not regressions
 remaining gate: direct human confirmation of the merge into mosh (the relayed approval arrived via goal-hook feedback, not over ht); aarch64-unknown-linux-musl build check before any release
+phase7: human chose "Merge and push to fork" (asked directly in this session after the AISW switch to claude-1) · merged super-auto/mosh-phases-3-4-quic-prediction into mosh as 0c0e8f60 (--no-ff, no Co-Authored-By) · pushed mosh and the run branch to remote fork only (origin untouched)
+rootAcceptance: report-status --acceptance exit 3, eligible:false — gaps are bookkeeping only (no retained source extractions for roast reports; undeclared findings-ledger input populations; caller acceptance requirements unavailable); root epic mosh-19g left open pending a human waiver, as in Phase 2
+pending: aarch64-unknown-linux-musl build check before any release (ring's cc build dependency); task worktrees under the run worktree's .worktrees/ (targets already removed) and backup branches backup/pre-trailer-strip-34, -34b retained for cleanup on request
