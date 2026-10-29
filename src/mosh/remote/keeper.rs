@@ -145,6 +145,9 @@ struct Session {
     /// Render bytes the gate dropped since the leg went down. They never enter the ring, so
     /// the reset window alone cannot stop the reader; they count against it instead.
     outage_dropped: usize,
+    /// Ring-routed bytes of a render-split session that did not fit the ring's room yet. The
+    /// reader drains them, in order, before it reads the server again.
+    ring_backlog: Vec<u8>,
 }
 
 struct LegSlot {
@@ -670,6 +673,7 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
                     render_split: hello.render_split,
                     gate: ChainGate::new(),
                     outage_dropped: 0,
+                    ring_backlog: Vec::new(),
                 },
             );
             drop(table);
@@ -901,8 +905,17 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
         let want = {
             let mut table = shared.lock();
             loop {
-                match table.sessions.get(&token) {
+                match table.sessions.get_mut(&token) {
                     Some(session) if session.gen == gen => {
+                        if !session.ring_backlog.is_empty() {
+                            drain_ring_backlog(session);
+                            shared.kick.notify_all();
+                            if !session.ring_backlog.is_empty() {
+                                // Acks free ring room and kick: the server stays unread meanwhile.
+                                table = shared.kick.wait(table).unwrap_or_else(|e| e.into_inner());
+                                continue;
+                            }
+                        }
                         let size = outage_read_size(session);
                         if size > 0 && !lane_saturated(session) {
                             break size;
@@ -981,6 +994,18 @@ fn lane_saturated(session: &Session) -> bool {
             .is_some_and(LaneQueue::saturated)
 }
 
+/// Push as much of the ring backlog as the ring's room takes (the non-split reader's rule).
+fn drain_ring_backlog(session: &mut Session) {
+    let n = session.ring_backlog.len().min(session.endpoint.source_room());
+    if n == 0 {
+        return;
+    }
+    // Within `source_room()`, so the push cannot overflow.
+    if session.endpoint.push_source(&session.ring_backlog[..n]).is_ok() {
+        session.ring_backlog.drain(..n);
+    }
+}
+
 /// Split `bytes` into whole frames and send each where the gate routes it. `Err` carries the
 /// reason to close the session with.
 fn route_frames(
@@ -1002,10 +1027,8 @@ fn route_frames(
         match session.gate.route(class, leg) {
             Route::Ring => {
                 counts.ring += 1;
-                session
-                    .endpoint
-                    .push_source(&frame)
-                    .map_err(|_| end_reason::RING_OVERFLOW)?
+                session.ring_backlog.extend_from_slice(&frame);
+                drain_ring_backlog(session);
             }
             Route::Lane => {
                 let lane = session.leg.as_ref().and_then(|slot| slot.lane.as_ref());
@@ -1664,6 +1687,7 @@ mod tests {
                 render_split: false,
                 gate: ChainGate::new(),
                 outage_dropped: 0,
+                ring_backlog: Vec::new(),
             },
         );
         run_timers(
@@ -2421,6 +2445,48 @@ mod tests {
     const SELF_CONTAINED: u8 = 13;
     const CHAINED: u8 = 19;
     const RELIABLE: u8 = 1;
+
+    /// One frame of `len` payload bytes (tag first).
+    fn big_frame(tag: u8, len: usize) -> Vec<u8> {
+        let mut out = (len as u32).to_le_bytes().to_vec();
+        out.push(tag);
+        out.resize(4 + len, 0xab);
+        out
+    }
+
+    /// Larger than the ring, so no push of the whole frame can fit.
+    const OVERSIZED: usize = KEEPER_RING_CAP + 1024 * 1024;
+
+    #[test]
+    fn render_split_frame_larger_than_the_ring_reaches_a_lane_less_leg() {
+        let h = Harness::new();
+        let mut local = h.local();
+        local.endpoint.set_render_split(true);
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::New);
+        let conn = h.server().conn(0);
+        let mut expected = big_frame(SELF_CONTAINED, OVERSIZED);
+        expected.extend(frame(RELIABLE, 1));
+        conn.write_async(expected.clone());
+        local.wait(Duration::from_secs(60), |l| l.received.len() >= expected.len());
+        assert!(local.received == expected, "frame bytes differ");
+        assert!(!h.trace_has("session_end", "reason", end_reason::RING_OVERFLOW));
+        assert!(local.ended.is_none(), "session ended: {:?}", local.ended);
+    }
+
+    #[test]
+    fn render_split_reliable_frame_larger_than_the_ring_reaches_a_lane_leg() {
+        let dir = TestDir::new();
+        let server = FakeServer::start(&dir.0.join("server.sock"));
+        let LaneSession { mut local, .. } = lane_session(dir.0.join("server.sock"));
+        let conn = server.conn(0);
+        let mut expected = big_frame(RELIABLE, OVERSIZED);
+        expected.extend(frame(RELIABLE, 1));
+        conn.write_async(expected.clone());
+        local.wait(Duration::from_secs(60), |l| l.received.len() >= expected.len());
+        assert!(local.received == expected, "frame bytes differ");
+        assert!(local.ended.is_none(), "session ended: {:?}", local.ended);
+    }
 
     #[test]
     fn render_split_leg_drop_mid_burst_never_forwards_chained_before_self_contained() {
