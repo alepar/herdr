@@ -181,6 +181,12 @@ fn attempt(seed: u64) -> Attempt {
         "no echo after the rebind: {}",
         context(&remote, &client, &relay)
     );
+    // The round trip above needed the migrated path; it is still the one QUIC connection.
+    assert_eq!(remote.session_legs(&client.id).len(), 1);
+    assert_eq!(client.event_count("welcome"), 1, "{:?}", client.events());
+    assert_eq!(client.event_count("leg_down"), 0, "{:?}", client.events());
+    assert_eq!(remote.keeper_event_count("leg_down"), 0);
+    assert_eq!(remote.ssh_session_children_alive(&client.id), 0);
     assert_no_disconnect(&remote, &mut client, &relay);
     eprintln!(
         "end to end: relay {:?}; first-key echo {latency:?}; predicted taps {}",
