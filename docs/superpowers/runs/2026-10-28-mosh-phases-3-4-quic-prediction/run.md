@@ -50,3 +50,22 @@ codeBuckets (invocation 4, inv-29be42a9-8cb6-4837-86d2-6c0e13d8f328, stopReason 
   held: mosh-19g.2.21 (implemented, reviewed, suites pass; merge held) · escalated: mosh-19g.3.10 (acceptance amended by comment; re-dispatch)
 roastCodeRound: 1
 roastCodeReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md
+findingsLedger: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger.md
+stepBackCode-round-1: local — two local clusters (quic-preauth-bounds, reorder-dropped-chained-seqs) plus independent items; no design decision changes
+scopeFilter-round-1: [Should-fix] src/mosh/render_reorder.rs:113 in-scope — Correctness defect in a goal-named path: the render lane can stall permanently.
+scopeFilter-round-1: [Should-fix] src/mosh/render_reorder.rs:175 in-scope — Correctness defect in a goal-named path: a supersede/reset gap can permanently stall the render lane with no resync.
+scopeFilter-round-1: [Should-fix] src/mosh/remote/keeper.rs:510; src/mosh/remote/keeper.rs:489 punch-list — DoS/resource-pinning hardening against unauthenticated peers; the goal states no security/DoS requirement.
+scopeFilter-round-1: [Should-fix] src/mosh/remote/keeper.rs:484 punch-list — Hardening (cap on concurrent pre-auth connections); not a goal-behavior defect.
+scopeFilter-round-1: [Should-fix] src/mosh/predict.rs:375 in-scope — Covered predictions wrongly trip the timeout and disable prediction, against the Phase 4 design.
+scopeFilter-round-1: [Nit] src/mosh/local_bridge.rs:1302 punch-list — Unbounded local memory only when the UI client is stalled; hardening.
+scopeFilter-round-1: [Nit] src/mosh/quic_leg.rs:218 in-scope — Unbounded DNS lookup and ignored stop let a QUIC attempt exceed the goal's 3 s bound.
+scopeFilter-round-1: [Nit] tests/mosh_end_to_end.rs:286; tests/mosh_quic.rs:537 in-scope — Migration on the same connection is never verified by a round trip that needs the migrated path.
+scopeFilter-round-1: [Nit] tests/mosh_quic.rs:483 in-scope — Fallback test never checks that QUIC was tried first.
+scopeFilter-round-1: [Nit] tests/mosh_predict.rs:169; tests/mosh_predict.rs:153 punch-list — Missing timing_lock; can only flake, never false-pass.
+scopeFilter-round-1: [Nit] src/mosh/remote/keeper.rs:510 punch-list — Missing tests for pre-auth DoS bounds; hardening.
+scopeFilter-round-1: [Must-fix] src/mosh/remote/keeper.rs route_frames in-scope — Final-review Must-fix.
+scopeFilter-round-1: [Must-fix] src/mosh/remote/keeper.rs quic_hello_with_bad_token_gets_end_quic_token in-scope — Final-review Must-fix.
+cluster dropped: quic-preauth-bounds — Every wait an unauthenticated QUIC connection can cause before WELCOME must use the remaining time of one deadline fixed when the connection is accepted (accept_bi wait at quic_acceptor.rs:194, each HELLO read computing remaining time, the 2 s END linger on refuse). The `pending` slot is taken against a hard cap before `thread::spawn` in quic_conn_handler; a connection over the cap is closed immediately. Add QUIC-side tests for a silent peer, a non-HELLO first byte, an oversized HELLO length, a connection that never opens a stream and a trickled HELLO; each asserts close within the bound and `pending` back to 0.
+scope-filter: 8 in-scope · 5 punch-listed
+fixBeads-round-1: mosh-19g.8 (reorder cluster) mosh-19g.9 (predict timeout) mosh-19g.10 (QUIC attempt bound) mosh-19g.11 (QUIC test gaps) mosh-19g.12 (route_frames) mosh-19g.13 (flaky keeper test); sweep mosh-19g.7 reopened
+parked-r1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md · escalation · "ring's cc build dependency may break the aarch64-unknown-linux-musl cross builds in release.yml/preview.yml/build-artifacts-manual.yml (external-unverified); run build-artifacts-manual for that target before release"
