@@ -107,6 +107,9 @@ struct Shared {
     pending: AtomicUsize,
     /// The QUIC endpoint, started by the first bootstrap query.
     quic: QuicAcceptor,
+    /// Test seam: how many times a reader parked on a ring backlog that did not fit.
+    #[cfg(test)]
+    backlog_waits: AtomicUsize,
 }
 
 /// What `server_writer` is asked to do, in the order it arrives.
@@ -338,6 +341,8 @@ fn serve(config: KeeperConfig) -> io::Result<()> {
         trace_dir: config.trace_dir.clone(),
         next_id: AtomicU64::new(1),
         pending: AtomicUsize::new(0),
+        #[cfg(test)]
+        backlog_waits: AtomicUsize::new(0),
         quic: QuicAcceptor::default(),
     });
 
@@ -911,9 +916,14 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
                 match table.sessions.get_mut(&token) {
                     Some(session) if session.gen == gen => {
                         if !session.ring_backlog.is_empty() {
-                            drain_ring_backlog(session);
-                            shared.kick.notify_all();
+                            // Kick only on progress: `kick` is keeper-wide, so a notify on a wake
+                            // that moved nothing wakes the other stuck readers, and they this one.
+                            if drain_ring_backlog(session) {
+                                shared.kick.notify_all();
+                            }
                             if !session.ring_backlog.is_empty() {
+                                #[cfg(test)]
+                                shared.backlog_waits.fetch_add(1, Ordering::Relaxed);
                                 // Acks free ring room and kick: the server stays unread meanwhile.
                                 table = shared.kick.wait(table).unwrap_or_else(|e| e.into_inner());
                                 continue;
@@ -998,15 +1008,18 @@ fn lane_saturated(session: &Session) -> bool {
 }
 
 /// Push as much of the ring backlog as the ring's room takes (the non-split reader's rule).
-fn drain_ring_backlog(session: &mut Session) {
+/// Returns whether any bytes reached the ring.
+fn drain_ring_backlog(session: &mut Session) -> bool {
     let n = session.ring_backlog.len().min(session.endpoint.source_room());
     if n == 0 {
-        return;
+        return false;
     }
     // Within `source_room()`, so the push cannot overflow.
-    if session.endpoint.push_source(&session.ring_backlog[..n]).is_ok() {
-        session.ring_backlog.drain(..n);
+    if session.endpoint.push_source(&session.ring_backlog[..n]).is_err() {
+        return false;
     }
+    session.ring_backlog.drain(..n);
+    true
 }
 
 /// Split `bytes` into whole frames and send each where the gate routes it. `Err` carries the
@@ -1660,6 +1673,8 @@ mod tests {
             trace_dir: None,
             next_id: AtomicU64::new(1),
             pending: AtomicUsize::new(0),
+            #[cfg(test)]
+            backlog_waits: AtomicUsize::new(0),
             quic: QuicAcceptor::default(),
         };
         let now = Instant::now();
@@ -2270,6 +2285,8 @@ mod tests {
             trace_dir: None,
             next_id: AtomicU64::new(1),
             pending: AtomicUsize::new(0),
+            #[cfg(test)]
+            backlog_waits: AtomicUsize::new(0),
             quic: QuicAcceptor::default(),
         });
         let mut local = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
@@ -2325,6 +2342,8 @@ mod tests {
             trace_dir: None,
             next_id: AtomicU64::new(1),
             pending: AtomicUsize::new(0),
+            #[cfg(test)]
+            backlog_waits: AtomicUsize::new(0),
             quic: QuicAcceptor::default(),
         })
     }
@@ -2495,6 +2514,72 @@ mod tests {
         local.wait(Duration::from_secs(60), |l| l.received.len() >= expected.len());
         assert!(local.received == expected, "frame bytes differ");
         assert!(local.ended.is_none(), "session ended: {:?}", local.ended);
+    }
+
+    #[test]
+    fn stuck_ring_backlogs_on_two_sessions_do_not_wake_each_other() {
+        let shared = shared_at(PathBuf::new());
+        let mut readers = Vec::new();
+        let mut tokens = Vec::new();
+        // Peers stay open so neither reader sees EOF or a send error.
+        let mut _peers = Vec::new();
+        for gen in 1..=2u64 {
+            let token = Token::generate().unwrap();
+            let mut endpoint = SessionEndpoint::new(Role::Keeper, token, KEEPER_RING_CAP);
+            endpoint.welcome(Instant::now(), WelcomeStatus::New, 0).unwrap();
+            while endpoint.source_room() > 0 {
+                let n = endpoint.source_room().min(MAX_DATA_CHUNK);
+                endpoint.push_source(&vec![0; n]).unwrap();
+            }
+            let (server, server_peer) = UnixStream::pair().unwrap();
+            let reader = server.try_clone().unwrap();
+            let (to_server, from_client) = mpsc::channel();
+            shared.lock().sessions.insert(
+                token,
+                Session {
+                    gen,
+                    endpoint,
+                    server,
+                    to_server,
+                    leg: None,
+                    grace: Duration::from_secs(60),
+                    grace_deadline: None,
+                    eof: false,
+                    end_sent: false,
+                    render_split: true,
+                    gate: ChainGate::new(),
+                    outage_dropped: 0,
+                    ring_backlog: vec![RELIABLE; 64],
+                },
+            );
+            let reader_shared = Arc::clone(&shared);
+            readers.push(thread::spawn(move || {
+                server_reader(&reader_shared, token, gen, reader);
+            }));
+            _peers.push((server_peer, from_client));
+            tokens.push(token);
+        }
+        // Both readers park on their backlog; nothing frees ring room from here on.
+        assert!(wait_until(Duration::from_secs(5), || {
+            shared.backlog_waits.load(Ordering::Relaxed) >= 2
+        }));
+        let parked = shared.backlog_waits.load(Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(300));
+        let woken = shared.backlog_waits.load(Ordering::Relaxed) - parked;
+        // Slack for a spurious condvar wakeup; the bug wakes them thousands of times.
+        assert!(woken <= 2, "the readers woke each other {woken} times with no ring room");
+        {
+            let table = shared.lock();
+            for token in &tokens {
+                assert_eq!(table.sessions[token].ring_backlog.len(), 64, "room was 0");
+            }
+        }
+        // Removing the sessions lets both readers return.
+        shared.lock().sessions.clear();
+        shared.kick.notify_all();
+        for reader in readers {
+            reader.join().unwrap();
+        }
     }
 
     #[test]
