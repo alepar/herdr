@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::predict::{EchoAck, ECHO_ACK_KIND, ECHO_SUBSCRIBE_KIND};
-use crate::protocol::ServerMessage;
+use crate::protocol::{PaneSurfacePane, ServerMessage};
 use crate::server::client_transport::{ClientWriter, ServerEvent};
 use crate::server::clients::ClientConnection;
 
@@ -35,14 +35,22 @@ pub(crate) struct EchoTracker {
     clients: HashMap<u64, ClientEcho>,
 }
 
-/// An input is acked this long after it was received (3.3 / spec §2).
+/// An input is acked this long after it was received (3.3 / spec §2), and only once the pane it
+/// was typed into has been rendered changed (the rendered path) or has stayed unchanged long
+/// enough to be judged inert (the settle path).
 const ECHO_DELAY: Duration = Duration::from_millis(50);
-/// Extra wait when no render has been seen to commit since the input was first observed, so an
-/// echo render that the loop has not produced yet (pane dirty, throttled) is not outrun by its
-/// ack. Input that causes no render (`stty -echo`) is acked once this elapses.
+/// Extra wait before an input that changed nothing in its pane is judged inert (`stty -echo`).
+/// Where nothing else is rendering for the client the ack follows at once; where another pane is
+/// rendering (a flood) it waits for a render committed after the grace, which read the pane at
+/// least `ECHO_DELAY + SETTLE_GRACE` after the input.
 const SETTLE_GRACE: Duration = Duration::from_millis(50);
 /// Re-check interval while an ack is due but withheld.
 const RETRY: Duration = Duration::from_millis(10);
+/// Another pane that changed this recently counts as a render flood: the committed surface may
+/// trail the pane runtimes (render throttled or backpressured), so an unchanged pane proves nothing.
+const FLOW_WINDOW: Duration = Duration::from_millis(500);
+/// Pass gaps longer than this make a pane change unattributable in time (the cache is stale).
+const PASS_STALE: Duration = Duration::from_millis(300);
 
 static ECHO: Mutex<Option<EchoTracker>> = Mutex::new(None);
 
@@ -54,6 +62,15 @@ fn with_tracker<R>(f: impl FnOnce(&mut EchoTracker) -> R) -> R {
 #[derive(Debug, Default)]
 struct ClientEcho {
     panes: HashMap<String, PaneEcho>,
+    /// Each pane's committed `content_revision` as of the last pass, and when it last moved.
+    seen: HashMap<String, PaneSeen>,
+    last_pass: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct PaneSeen {
+    revision: u64,
+    moved_at: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -68,8 +85,50 @@ struct Received {
     /// Cumulative events received for the pane once this batch arrived.
     count: u64,
     at: Instant,
-    /// Committed `surface_revision` when an echo pass first saw this entry.
-    revision_seen: Option<u64>,
+    /// The pane's committed `content_revision` when an echo pass first saw this entry (a pass
+    /// follows the input on the loop thread before any echo can exist). A later, different
+    /// revision means a render read the pane after the input was received.
+    pane_before: Option<u64>,
+    /// Committed client `surface_revision` at the first settle-path pass while other panes render.
+    grace_revision: Option<u64>,
+}
+
+impl ClientEcho {
+    /// Records the committed pane revisions of this pass.
+    fn observe(&mut self, panes: &[PaneSurfacePane], now: Instant) {
+        let fresh = self
+            .last_pass
+            .is_some_and(|last| now.saturating_duration_since(last) <= PASS_STALE);
+        self.last_pass = Some(now);
+        for pane in panes {
+            match self.seen.get_mut(&pane.pane_id) {
+                Some(seen) if seen.revision != pane.content_revision => {
+                    seen.revision = pane.content_revision;
+                    seen.moved_at = fresh.then_some(now);
+                }
+                Some(_) => {}
+                None => {
+                    self.seen.insert(
+                        pane.pane_id.clone(),
+                        PaneSeen {
+                            revision: pane.content_revision,
+                            moved_at: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Whether a pane other than `pane_id` changed within `FLOW_WINDOW`.
+fn others_flowing(seen: &HashMap<String, PaneSeen>, pane_id: &str, now: Instant) -> bool {
+    seen.iter().any(|(id, seen)| {
+        id != pane_id
+            && seen
+                .moved_at
+                .is_some_and(|at| now.saturating_duration_since(at) <= FLOW_WINDOW)
+    })
 }
 
 impl EchoTracker {
@@ -89,12 +148,20 @@ impl EchoTracker {
         pane.fifo.push_back(Received {
             count: pane.received,
             at: now,
-            revision_seen: None,
+            pane_before: None,
+            grace_revision: None,
         });
     }
 
     /// Acks due at `now`, with the writer to send each on. Takes no locks of its own and
     /// sends nothing: the caller sends after releasing the tracker mutex.
+    ///
+    /// The oldest due input of a pane is acked when (rendered path) the pane's committed
+    /// `content_revision` differs from the one seen when the input arrived: a render read the pane
+    /// after the input and saw it change, and the committed client revision contains that change.
+    /// Later inputs are rebased on that change so it cannot ack them. Otherwise, once
+    /// `SETTLE_GRACE` has passed (settle path), the input is judged inert: at once when no other
+    /// pane is rendering, else after a render committed past the grace pass.
     fn collect_due(
         &mut self,
         clients: &HashMap<u64, ClientConnection>,
@@ -108,46 +175,63 @@ impl EchoTracker {
             let Some(writer) = &client.writer else {
                 continue;
             };
-            let Some(revision) = client
-                .render_state
-                .last_pane_surface()
-                .map(|surface| surface.surface_revision)
-            else {
+            let Some(surface) = client.render_state.last_pane_surface() else {
                 continue;
             };
-            for pane in echo.panes.values_mut() {
-                for entry in &mut pane.fifo {
-                    entry.revision_seen.get_or_insert(revision);
-                }
-            }
-            // A deferred or recomputing render means a newer surface is on its way.
-            if client.render_pending || client.render_state.requires_recompute() {
-                continue;
-            }
-            for (pane_id, pane) in &mut echo.panes {
-                let newest_due = pane
-                    .fifo
+            let revision = surface.surface_revision;
+            echo.observe(&surface.panes, now);
+            let ClientEcho { panes, seen, .. } = echo;
+            for (pane_id, pane) in panes.iter_mut() {
+                let current = surface
+                    .panes
                     .iter()
-                    .rev()
-                    .find(|entry| entry.at + ECHO_DELAY <= now);
-                let Some(entry) = newest_due else {
-                    continue;
-                };
-                let rendered_since = entry.revision_seen != Some(revision);
-                if !rendered_since && now < entry.at + ECHO_DELAY + SETTLE_GRACE {
-                    continue;
+                    .find(|candidate| &candidate.pane_id == pane_id)
+                    .map(|candidate| candidate.content_revision);
+                for entry in &mut pane.fifo {
+                    if entry.pane_before.is_none() {
+                        entry.pane_before = current;
+                    }
                 }
-                let input_seq = entry.count;
-                pane.acked = input_seq;
-                pane.fifo.retain(|entry| entry.count > input_seq);
-                due.push((
-                    writer.clone(),
-                    EchoAck {
-                        pane_id: pane_id.clone(),
-                        input_seq,
-                        surface_revision: revision,
-                    },
-                ));
+                let mut acked_to = None;
+                while let Some(front) = pane.fifo.front_mut() {
+                    if front.at + ECHO_DELAY > now {
+                        break;
+                    }
+                    let rendered = matches!(
+                        (front.pane_before, current),
+                        (Some(before), Some(after)) if before != after
+                    );
+                    let settled = !rendered && now >= front.at + ECHO_DELAY + SETTLE_GRACE && {
+                        if others_flowing(seen, pane_id, now) {
+                            let grace = *front.grace_revision.get_or_insert(revision);
+                            revision > grace
+                        } else {
+                            !client.render_pending && !client.render_state.requires_recompute()
+                        }
+                    };
+                    if !rendered && !settled {
+                        break;
+                    }
+                    acked_to = Some(front.count);
+                    pane.fifo.pop_front();
+                    if rendered {
+                        for entry in &mut pane.fifo {
+                            entry.pane_before = current;
+                            entry.grace_revision = None;
+                        }
+                    }
+                }
+                if let Some(input_seq) = acked_to {
+                    pane.acked = input_seq;
+                    due.push((
+                        writer.clone(),
+                        EchoAck {
+                            pane_id: pane_id.clone(),
+                            input_seq,
+                            surface_revision: revision,
+                        },
+                    ));
+                }
             }
         }
         due
@@ -157,21 +241,17 @@ impl EchoTracker {
         let mut earliest = next;
         for echo in self.clients.values() {
             for pane in echo.panes.values() {
-                let first_pending = pane.fifo.iter().find(|entry| entry.at + ECHO_DELAY > now);
-                let newest_due = pane
-                    .fifo
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.at + ECHO_DELAY <= now);
-                let candidates = first_pending
-                    .map(|entry| entry.at + ECHO_DELAY)
-                    .into_iter()
-                    .chain(newest_due.map(|entry| entry.at + ECHO_DELAY + SETTLE_GRACE));
-                for candidate in candidates {
-                    // A past candidate means the ack is withheld; poll instead of spinning.
-                    let candidate = if candidate <= now { now + RETRY } else { candidate };
-                    earliest = Some(earliest.map_or(candidate, |current| current.min(candidate)));
-                }
+                let Some(front) = pane.fifo.front() else {
+                    continue;
+                };
+                let candidate = if front.at + ECHO_DELAY > now {
+                    front.at + ECHO_DELAY
+                } else {
+                    front.at + ECHO_DELAY + SETTLE_GRACE
+                };
+                // A past candidate means the ack is withheld; poll instead of spinning.
+                let candidate = if candidate <= now { now + RETRY } else { candidate };
+                earliest = Some(earliest.map_or(candidate, |current| current.min(candidate)));
             }
         }
         earliest
@@ -263,7 +343,9 @@ pub(crate) fn on_client_disconnected(client_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{FrameData, PaneSurfaceFrame, RenderEncoding, ServerMessage};
+    use crate::protocol::{
+        FrameData, PaneSurfaceFrame, PaneSurfacePane, RenderEncoding, ServerMessage, SurfaceRect,
+    };
     use crate::server::client_transport::ClientWriter;
 
     fn surface(projection_revision: u64) -> PaneSurfaceFrame {
@@ -370,10 +452,31 @@ mod tests {
     }
 
     fn commit(client: &mut ClientConnection, projection: u64) -> u64 {
-        let prepared = client
-            .render_state
-            .prepare_pane_surface(surface(projection))
-            .unwrap();
+        commit_panes(client, projection, &[])
+    }
+
+    /// Commits a surface whose panes carry the given `(pane_id, content_revision)`; `projection`
+    /// must differ between commits that are otherwise identical.
+    fn commit_panes(client: &mut ClientConnection, projection: u64, panes: &[(&str, u64)]) -> u64 {
+        let mut frame = surface(projection);
+        frame.panes = panes
+            .iter()
+            .map(|(id, content_revision)| PaneSurfacePane {
+                pane_id: (*id).into(),
+                content_revision: *content_revision,
+                rect: SurfaceRect { x: 0, y: 0, width: 4, height: 1 },
+                inner_rect: SurfaceRect { x: 0, y: 0, width: 4, height: 1 },
+                scrollbar_rect: None,
+                scroll: None,
+                focused: false,
+                mouse_reporting: false,
+                sgr_pixel_mouse: false,
+                alternate_screen_active: false,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .collect();
+        let prepared = client.render_state.prepare_pane_surface(frame).unwrap();
         let ServerMessage::PaneSurface(frame) = prepared.message() else {
             panic!("expected a full surface");
         };
@@ -435,14 +538,14 @@ mod tests {
         let t0 = Instant::now();
         tracker.subscribe(1);
         let mut c = client();
-        commit(&mut c, 1);
+        commit_panes(&mut c, 1, &[("p", 1)]);
         tracker.count(1, "p", 2, t0);
         let c = pass(&mut tracker, 1, c, t0 + ms(49));
         assert!(acks(&c).is_empty());
         assert_eq!(tracker.deadline(None, t0 + ms(10)), Some(t0 + ms(50)));
-        // A render commits after the first look, so the ack is not held for the settle grace.
+        // The pane renders changed after the first look, so the ack is not held for the grace.
         let mut c = c;
-        commit(&mut c, 2);
+        commit_panes(&mut c, 2, &[("p", 2)]);
         let c = pass(&mut tracker, 1, c, t0 + ms(50));
         let got = acks(&c);
         assert_eq!(got.len(), 1);
@@ -455,12 +558,12 @@ mod tests {
         let t0 = Instant::now();
         tracker.subscribe(1);
         let mut c = client();
-        commit(&mut c, 1);
+        commit_panes(&mut c, 1, &[("p", 1)]);
         tracker.count(1, "p", 1, t0);
-        let mut c = pass(&mut tracker, 1, c, t0); // first look stamps revision_seen
+        let mut c = pass(&mut tracker, 1, c, t0); // first look stamps the pane baseline
         assert!(acks(&c).is_empty());
-        let r1 = commit(&mut c, 2);
-        let r2 = commit(&mut c, 3);
+        let r1 = commit_panes(&mut c, 2, &[("p", 2)]);
+        let r2 = commit_panes(&mut c, 3, &[("p", 3)]);
         assert!(r2 > r1);
         let c = pass(&mut tracker, 1, c, t0 + ms(60));
         let got = acks(&c);
@@ -532,12 +635,12 @@ mod tests {
         let t0 = Instant::now();
         tracker.subscribe(1);
         let mut c = client();
-        let old = commit(&mut c, 1);
+        let old = commit_panes(&mut c, 1, &[("p", 1)]);
         tracker.count(1, "p", 1, t0);
         c.render_pending = true;
         let mut c = pass(&mut tracker, 1, c, t0 + ms(80)); // stamps `old`, then withholds
         assert!(acks(&c).is_empty());
-        let new = commit(&mut c, 2);
+        let new = commit_panes(&mut c, 2, &[("p", 2)]);
         assert!(new > old);
         c.render_pending = false;
         let c = pass(&mut tracker, 1, c, t0 + ms(85));
@@ -547,21 +650,152 @@ mod tests {
     }
 
     #[test]
+    fn render_pending_withholds_the_settle_ack() {
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        let r = commit_panes(&mut c, 1, &[("p", 1)]);
+        tracker.count(1, "p", 1, t0);
+        c.render_pending = true;
+        let mut c = pass(&mut tracker, 1, c, t0 + ms(120));
+        assert!(acks(&c).is_empty(), "a deferred render may still carry the echo");
+        c.render_pending = false;
+        let c = pass(&mut tracker, 1, c, t0 + ms(125));
+        let got = acks(&c);
+        assert_eq!((got.len(), got[0].surface_revision), (1, r));
+    }
+
+    #[test]
+    fn flood_in_other_pane_does_not_ack_before_echo() {
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        commit_panes(&mut c, 1, &[("a", 1), ("p", 2)]);
+        tracker.count(1, "p", 1, t0);
+        let mut c = pass(&mut tracker, 1, c, t0);
+        // Every frame moves the client revision, none of them touches pane p.
+        for (i, at) in [10u64, 60, 90].into_iter().enumerate() {
+            commit_panes(&mut c, 2 + i as u64, &[("a", 3 + i as u64), ("p", 2)]);
+            c = pass(&mut tracker, 1, c, t0 + ms(at));
+            assert!(acks(&c).is_empty(), "acked at +{at} ms before the echo rendered");
+        }
+        // Past the grace the pane is still unchanged and renders are flowing: wait for one more.
+        commit_panes(&mut c, 9, &[("a", 9), ("p", 2)]);
+        c = pass(&mut tracker, 1, c, t0 + ms(100));
+        assert!(acks(&c).is_empty(), "the render before the grace pass cannot settle it");
+        let after = commit_panes(&mut c, 10, &[("a", 10), ("p", 2)]);
+        let c = pass(&mut tracker, 1, c, t0 + ms(110));
+        let got = acks(&c);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].input_seq, got[0].surface_revision), (1, after));
+    }
+
+    #[test]
+    fn pane_change_after_input_acks_that_revision() {
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        commit_panes(&mut c, 1, &[("a", 1), ("p", 2)]);
+        tracker.count(1, "p", 1, t0);
+        let mut c = pass(&mut tracker, 1, c, t0);
+        let echo = commit_panes(&mut c, 2, &[("a", 3), ("p", 4)]);
+        let mut c = pass(&mut tracker, 1, c, t0 + ms(30));
+        assert!(acks(&c).is_empty(), "not due before 50 ms");
+        commit_panes(&mut c, 3, &[("a", 5), ("p", 4)]);
+        let c = pass(&mut tracker, 1, c, t0 + ms(60));
+        let got = acks(&c);
+        assert_eq!(got.len(), 1);
+        // The ack names the committed revision, which contains the change of pane p.
+        assert_eq!((got[0].input_seq, got[0].surface_revision > echo), (1, true));
+    }
+
+    #[test]
+    fn earlier_echo_does_not_ack_later_input() {
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        commit_panes(&mut c, 1, &[("p", 2)]);
+        tracker.count(1, "p", 1, t0);
+        let mut c = pass(&mut tracker, 1, c, t0);
+        tracker.count(1, "p", 1, t0 + ms(20));
+        c = pass(&mut tracker, 1, c, t0 + ms(20));
+        let first = commit_panes(&mut c, 2, &[("p", 4)]);
+        c = pass(&mut tracker, 1, c, t0 + ms(60));
+        let got = acks(&c);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].input_seq, got[0].surface_revision), (1, first));
+        // The change belonged to input 1: input 2 (due at +70) waits for its own echo.
+        c = pass(&mut tracker, 1, c, t0 + ms(80));
+        assert!(acks(&c).is_empty(), "input 2 was acked by input 1's echo");
+        let second = commit_panes(&mut c, 3, &[("p", 6)]);
+        let c = pass(&mut tracker, 1, c, t0 + ms(85));
+        let got = acks(&c);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].input_seq, got[0].surface_revision), (2, second));
+    }
+
+    #[test]
+    fn echoes_in_one_render_are_acked_cumulatively_after_the_grace() {
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        commit_panes(&mut c, 1, &[("p", 2)]);
+        tracker.count(1, "p", 1, t0);
+        let mut c = pass(&mut tracker, 1, c, t0);
+        tracker.count(1, "p", 1, t0 + ms(10));
+        c = pass(&mut tracker, 1, c, t0 + ms(10));
+        let r = commit_panes(&mut c, 2, &[("p", 6)]);
+        c = pass(&mut tracker, 1, c, t0 + ms(60));
+        assert_eq!(acks(&c).iter().map(|a| a.input_seq).collect::<Vec<_>>(), [1]);
+        // Input 2's echo is in that render too, but only the settle path can tell.
+        let c = pass(&mut tracker, 1, c, t0 + ms(110));
+        let got = acks(&c);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].input_seq, got[0].surface_revision), (2, r));
+    }
+
+    #[test]
+    fn a_stalled_flood_still_counts_as_flowing() {
+        // The committed revision stops for longer than the grace (throttled or backpressured
+        // render) while pane a is still being flooded: an unchanged pane p proves nothing.
+        let mut tracker = EchoTracker::default();
+        let t0 = Instant::now();
+        tracker.subscribe(1);
+        let mut c = client();
+        commit_panes(&mut c, 1, &[("a", 1), ("p", 2)]);
+        c = pass(&mut tracker, 1, c, t0);
+        commit_panes(&mut c, 2, &[("a", 3), ("p", 2)]);
+        c = pass(&mut tracker, 1, c, t0 + ms(10));
+        tracker.count(1, "p", 1, t0 + ms(20));
+        c = pass(&mut tracker, 1, c, t0 + ms(25));
+        c = pass(&mut tracker, 1, c, t0 + ms(130));
+        assert!(acks(&c).is_empty(), "acked inside a render stall");
+        // The flood ends; once no other pane moved for the window the input is judged inert.
+        let c = pass(&mut tracker, 1, c, t0 + ms(700));
+        assert_eq!(acks(&c).len(), 1);
+    }
+
+    #[test]
     fn subscribed_client_typing_gets_acks_with_input_seq_equal_to_events_sent() {
         let id = 9_002;
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         on_client_endpoint_control(id, ECHO_SUBSCRIBE_KIND, "", &tx);
         let mut c = client();
-        commit(&mut c, 1);
+        commit_panes(&mut c, 1, &[("pane-1", 1)]);
         let mut clients = HashMap::from([(id, c)]);
         let t0 = Instant::now();
-        // First look stamps the baseline revision, then the echo render commits.
+        // First look stamps the baseline pane revision, then the echo render commits.
         echo_due(&clients, t0);
         for batch in [3usize, 1, 2] {
             on_pane_input(id, "pane-1", batch);
         }
         echo_due(&clients, t0);
-        commit(clients.get_mut(&id).unwrap(), 2);
+        commit_panes(clients.get_mut(&id).unwrap(), 2, &[("pane-1", 2)]);
         echo_due(&clients, t0 + Duration::from_secs(1));
         let got = acks(&clients[&id]);
         assert_eq!(got.len(), 1);

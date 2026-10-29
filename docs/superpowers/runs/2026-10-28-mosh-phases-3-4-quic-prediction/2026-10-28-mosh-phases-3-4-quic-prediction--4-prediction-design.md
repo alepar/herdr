@@ -232,3 +232,55 @@ dirty/throttled case, the fallback is used with a bound so input that renders no
 (`stty -echo`) is still acked: an entry records the committed `surface_revision` when an echo pass
 first sees it, and the ack is sent once the revision has advanced past that value, or 50 ms after
 the 50 ms deadline if it has not. Worst-case ack latency without a render is 100 ms.
+
+### 2026-10-28: echo-ack is judged per pane (mosh-19g.3.10)
+
+Supersedes the 3.3 note's client-wide `revision_seen` fallback (that note is left as written).
+
+Cause (confirmed with a temporary server-side trace and the client `predict.jsonl`, flood in pane 1,
+typing in pane 2, 150 ms one-way, 1 MiB/s). "Echo rendered" was judged on the client-wide
+`surface_revision`, which the flood bumps every frame. In the failing runs the wrong judgment's ack
+was sent by the settle path (`rendered_since == false`, or a revision bumped by pane 1 only) with the
+typed-into pane's `content_revision` unchanged since receipt: the committed surface trailed pane 2's
+runtime because the render was throttled or backpressured (`render_pending` flipped true/false
+around 100-250 ms stalls), and pane 2's echo reached a committed surface 40-150 ms after the 100 ms
+settle bound. The pane id spaces match (`ClientShellPaneInput.pane_id` and `PaneSurfacePane.pane_id`
+are both `w1:p2`-style ids).
+
+Rule (`EchoTracker`, `src/mosh/server_hooks.rs`; no upstream line added):
+
+- Each input entry records the typed-into pane's committed `content_revision` at the first echo pass
+  that sees it (`pane_before`). A pass follows the input on the loop thread before any echo can exist,
+  so this baseline cannot contain the echo. Stamping lazily, rather than from a per-client cache
+  refreshed by earlier passes, avoids a stale cache (an idle client has no passes) attributing an
+  earlier unrelated pane change to the new input.
+- Rendered path: the oldest due entry is acked once the committed pane revision differs from
+  `pane_before`; the ack names the committed client revision, which contains that change. Remaining
+  entries are rebased to the current pane revision, so one echo cannot ack a later input; a later
+  input whose echo landed in the same render is acked by the settle path. `render_pending` and recompute
+  do not hold this path.
+- Settle path (the pane never changed, `stty -echo`), after `ECHO_DELAY + SETTLE_GRACE`: when no other
+  pane changed within 500 ms the entry is acked at once (still held while `render_pending` or a
+  recompute is set), which keeps the 100 ms bound. Otherwise another pane is rendering and the
+  committed surface may trail the runtimes, so the entry records the committed revision at the first
+  such pass and is acked only after a revision past it (rendered after the grace pass on the loop
+  thread, so it read the pane at least 100 ms after the input).
+- A pass acks the newest entry it can justify, one ack per pane per pass.
+
+No client change: every ack the server now sends is safe to judge as-is, and a client-side "a settle
+ack cannot confirm" rule would stop `stty -echo` predictions from being refuted without a pane render.
+
+Residual: a shell that takes over 100 ms to echo under a flood and where no other pane has changed in
+500 ms is still refuted on the idle settle path; a flowing flood with an echo later than the first
+post-grace render can still be refuted.
+
+Results: `flood_plus_typing_never_clears_correct_predictions` passes 4/4 at 150 ms one-way and
+1 MiB/s (16 of 16 predictions confirmed each run, `evidence/mosh-19g.3.10/flood-1mib.log`; before:
+a wrong judgment in each traced run). The R8 stty-echo test clears within its bound (404-405 ms,
+bound 500 ms; `stty.log`).
+
+Open: at 256 KiB/s the no-ack timeout still fires (`flood-256kib.log`). The server's ack leaves 55 ms
+after the first input, but reaches the client 1.8-1.9 s after the tap: the rate-limited link holds
+about 2 s of flood frames ahead of it, and the client's timeout is max(4 x srtt, 1 s) with srtt
+300-465 ms (about 1.6 s). That delay is queueing in the link and render lane, not the echo rule, so
+the 256 KiB/s test is committed `#[ignore]`d with the blocker.

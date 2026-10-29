@@ -1,0 +1,30 @@
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+────────────
+ Nextest run ID c78182fb-9fcc-4430-a82a-51d174b9a288 with nextest profile: default
+    Starting 1 test across 1 binary (17 tests skipped)
+       START [         ] (1/1) herdr::mosh_predict flood_plus_typing_at_256kib_never_times_out
+
+running 1 test
+flood + typing: predicted taps 12, confirmed 0, timeout 1, wrong 0
+
+thread 'flood_plus_typing_at_256kib_never_times_out' (3824890) panicked at tests/mosh_predict.rs:425:5:
+assertion `left == right` failed: the no-ack timeout fired under the flood
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test flood_plus_typing_at_256kib_never_times_out ... FAILED
+
+failures:
+
+failures:
+    flood_plus_typing_at_256kib_never_times_out
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 19.81s
+
+        FAIL [  19.808s] (1/1) herdr::mosh_predict flood_plus_typing_at_256kib_never_times_out
+  Cancelling due to test failure: 
+────────────
+     Summary [  19.808s] 1 test run: 0 passed, 1 failed, 17 skipped
+        FAIL [  19.808s] (1/1) herdr::mosh_predict flood_plus_typing_at_256kib_never_times_out
+error: test run failed

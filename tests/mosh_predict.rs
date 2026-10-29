@@ -414,12 +414,24 @@ fn existing_suites_unaffected_with_prediction_unset() {
 }
 
 #[test]
-#[ignore = "blocked by mosh-3t9: an echo-ack under a render flood can name a pre-echo revision, so a correct prediction is cleared as wrong (3 of 4 runs)"]
 fn flood_plus_typing_never_clears_correct_predictions() {
+    let (_confirmed, _wrong, _timeout) = flood_plus_typing(1024 * 1024);
+}
+
+#[test]
+#[ignore = "blocked by mosh-bld: at 256 KiB/s the echo reaches the client ~1.8 s after the tap, past the 4 x srtt no-ack timeout (link queueing); run with --run-ignored all"]
+fn flood_plus_typing_at_256kib_never_times_out() {
+    let (_confirmed, _wrong, timeout) = flood_plus_typing(256 * 1024);
+    assert_eq!(timeout, 0, "the no-ack timeout fired under the flood");
+}
+
+/// Types into a shell pane next to a flooded pane over a link of `bytes_per_sec`; returns the
+/// `(confirmed, wrong, timeout)` judgments.
+fn flood_plus_typing(bytes_per_sec: u64) -> (usize, usize, usize) {
     let _lock = timing_lock();
     let remote = Remote::start();
     // A saturated link keeps the render slot backpressured behind the flood.
-    remote.set_link(ONE_WAY_MS, 1024 * 1024);
+    remote.set_link(ONE_WAY_MS, bytes_per_sec);
     let flood_pane = remote.pane.clone();
     let split = remote.request(json!({
         "id": "split", "method": "pane.split",
@@ -484,6 +496,7 @@ fn flood_plus_typing_never_clears_correct_predictions() {
         "a correctly echoed character was cleared as wrong: {}",
         context(&remote, &client)
     );
+    (confirmed, wrong, timeout)
 }
 
 // ---- opt-in wall-clock tests (--run-ignored all) -------------------------------------------
