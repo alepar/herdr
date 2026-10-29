@@ -48,7 +48,7 @@ agentChecks:
 - mosh-19g.3.10 acceptance '256 KiB/s without tripping the no-ack timeout' (agent-set) · amended to '0 wrong; timeout disabling prediction acceptable' — spec §5 requirement (no correct prediction cleared) met
 codeBuckets (invocation 4, inv-29be42a9-8cb6-4837-86d2-6c0e13d8f328, stopReason integration-blocked — my stray target-basecheck/ dir; removed):
   held: mosh-19g.2.21 (implemented, reviewed, suites pass; merge held) · escalated: mosh-19g.3.10 (acceptance amended by comment; re-dispatch)
-roastCodeRound: 1
+roastCodeRound: 2
 roastCodeReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md
 findingsLedger: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger.md
 stepBackCode-round-1: local — two local clusters (quic-preauth-bounds, reorder-dropped-chained-seqs) plus independent items; no design decision changes
