@@ -485,6 +485,18 @@ fn fallback_at_full_loss_within_ssh_time_plus_3_5s() {
         0,
         "nothing got through the relay"
     );
+    // The session tried QUIC first: the relay dropped its handshake datagrams, and leg 0 ran in
+    // QUIC bootstrap mode.
+    assert!(
+        relay.stats().dropped_up > 0,
+        "no QUIC attempt reached the relay: {}",
+        context(&remote, &client, Some(&relay))
+    );
+    assert!(
+        remote.session_legs(&client.id)[0].contains("--x-mosh-quic-v1"),
+        "leg 0 did not bootstrap QUIC: {:?}",
+        remote.session_legs(&client.id)
+    );
     assert_echo(&remote, &mut client, Some(&relay), "qfall1");
 }
 
@@ -540,9 +552,20 @@ fn address_change_echo_within_2rtt_plus_render() {
         "the flood stalled after the address change: {}",
         context(&remote, &client, Some(&relay))
     );
-    assert_eq!(remote.session_legs(&client.id).len(), 1);
-    assert_eq!(client.event_count("leg_down"), 0, "{:?}", client.events());
+    // Stop the flood; a keystroke typed after the rebind can only echo over the migrated path.
     client.type_keys("\x03");
+    assert!(
+        client.wait_screen("MARKER", READY),
+        "the flood did not stop: {}",
+        context(&remote, &client, Some(&relay))
+    );
+    assert_echo(&remote, &mut client, Some(&relay), "qmove2");
+    // Still the same QUIC connection: no new leg, no ssh, no leg_down on either side.
+    assert_eq!(remote.session_legs(&client.id).len(), 1);
+    assert_eq!(client.event_count("welcome"), 1, "{:?}", client.events());
+    assert_eq!(client.event_count("leg_down"), 0, "{:?}", client.events());
+    assert_eq!(remote.keeper_event_count("leg_down"), 0);
+    assert_eq!(remote.ssh_session_children_alive(&client.id), 0);
 }
 
 #[test]
