@@ -279,8 +279,10 @@ Results: `flood_plus_typing_never_clears_correct_predictions` passes 4/4 at 150 
 a wrong judgment in each traced run). The R8 stty-echo test clears within its bound (404-405 ms,
 bound 500 ms; `stty.log`).
 
-Open: at 256 KiB/s the no-ack timeout still fires (`flood-256kib.log`). The server's ack leaves 55 ms
+At 256 KiB/s the no-ack timeout still fires (`flood-256kib.log`). The server's ack leaves 55 ms
 after the first input, but reaches the client 1.8-1.9 s after the tap: the rate-limited link holds
 about 2 s of flood frames ahead of it, and the client's timeout is max(4 x srtt, 1 s) with srtt
-300-465 ms (about 1.6 s). That delay is queueing in the link and render lane, not the echo rule, so
-the 256 KiB/s test is committed `#[ignore]`d with the blocker.
+300-465 ms (about 1.6 s). That delay is queueing in the link and render lane, not the echo rule.
+Per the acceptance amendment, a timeout that disables prediction for the generation is acceptable
+there; the 256 KiB/s test asserts 0 wrong judgments. Loaded-path latency (render-lane queue,
+heartbeat SRTT understating the loaded path) is parked as a follow-up.

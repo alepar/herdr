@@ -1,0 +1,64 @@
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+   Compiling herdr v0.9.5 (/var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phases-3-4-quic-prediction/.worktrees/super-auto-mosh-phases-3-4-quic-prediction--task-mosh-19g.3.10)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+────────────
+ Nextest run ID 27ef5ba4-b37a-46fb-8002-74720ca98500 with nextest profile: default
+    Starting 55 tests across 30 binaries (4715 tests skipped)
+        PASS [   0.008s] ( 1/55) herdr::bin/herdr client::mosh_outage::predict::tests::mode_parse
+        PASS [   0.009s] ( 2/55) herdr::bin/herdr client::mosh_outage::predict::tests::malformed_echo_ack_is_none
+        PASS [   0.009s] ( 3/55) herdr::bin/herdr client::mosh_outage::predict::tests::on_mode_does_not_hide_epochs
+        PASS [   0.009s] ( 4/55) herdr::bin/herdr client::mosh_outage::predict::tests::input_classes
+        PASS [   0.009s] ( 5/55) herdr::bin/herdr client::mosh_outage::predict::tests::echo_constants_are_stable
+        PASS [   0.009s] ( 6/55) herdr::bin/herdr client::mosh_outage::predict::tests::no_predictions_without_echo
+        PASS [   0.009s] ( 7/55) herdr::bin/herdr client::mosh_outage::predict::tests::uncovered_prediction_times_out_and_turns_off
+        PASS [   0.009s] ( 8/55) herdr::bin/herdr client::mosh_outage::predict::tests::wrong_prediction_clears_pane
+        PASS [   0.009s] ( 9/55) herdr::bin/herdr client::mosh_outage::predict::tests::timeout_scales_with_srtt
+        PASS [   0.009s] (10/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::a_stalled_flood_still_counts_as_flowing
+        PASS [   0.009s] (11/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::ack_carries_last_committed_revision
+        PASS [   0.009s] (12/55) herdr::bin/herdr client::mosh_outage::predict::tests::generation_change_resets_counts
+        PASS [   0.009s] (13/55) herdr::bin/herdr client::mosh_outage::predict::tests::wide_characters_advance_two
+        PASS [   0.009s] (14/55) herdr::bin/herdr client::mosh_outage::predict::tests::counting_runs_without_prediction
+        PASS [   0.010s] (15/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::earlier_echo_does_not_ack_later_input
+        PASS [   0.010s] (16/55) herdr::bin/herdr client::mosh_outage::predict::tests::unacked_unpredicted_event_blocks_prediction_from_stale_cursor
+        PASS [   0.010s] (17/55) herdr::bin/herdr client::mosh_outage::predict::tests::paste_clears_pane
+        PASS [   0.010s] (18/55) herdr::bin/herdr client::mosh_outage::predict::tests::epoch_break_and_hidden_epoch_then_confirm_reveals
+        PASS [   0.010s] (19/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::ack_only_after_50ms
+        PASS [   0.010s] (20/55) herdr::bin/herdr client::mosh_outage::predict::tests::typing_predicts_then_ack_and_surface_confirm
+        PASS [   0.010s] (21/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::echoes_in_one_render_are_acked_cumulatively_after_the_grace
+        PASS [   0.010s] (22/55) herdr::bin/herdr client::mosh_outage::predict::tests::echo_ack_round_trips
+        PASS [   0.011s] (23/55) herdr::bin/herdr client::mosh_outage::predict::tests::right_edge_stops_prediction
+        PASS [   0.012s] (24/55) herdr::bin/herdr client::mosh_outage::predict::tests::mode_thresholds
+        PASS [   0.013s] (25/55) herdr::bin/herdr client::mosh_outage::predict::tests::ack_ahead_of_surface_leaves_prediction_pending
+        PASS [   0.015s] (26/55) herdr::bin/herdr client::mosh_outage::predict::tests::rect_change_clears_pane
+        PASS [   0.007s] (27/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::second_subscribe_keeps_counts
+        PASS [   0.007s] (28/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::remove_client_drops_entry
+        PASS [   0.008s] (29/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::resync_keeps_surface_revisions_monotonic
+        PASS [   0.007s] (30/55) herdr::bin/herdr client::mosh_outage::tests::echo_ack_routed_to_predictor
+        PASS [   0.008s] (31/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::resync_for_a_vanished_client_needs_no_render
+        PASS [   0.007s] (32/55) herdr::bin/herdr client::mosh_outage::tests::link_frame_updates_outage_and_predictor
+        PASS [   0.006s] (33/55) herdr::bin/herdr client::mosh_outage::tests::prediction_off_by_default_paints_nothing_and_never_blocks_fast_path
+        PASS [   0.008s] (34/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::no_baseline_no_ack_until_one_exists
+        PASS [   0.009s] (35/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::flood_in_other_pane_does_not_ack_before_echo
+        PASS [   0.008s] (36/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::subscribed_client_typing_gets_acks_with_input_seq_equal_to_events_sent
+        PASS [   0.008s] (37/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::unknown_fork_kinds_are_ignored
+        PASS [   0.008s] (38/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::resync_body_forces_a_full_surface
+        PASS [   0.008s] (39/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::render_pending_withholds_the_settle_ack
+        PASS [   0.008s] (40/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::unsubscribed_client_receives_no_acks
+        PASS [   0.008s] (41/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::render_pending_at_deadline_withholds_then_acks_new_revision
+        PASS [   0.008s] (42/55) herdr::bin/herdr client::mosh_outage::tests::paint_draws_banner_then_predictions_and_moves_cursor
+        PASS [   0.009s] (43/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::unsubscribed_clients_are_not_counted
+        PASS [   0.007s] (44/55) herdr::bin/herdr client::mosh_outage::tests::typed_key_predicts_before_any_server_response
+        PASS [   0.008s] (45/55) herdr::bin/herdr layout::tests::panes_after_split_predicts_the_real_split_geometry
+        PASS [   0.010s] (46/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::pane_change_after_input_acks_that_revision
+        PASS [   0.007s] (47/55) herdr::bin/herdr remote::attach::mosh::tests::echo_flag_needs_the_capability_and_a_prediction_mode
+        PASS [   0.010s] (48/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::resync_kind_maps_to_server_event
+        PASS [   0.011s] (49/55) herdr::bin/herdr client::mosh_outage::server_hooks::tests::input_without_render_is_still_acked
+        PASS [   1.938s] (50/55) herdr::mosh_predict existing_suites_unaffected_with_prediction_unset
+        PASS [   3.205s] (51/55) herdr::mosh_predict adaptive_on_fast_link_predicts_nothing
+        PASS [   4.007s] (52/55) herdr::mosh_predict old_remote_no_predictions_no_subscribe
+        PASS [   5.250s] (53/55) herdr::mosh_predict stty_echo_off_prediction_painted_then_cleared
+        PASS [  18.774s] (54/55) herdr::mosh_predict flood_plus_typing_never_clears_correct_predictions
+        PASS [  38.688s] (55/55) herdr::mosh_predict flood_plus_typing_at_256kib_never_clears_correct_predictions
+────────────
+     Summary [  38.689s] 55 tests run: 55 passed, 4715 skipped
+rc=0
