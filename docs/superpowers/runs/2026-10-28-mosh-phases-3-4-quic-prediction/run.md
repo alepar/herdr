@@ -77,3 +77,4 @@ scopeFilter-round-2: [Should-fix] src/mosh/predict.rs:314 in-scope — on mode s
 scope-filter: 2 in-scope · 0 punch-listed
 fixBeads-round-2: mosh-19g.14 (prediction epoch hiding) mosh-19g.15 (keeper kick notify)
 codeBuckets (invocation 8, inv-66d31eb9-a4c4-4755-b5cc-43225e274a4e, stopReason ready-drained): completed mosh-19g.14 mosh-19g.15
+roastCodeReport-3: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-3.md
