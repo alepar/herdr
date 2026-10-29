@@ -18,14 +18,18 @@ use super::quic::{
 use super::quic_bootstrap::QuicBootstrap;
 use super::ssh_leg::{classify_leg, Leg, LegDialer, LegEndReport, LegError, LegKind, SshLegDialer};
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How long one QUIC attempt (handshake plus opening the session stream) may take.
 pub(super) const QUIC_HANDSHAKE_BOUND: Duration = Duration::from_secs(3);
+
+/// How often a running QUIC attempt looks at the stop flag (parity with the ssh dial).
+const STOP_POLL: Duration = Duration::from_millis(100);
 
 /// The keeper's `END` reason for a refused admission token.
 const END_QUIC_TOKEN: &str = "quic-token";
@@ -82,14 +86,49 @@ impl QuicClient {
         Ok(endpoint)
     }
 
-    /// Pinned handshake to `addr` plus the session's bidi stream, within `bound`.
+    /// Runs `attempt` on the client runtime for at most `bound`; abandons it once `stop` is set.
+    fn bounded<T>(
+        &self,
+        bound: Duration,
+        stop: &AtomicBool,
+        attempt: impl Future<Output = io::Result<T>>,
+    ) -> io::Result<T> {
+        let stopped = async {
+            while !stop.load(Ordering::SeqCst) {
+                tokio::time::sleep(STOP_POLL).await;
+            }
+        };
+        self.rt.block_on(async move {
+            tokio::select! {
+                result = tokio::time::timeout(bound, attempt) => result.unwrap_or_else(|_| {
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "QUIC attempt timed out"))
+                }),
+                () = stopped => Err(io::Error::new(io::ErrorKind::Interrupted, "QUIC attempt stopped")),
+            }
+        })?
+    }
+
+    /// Resolves `host`, then a pinned handshake plus the session's bidi stream, all within
+    /// `bound` and abandoned once `stop` is set.
     fn connect(
         &self,
-        addr: SocketAddr,
+        host: &str,
         bootstrap: &QuicBootstrap,
         grace: Duration,
         bound: Duration,
+        stop: &AtomicBool,
     ) -> io::Result<OpenedStream> {
+        let deadline = Instant::now() + bound;
+        let target = (host.to_owned(), bootstrap.port);
+        // getaddrinfo cannot be cancelled: on the blocking pool it is abandoned with the attempt.
+        let lookup = async move {
+            tokio::task::spawn_blocking(move || target.to_socket_addrs().map(|mut a| a.next()))
+                .await
+                .map_err(io::Error::other)?
+        };
+        let addr = self
+            .bounded(bound, stop, lookup)?
+            .ok_or_else(|| io::Error::other("dial host resolved to no address"))?;
         let endpoint = self.endpoint(addr.is_ipv6())?;
         let config = client_config(bootstrap.fingerprint, grace)?;
         let attempt = async move {
@@ -101,9 +140,7 @@ impl QuicClient {
             let (send, recv) = conn.open_bi().await.map_err(io::Error::other)?;
             Ok::<_, io::Error>((conn, send, recv))
         };
-        self.rt
-            .block_on(async move { tokio::time::timeout(bound, attempt).await })?
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "QUIC handshake timed out"))?
+        self.bounded(deadline.saturating_duration_since(Instant::now()), stop, attempt)
     }
 
     /// A `Leg` over one opened stream. Teardown closes the connection; the leg's end report
@@ -213,12 +250,15 @@ impl QuicLegDialer {
         });
     }
 
-    fn try_quic(&self, bootstrap: &QuicBootstrap, bound: Duration) -> io::Result<Leg> {
-        let addr = (self.dial_host.as_str(), bootstrap.port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| io::Error::other("dial host resolved to no address"))?;
-        let opened = self.client.connect(addr, bootstrap, self.grace, bound)?;
+    fn try_quic(
+        &self,
+        bootstrap: &QuicBootstrap,
+        bound: Duration,
+        stop: &AtomicBool,
+    ) -> io::Result<Leg> {
+        let opened = self
+            .client
+            .connect(&self.dial_host, bootstrap, self.grace, bound, stop)?;
         let heard = Arc::new(AtomicBool::new(false));
         *self.last_heard.borrow_mut() = Some(Arc::clone(&heard));
         Ok(self.client.leg(opened, bootstrap, heard))
@@ -280,7 +320,7 @@ impl LegDialer for QuicLegDialer {
                 let Some(bound) = Self::quic_bound(None, stop) else {
                     return Ok(ssh_leg);
                 };
-                match self.try_quic(&bootstrap, bound) {
+                match self.try_quic(&bootstrap, bound, stop) {
                     Ok(quic) => {
                         self.last_leg_quic.set(true);
                         Ok(quic.with_standby(ssh_leg))
@@ -294,7 +334,7 @@ impl LegDialer for QuicLegDialer {
             LegKind::Reconnect => {
                 if let (Some(bootstrap), false) = (self.cache, skip) {
                     if let Some(bound) = Self::quic_bound(setup_deadline, stop) {
-                        match self.try_quic(&bootstrap, bound) {
+                        match self.try_quic(&bootstrap, bound, stop) {
                             Ok(quic) => {
                                 self.last_leg_quic.set(true);
                                 return Ok(quic);
@@ -658,6 +698,71 @@ mod tests {
         assert!(leg.take_standby().is_none());
         assert!(!d.last_leg_quic.get());
         assert_eq!(echo(&mut leg, "ssh\n"), "ssh\n");
+    }
+
+    /// A future that blocks a pool thread for `d`, standing in for a hung resolver.
+    async fn hung_lookup(d: Duration) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || std::thread::sleep(d))
+            .await
+            .map_err(io::Error::other)
+    }
+
+    #[test]
+    fn a_hung_lookup_is_cut_off_at_the_bound() {
+        let client = QuicClient::new().expect("client");
+        let started = Instant::now();
+        let err = client
+            .bounded(
+                Duration::from_millis(300),
+                &AtomicBool::new(false),
+                hung_lookup(Duration::from_secs(10)),
+            )
+            .expect_err("bounded");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn stop_ends_an_attempt_promptly() {
+        let client = QuicClient::new().expect("client");
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let err = client
+            .bounded(QUIC_HANDSHAKE_BOUND, &stop, hung_lookup(Duration::from_secs(10)))
+            .expect_err("bounded");
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        setter.join().expect("setter");
+    }
+
+    #[test]
+    fn stop_ends_a_blackholed_quic_attempt_promptly() {
+        let blackhole = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let bootstrap = QuicBootstrap {
+            port: blackhole.local_addr().expect("addr").port(),
+            fingerprint: Fingerprint([2; 32]),
+            token: QuicToken([2; 32]),
+        };
+        let d = dialer(Some(bootstrap));
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        assert!(d.try_quic(&bootstrap, QUIC_HANDSHAKE_BOUND, &stop).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        setter.join().expect("setter");
     }
 
     #[test]
