@@ -28,6 +28,7 @@ parked:
 - graph-pass · graph-change · "narrow mosh-19g.2 <- mosh-19g.6 to 2.5/2.9 <- 6 (safe no: shared session.rs)"
 - graph-pass · graph-change · "narrow mosh-19g.2 <- mosh-19g.5 to 2.2 <- 5 (safe no: shared mod.rs)"
 - graph-pass · graph-change · "seam-contract proposal: Hello.quic_token between mosh-19g.1.3 and mosh-19g.1.4 (depth 9→8 after the narrowings)"
+- mosh-19g.3.10 · graph-change · "follow-up: at 256 KiB/s ~2 s of flood frames queue in the link and keeper render lane, so echo-acks arrive after the predictor no-ack timeout (max(1 s, 4×SRTT) with heartbeat SRTT) and prediction turns off; options: bound the render-lane queue to ~1 RTT at low rates, or base the timeout on loaded-path latency"
 roastDesignReport-2: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-2.md
 roastDesignExit: converged at round 2 (Should-fix (8 confirmed) [converged]; 0 Blocking; 10 resolved, 1 regressed and fixed) · punch list: all 8 applied inline as spec + bead amendments (standby HELLO fresh token + previous_token → 1.4; bootstrap query on its own connection, lazy session connection → 1.3; bound token kept across refreshes → 1.6, 1.5; render streams oldest-first priority → 2.4, 2.7; echo-ack waits for pending renders → 3.3, 3.5; redial wording → specs); no re-roast (converged exit)
 graph-pass: depth 14→14 · width 1.8→1.8 · applied 4 · parked 5
@@ -43,3 +44,5 @@ codeBuckets (invocation 3, inv-a2e7e590-385f-46d8-877c-bbf1b6ffc341, stopReason 
   completed: invocation 2's set + mosh-19g.2.19 mosh-19g.2.7
   escalated: mosh-19g.3.5 (blocker mosh-3t9 → product fix mosh-19g.3.10)
   runFailures: mosh_resume a_dense_flood_through_an_outage… fails and slow_live_leg_carries_16_mib… hangs (also at in-run base c6dfa1f9; checking at run base 59f7d8fc); cli agent_start_* (pre-existing at d04698e7)
+agentChecks:
+- mosh-19g.3.10 acceptance '256 KiB/s without tripping the no-ack timeout' (agent-set) · amended to '0 wrong; timeout disabling prediction acceptable' — spec §5 requirement (no correct prediction cleared) met
