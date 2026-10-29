@@ -45,7 +45,9 @@ struct SendRecord {
 /// never dropped); RTT sampling (only ACKs advancing at least `ACK_EVERY_BYTES`, and never
 /// replayed bytes: Karn's rule); `base_rtt` (minimum on the current leg, not aged) and the
 /// per-epoch minimum; epochs (a byte-offset boundary closed by the first ACK covering it);
-/// the hold epoch after every change; the shrink/grow/hold law; reset to `INITIAL`.
+/// the hold epoch after every change; the shrink/grow/hold law; reset to `INITIAL`; the smoothed
+/// RTT (EWMA, alpha 1/8) over the qualifying ACK samples and the owner's heartbeat probe
+/// samples; unknown until the first.
 ///
 /// Does not own: the ring, sockets, the clock (every instant is an input), tracing, which
 /// side it runs on, or when a leg is up. `SessionEndpoint` feeds it fresh sends, ACKs, the
@@ -68,6 +70,8 @@ pub(super) struct InflightWindow {
     acked: u64,
     base_rtt: Option<Duration>,
     epoch_min: Option<Duration>,
+    /// Smoothed RTT; `None` until the first sample since the last reset.
+    srtt: Option<Duration>,
     /// The epoch closes at the first ACK above this offset; `None` before the first send.
     epoch_boundary: Option<u64>,
     window_limited: bool,
@@ -89,6 +93,7 @@ impl InflightWindow {
             acked,
             base_rtt: None,
             epoch_min: None,
+            srtt: None,
             epoch_boundary: None,
             window_limited: false,
             hold: false,
@@ -107,6 +112,25 @@ impl InflightWindow {
     #[cfg(test)]
     pub fn samples(&self) -> u64 {
         self.samples
+    }
+
+    /// Smoothed RTT over the samples since the last reset; `None` while unknown.
+    pub fn srtt(&self) -> Option<Duration> {
+        self.srtt
+    }
+
+    /// A round trip measured by the owner (heartbeat to ACK). Feeds the smoothed RTT only: the
+    /// window law (`base_rtt`, epochs) never sees it.
+    pub fn on_rtt_probe_sample(&mut self, rtt: Duration) {
+        self.update_srtt(rtt);
+    }
+
+    fn update_srtt(&mut self, rtt: Duration) {
+        self.srtt = Some(match self.srtt {
+            None => rtt,
+            Some(srtt) if rtt >= srtt => srtt + (rtt - srtt) / 8,
+            Some(srtt) => srtt - (srtt - rtt) / 8,
+        });
     }
 
     /// A leg came up or went down: the path may differ, so start over.
@@ -189,6 +213,7 @@ impl InflightWindow {
         {
             self.samples += 1;
         }
+        self.update_srtt(rtt);
         self.base_rtt = Some(self.base_rtt.map_or(rtt, |base| base.min(rtt)));
         self.epoch_min = Some(self.epoch_min.map_or(rtt, |min| min.min(rtt)));
     }
@@ -282,6 +307,54 @@ mod tests {
             self.round_of(QUANTUM, rtt, limited)
                 .expect("every round closes an epoch")
         }
+    }
+
+    #[test]
+    fn srtt_unknown_before_first_sample() {
+        let mut d = Driver::new();
+        assert_eq!(d.w.srtt(), None);
+        d.round(ms(100), false);
+        assert_eq!(d.w.srtt(), Some(ms(100)));
+        d.w.reset(d.sent);
+        assert_eq!(d.w.srtt(), None);
+    }
+
+    #[test]
+    fn srtt_ewma_converges() {
+        let mut w = InflightWindow::new(0);
+        w.on_rtt_probe_sample(ms(100));
+        assert_eq!(w.srtt(), Some(ms(100)));
+        w.on_rtt_probe_sample(ms(300));
+        assert_eq!(w.srtt(), Some(ms(125)));
+        w.on_rtt_probe_sample(ms(29));
+        assert_eq!(w.srtt(), Some(ms(125) - ms(96) / 8));
+        let mut w = InflightWindow::new(0);
+        w.on_rtt_probe_sample(ms(100));
+        for _ in 0..40 {
+            w.on_rtt_probe_sample(ms(300));
+        }
+        let srtt = w.srtt().expect("known");
+        assert!(srtt <= ms(300) && srtt >= ms(295), "{srtt:?}");
+    }
+
+    #[test]
+    fn quantum_samples_feed_srtt() {
+        let clock = Clock::new();
+        let mut w = InflightWindow::new(0);
+        w.on_send(clock.at(ms(0)), 0, QUANTUM);
+        w.on_ack(clock.at(ms(200)), QUANTUM);
+        assert_eq!(w.srtt(), Some(ms(200)));
+    }
+
+    #[test]
+    fn probe_samples_do_not_touch_base_rtt() {
+        let mut d = Driver::new();
+        d.round(ms(100), false);
+        d.w.on_send(d.clock.at(d.t), d.sent, d.sent + 1);
+        let before = (d.w.base_rtt, d.w.epoch_min, d.w.samples);
+        d.w.on_rtt_probe_sample(ms(10));
+        assert_eq!((d.w.base_rtt, d.w.epoch_min, d.w.samples), before);
+        assert_eq!(d.w.base_rtt, Some(ms(100)));
     }
 
     #[test]

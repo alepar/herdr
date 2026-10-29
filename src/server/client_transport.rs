@@ -392,6 +392,7 @@ impl ClientWriterQueue {
 }
 
 /// Internal event sent from client transport threads to the main event loop.
+#[rustfmt::skip] // mosh-fork hook
 #[derive(Debug)]
 pub(crate) enum ServerEvent {
     /// A new client completed the handshake.
@@ -552,6 +553,7 @@ pub(crate) enum ServerEvent {
     ClientWriterDrained { client_id: u64 },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
+    MoshSurfaceResync { client_id: u64 }, // mosh-fork hook
 }
 
 /// Clamp client-reported terminal dimensions to a minimum viable size.
@@ -1194,6 +1196,7 @@ fn client_read_loop_with_endpoint_controls(
                 ServerEvent::ClientShellMouseCapture { client_id, enabled }
             }
             ClientMessage::ClientShellPaneInput { pane_id, events } => {
+                #[rustfmt::skip] let () = crate::client::mosh_outage::server_hooks::on_pane_input(client_id, &pane_id, events.len()); // mosh-fork hook
                 match pane_input_event_limit(&events) {
                     InputEventLimit::WithinLimits => ServerEvent::ClientShellPaneInput {
                         client_id,
@@ -1347,6 +1350,7 @@ fn client_read_loop_with_endpoint_controls(
                 }
             }
             ClientMessage::EndpointControl { kind, data } => {
+                #[rustfmt::skip] let () = crate::client::mosh_outage::server_hooks::on_client_endpoint_control(client_id, &kind, &data, server_event_tx); // mosh-fork hook
                 let Some(response) = crate::server::client_endpoint_control::response(&kind, data)
                 else {
                     debug!(client_id, %kind, "ignoring unknown endpoint control message");

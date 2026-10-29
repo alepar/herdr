@@ -2,11 +2,13 @@
 //! failure classification, reconnect back-off. Does not own session bytes.
 
 use super::super as attach;
+#[cfg(unix)]
+use super::quic::RenderLaneRx;
 use attach::{ManagedSshOptions, RemoteClientStatusJson, RemoteHerdr, RemoteSsh};
 use std::io::{self, BufReader, Read, Write};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +31,11 @@ pub(super) struct LegEndReport {
     pub pre_welcome_end: Option<String>,
     /// Pre-`WELCOME` bound, setup deadline or stop.
     pub killed_by_bridge: bool,
+    /// The transport's own close reason (a QUIC connection close), alongside `exit_status`;
+    /// `None` for ssh legs and when the transport recorded none.
+    // Read by the QUIC dialer's classification (mosh-19g.1's subtree).
+    #[allow(dead_code)]
+    pub close_reason: Option<String>,
 }
 
 /// Upper bound on reaping a leg nobody waits on (drop, dial abort, dying leg): the child gets
@@ -42,9 +49,15 @@ const REAP_POLL: Duration = Duration::from_millis(5);
 /// gone (it is killed and reaped when the deadline passes).
 type Teardown = Box<dyn FnOnce(bool, Instant) -> (Option<ExitStatus>, Option<String>) + Send>;
 
+/// The transport's own RTT estimate, polled by the bridge (QUIC: `Connection::rtt()`).
+pub(super) type RttProbe = Box<dyn Fn() -> Option<Duration> + Send>;
+/// The transport's own counters as a trace payload (QUIC path stats).
+pub(super) type StatsProbe = Box<dyn Fn() -> serde_json::Value + Send>;
+
 /// One live connection to the keeper side (transport-neutral).
 ///
-/// Owns: a duplex byte stream, a teardown handle, and a structured end report (`ExitStatus`,
+/// Owns: a duplex byte stream, a teardown handle, an optional RTT probe (`None` for ssh legs;
+/// QUIC legs report the connection's estimate), and a structured end report (`ExitStatus`,
 /// captured stderr on reconnect legs, whether `WELCOME` was reached, any pre-`WELCOME` `END`
 /// reason). For ssh it owns the ssh child directly: no socketpair, no `bridge_child`.
 /// Hides: which process or transport carries the bytes.
@@ -61,10 +74,25 @@ pub(super) struct Leg {
     pre_welcome_end: Option<String>,
     /// Open while leg-0 stderr is relayed to the terminal; closed at `WELCOME`.
     stderr_gate: Option<Arc<AtomicBool>>,
+    /// The transport's RTT estimate; `None` when it has none (ssh).
+    rtt_probe: Option<RttProbe>,
+    /// The transport's trace counters; `None` on ssh legs.
+    stats_probe: Option<StatsProbe>,
+    /// Opaque admission token the bridge copies into `HELLO.quic_token`; `None` for ssh legs.
+    admission_token: Option<String>,
+    /// Filled by the transport when it closes (QUIC close reason); copied into the end report.
+    close_reason: Option<Arc<Mutex<Option<String>>>>,
+    /// The client render-lane receiver; `Some` on QUIC legs, `None` on ssh legs.
+    #[cfg(unix)]
+    render_lane: Option<RenderLaneRx>,
+    /// Inbound-silence override for this leg; `None` is the Phase 1 value.
+    silence_timeout: Option<Duration>,
+    /// An ssh leg held ready while this (QUIC) leg is tried: the bridge switches to it when this
+    /// leg ends before `WELCOME` and drops it at `WELCOME`.
+    standby: Option<Box<Leg>>,
 }
 
 impl Leg {
-    #[cfg(test)]
     pub(super) fn new(
         reader: Box<dyn io::Read + Send>,
         writer: Box<dyn io::Write + Send>,
@@ -77,7 +105,90 @@ impl Leg {
             welcome_reached: false,
             pre_welcome_end: None,
             stderr_gate: None,
+            rtt_probe: None,
+            stats_probe: None,
+            admission_token: None,
+            close_reason: None,
+            #[cfg(unix)]
+            render_lane: None,
+            silence_timeout: None,
+            standby: None,
         }
+    }
+
+    /// Attach the QUIC admission token the bridge sends in `HELLO.quic_token`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_admission_token(mut self, token: String) -> Leg {
+        self.admission_token = Some(token);
+        self
+    }
+
+    pub(super) fn admission_token(&self) -> Option<&str> {
+        self.admission_token.as_deref()
+    }
+
+    /// Attach the cell the transport records its close reason in.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_close_reason(mut self, reason: Arc<Mutex<Option<String>>>) -> Leg {
+        self.close_reason = Some(reason);
+        self
+    }
+
+    /// Override the inbound-silence timeout for this leg.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_silence_timeout(mut self, timeout: Duration) -> Leg {
+        self.silence_timeout = Some(timeout);
+        self
+    }
+
+    pub(super) fn silence_timeout(&self) -> Option<Duration> {
+        self.silence_timeout
+    }
+
+    /// Attach an ssh standby leg (see `standby`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_standby(mut self, standby: Leg) -> Leg {
+        self.standby = Some(Box::new(standby));
+        self
+    }
+
+    pub(super) fn take_standby(&mut self) -> Option<Leg> {
+        self.standby.take().map(|standby| *standby)
+    }
+
+    /// Attach the render-lane receiver (QUIC legs).
+    #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_render_lane(mut self, lane: RenderLaneRx) -> Leg {
+        self.render_lane = Some(lane);
+        self
+    }
+
+    /// The render-lane receiver, if any (`None` on ssh legs).
+    #[cfg(unix)]
+    pub(super) fn take_render_lane(&mut self) -> Option<RenderLaneRx> {
+        self.render_lane.take()
+    }
+
+    /// Attach the transport's RTT estimate. Called by the QUIC leg (mosh-19g.1's subtree).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_rtt_probe(mut self, probe: RttProbe) -> Leg {
+        self.rtt_probe = Some(probe);
+        self
+    }
+
+    pub(super) fn with_stats_probe(mut self, probe: StatsProbe) -> Leg {
+        self.stats_probe = Some(probe);
+        self
+    }
+
+    pub(super) fn stats(&self) -> Option<serde_json::Value> {
+        self.stats_probe.as_ref().map(|probe| probe())
+    }
+
+    /// The transport's own RTT estimate now; `None` for ssh legs and while the transport has none.
+    pub(super) fn rtt(&self) -> Option<Duration> {
+        self.rtt_probe.as_ref().and_then(|probe| probe())
     }
 
     /// Wrap a spawned child whose stdin/stdout are the leg's byte stream.
@@ -137,6 +248,9 @@ impl Leg {
             welcome_reached: self.welcome_reached,
             pre_welcome_end: self.pre_welcome_end.take(),
             killed_by_bridge: kill,
+            close_reason: self.close_reason.take().and_then(|cell| {
+                cell.lock().unwrap_or_else(PoisonError::into_inner).clone()
+            }),
         }
     }
 }
@@ -259,6 +373,14 @@ fn spawn_leg(
         welcome_reached: false,
         pre_welcome_end: None,
         stderr_gate,
+        rtt_probe: None,
+        stats_probe: None,
+        admission_token: None,
+        close_reason: None,
+        #[cfg(unix)]
+        render_lane: None,
+        silence_timeout: None,
+        standby: None,
     };
     Ok((leg, BufReader::new(stdout)))
 }
@@ -368,8 +490,55 @@ fn describe_exit(end: &LegEndReport) -> String {
 pub(super) struct SshLegDialer {
     target: String,
     remote_command: String,
+    /// `remote_command` with `QUIC_FLAG` first, for `dial_bootstrap`.
+    bootstrap_command: String,
     options: Option<ManagedSshOptions>,
     noninteractive: bool,
+    /// Test seam: builds each leg's command instead of ssh (the QUIC dialer's tests script legs).
+    #[cfg(test)]
+    pub(super) scripted: Option<Box<dyn Fn(LegKind) -> Command + Send>>,
+}
+
+/// How long bootstrap mode waits for the attacher's one line before treating it as `none`.
+/// A safety net only: the attacher answers within its own 2 s keeper-query timeout.
+pub(super) const BOOTSTRAP_LINE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The bootstrap line is short; anything longer is not one.
+const BOOTSTRAP_LINE_MAX: u64 = 256;
+
+/// What the marker thread reports to the dial loop.
+enum DialMsg {
+    /// The ready marker was consumed (or failed). The reader comes along unless bootstrap mode
+    /// keeps it to read the line.
+    Marker(io::Result<()>, Option<BufReader<ChildStdout>>),
+    /// Bootstrap mode: the attacher's one line (raw bytes, newline included) was read.
+    Line(io::Result<Vec<u8>>, BufReader<ChildStdout>),
+}
+
+/// The leg's reader when the bootstrap line had not arrived by the timeout. The first `read`
+/// waits until the marker thread has consumed and discarded the late line and hands the stream
+/// back, so a late line is never delivered as session bytes.
+struct DeferredReader {
+    pending: Option<mpsc::Receiver<DialMsg>>,
+    reader: Option<BufReader<ChildStdout>>,
+}
+
+impl Read for DeferredReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(pending) = self.pending.take() {
+            // A disconnected channel means the thread ended without a stream: end of file.
+            while let Ok(message) = pending.recv() {
+                if let DialMsg::Line(_, reader) = message {
+                    self.reader = Some(reader);
+                    break;
+                }
+            }
+        }
+        match &mut self.reader {
+            Some(reader) => reader.read(buf),
+            None => Ok(0),
+        }
+    }
 }
 
 impl SshLegDialer {
@@ -381,29 +550,51 @@ impl SshLegDialer {
         noninteractive: bool,
         idle_timeout: bool,
     ) -> Self {
-        let args = attach::RemoteExecutable::session_args(
-            session_name,
-            if idle_timeout {
-                &["remote-client-bridge", "--idle-timeout-v1", super::SESSION_FLAG]
-            } else {
-                &["remote-client-bridge", super::SESSION_FLAG]
-            },
-        );
-        let remote_command = attach::posix_remote_output_command(&format!(
-            "exec {}",
-            remote_herdr.executable.command(&args)
-        ));
+        let remote_command = |flags: &[&str]| {
+            let args = attach::RemoteExecutable::session_args(session_name, flags);
+            attach::posix_remote_output_command(&format!(
+                "exec {}",
+                remote_herdr.executable.command(&args)
+            ))
+        };
+        let (plain, quic): (&[&str], &[&str]) = if idle_timeout {
+            (
+                &["remote-client-bridge", "--idle-timeout-v1", super::SESSION_FLAG],
+                &[
+                    "remote-client-bridge",
+                    super::QUIC_FLAG,
+                    "--idle-timeout-v1",
+                    super::SESSION_FLAG,
+                ],
+            )
+        } else {
+            (
+                &["remote-client-bridge", super::SESSION_FLAG],
+                &["remote-client-bridge", super::QUIC_FLAG, super::SESSION_FLAG],
+            )
+        };
         SshLegDialer {
             target,
-            remote_command,
+            remote_command: remote_command(plain),
+            bootstrap_command: remote_command(quic),
             options: options.cloned(),
             noninteractive,
+            #[cfg(test)]
+            scripted: None,
         }
     }
 
     /// Leg 0 mirrors `bridge_connection` exactly. Every reconnect leg is noninteractive and
     /// bypasses any ControlMaster (never `-S`, `ControlPath=none`), whatever the config says.
     fn leg_command(&self, kind: LegKind) -> Command {
+        self.leg_command_for(kind, &self.remote_command)
+    }
+
+    fn leg_command_for(&self, kind: LegKind, remote_command: &str) -> Command {
+        #[cfg(test)]
+        if let Some(scripted) = &self.scripted {
+            return scripted(kind);
+        }
         let mut command = Command::new("ssh");
         match kind {
             LegKind::Initial => {
@@ -422,7 +613,7 @@ impl SshLegDialer {
                 command.args(["-o", "ControlPath=none", "-o", "ControlMaster=no"]);
             }
         }
-        command.arg("-T").arg(&self.target).arg(&self.remote_command);
+        command.arg("-T").arg(&self.target).arg(remote_command);
         command
     }
 
@@ -435,14 +626,71 @@ impl SshLegDialer {
         setup_deadline: Option<Instant>,
         stop: &AtomicBool,
     ) -> Result<Leg, LegError> {
+        self.dial_inner(command, kind, setup_deadline, stop, None)
+            .map(|(leg, _)| leg)
+    }
+
+    /// Dial the leg with `--x-mosh-quic-v1` and read the attacher's one bootstrap line after the
+    /// ready marker. The line is `none` or malformed -> `None` at once; no line within
+    /// `BOOTSTRAP_LINE_TIMEOUT` -> `None` too. Nothing after the line is consumed here.
+    #[cfg(unix)]
+    // The QUIC dialer (mosh-19g.1's subtree) is its only caller; tests drive the `_command` seam.
+    #[allow(dead_code)]
+    pub(super) fn dial_bootstrap(
+        &mut self,
+        kind: LegKind,
+        setup_deadline: Option<Instant>,
+        stop: &AtomicBool,
+    ) -> Result<(Leg, Option<super::quic_bootstrap::QuicBootstrap>), LegError> {
+        let command = self.leg_command_for(kind, &self.bootstrap_command);
+        self.dial_bootstrap_command(command, kind, setup_deadline, stop, BOOTSTRAP_LINE_TIMEOUT)
+    }
+
+    /// `dial_bootstrap` over an arbitrary command and line timeout, so tests can drive it
+    /// without ssh.
+    #[cfg(unix)]
+    fn dial_bootstrap_command(
+        &self,
+        command: Command,
+        kind: LegKind,
+        setup_deadline: Option<Instant>,
+        stop: &AtomicBool,
+        line_timeout: Duration,
+    ) -> Result<(Leg, Option<super::quic_bootstrap::QuicBootstrap>), LegError> {
+        let (leg, line) = self.dial_inner(command, kind, setup_deadline, stop, Some(line_timeout))?;
+        let bootstrap = line.and_then(|line| super::quic_bootstrap::QuicBootstrap::parse_line(&line));
+        Ok((leg, bootstrap))
+    }
+
+    /// The shared dial. With `line_timeout`, also reads the attacher's one line and returns it
+    /// (`None`: no line in time, EOF, an over-long line or non-UTF-8 bytes).
+    fn dial_inner(
+        &self,
+        command: Command,
+        kind: LegKind,
+        setup_deadline: Option<Instant>,
+        stop: &AtomicBool,
+        line_timeout: Option<Duration>,
+    ) -> Result<(Leg, Option<String>), LegError> {
         let capture = kind == LegKind::Reconnect || self.noninteractive;
         let (mut leg, mut reader) =
             spawn_leg(command, capture).map_err(|err| classify_spawn_error(kind, err))?;
         let (tx, rx) = mpsc::channel();
+        let bootstrap = line_timeout.is_some();
         thread::spawn(move || {
             let result = attach::discard_remote_output_preamble(&mut reader);
-            let _ = tx.send((result, reader));
+            if !bootstrap || result.is_err() {
+                let _ = tx.send(DialMsg::Marker(result, Some(reader)));
+                return;
+            }
+            if tx.send(DialMsg::Marker(Ok(()), None)).is_err() {
+                return;
+            }
+            let mut line = Vec::new();
+            let read = read_bounded_line(&mut reader, &mut line);
+            let _ = tx.send(DialMsg::Line(read.map(|()| line), reader));
         });
+        let mut line_deadline = None;
         loop {
             if stop.load(Ordering::SeqCst) {
                 leg.finish(true, Instant::now() + LEG_REAP_BUDGET);
@@ -454,14 +702,31 @@ impl SshLegDialer {
                     "leg did not become ready before the setup deadline",
                 )));
             }
+            if line_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                leg.reader = Some(Box::new(DeferredReader {
+                    pending: Some(rx),
+                    reader: None,
+                }));
+                return Ok((leg, None));
+            }
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok((Ok(()), reader)) => {
+                Ok(DialMsg::Marker(Ok(()), Some(reader))) => {
                     leg.reader = Some(Box::new(reader));
-                    return Ok(leg);
+                    return Ok((leg, None));
                 }
-                Ok((Err(_), _)) => {
+                Ok(DialMsg::Marker(Ok(()), None)) => {
+                    line_deadline = line_timeout.map(|timeout| Instant::now() + timeout);
+                }
+                Ok(DialMsg::Marker(Err(_), _)) => {
                     let report = leg.finish(false, Instant::now() + LEG_REAP_BUDGET);
                     return Err(self.classify(kind, &report));
+                }
+                Ok(DialMsg::Line(line, reader)) => {
+                    leg.reader = Some(Box::new(reader));
+                    let line = line
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
+                    return Ok((leg, line));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -472,6 +737,18 @@ impl SshLegDialer {
                 }
             }
         }
+    }
+}
+
+/// Read up to `BOOTSTRAP_LINE_MAX` bytes through the first newline into `line`; an over-long
+/// line is an error (the stream is then past those bytes, which are not session bytes anyway).
+fn read_bounded_line(reader: &mut BufReader<ChildStdout>, line: &mut Vec<u8>) -> io::Result<()> {
+    use std::io::BufRead;
+    reader.by_ref().take(BOOTSTRAP_LINE_MAX).read_until(b'\n', line)?;
+    if line.last() == Some(&b'\n') {
+        Ok(())
+    } else {
+        Err(io::Error::other("no bootstrap line"))
     }
 }
 
@@ -515,13 +792,19 @@ pub(super) fn classify_spawn_error(kind: LegKind, err: io::Error) -> LegError {
     }
 }
 
+/// The remote binary chosen for resume, with the capabilities its qualifying status advertised.
+pub(super) struct ResumeCandidate {
+    pub herdr: RemoteHerdr,
+    pub capabilities: Vec<String>,
+}
+
 /// Probe the selected remote binary, then the other candidates, for the resume capability.
-/// `Ok(Some(h))`: resume with `h` (possibly a different candidate than `selected`);
+/// `Ok(Some(c))`: resume with `c.herdr` (possibly a different candidate than `selected`);
 /// `Ok(None)`: plain. Silent: the caller prints the `HERDR_REMOTE_BINARY` hint.
 pub(super) fn select_resume_candidate(
     ssh: &RemoteSsh,
     selected: &RemoteHerdr,
-) -> io::Result<Option<RemoteHerdr>> {
+) -> io::Result<Option<ResumeCandidate>> {
     select_with(
         selected,
         |herdr| attach::remote_client_status(ssh, herdr),
@@ -533,7 +816,7 @@ fn select_with(
     selected: &RemoteHerdr,
     mut status: impl FnMut(&RemoteHerdr) -> io::Result<Option<RemoteClientStatusJson>>,
     candidates: impl FnOnce() -> io::Result<Vec<RemoteHerdr>>,
-) -> io::Result<Option<RemoteHerdr>> {
+) -> io::Result<Option<ResumeCandidate>> {
     fn qualifies(herdr: &RemoteHerdr, status: &RemoteClientStatusJson) -> bool {
         status
             .endpoint_capabilities
@@ -547,7 +830,10 @@ fn select_with(
     }
     if let Some(found) = status(selected)? {
         if qualifies(selected, &found) {
-            return Ok(Some(selected.clone()));
+            return Ok(Some(ResumeCandidate {
+                herdr: selected.clone(),
+                capabilities: found.endpoint_capabilities,
+            }));
         }
     }
     for mut candidate in candidates()? {
@@ -557,7 +843,10 @@ fn select_with(
         if let Some(found) = status(&candidate).unwrap_or(None) {
             if qualifies(&candidate, &found) {
                 candidate.bridge_idle_timeout = found.remote_bridge_idle_timeout;
-                return Ok(Some(candidate));
+                return Ok(Some(ResumeCandidate {
+                    herdr: candidate,
+                    capabilities: found.endpoint_capabilities,
+                }));
             }
         }
     }
@@ -582,6 +871,30 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn sh")
+    }
+
+    #[test]
+    fn ssh_leg_has_no_rtt_probe() {
+        let leg = Leg::new(
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+            Box::new(|_, _| (None, None)),
+        );
+        assert_eq!(leg.rtt(), None);
+        let child = Leg::from_child(spawn("exit 0")).unwrap();
+        assert_eq!(child.rtt(), None);
+        child.finish(false, soon());
+    }
+
+    #[test]
+    fn rtt_probe_is_polled() {
+        let leg = Leg::new(
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+            Box::new(|_, _| (None, None)),
+        )
+        .with_rtt_probe(Box::new(|| Some(Duration::from_millis(42))));
+        assert_eq!(leg.rtt(), Some(Duration::from_millis(42)));
     }
 
     #[test]
@@ -961,6 +1274,191 @@ mod tests {
         assert!(matches!(eof, Err(LegError::Retryable(_))));
     }
 
+    // ---- Leg extensions --------------------------------------------------------------------
+
+    fn bare_leg() -> Leg {
+        Leg::new(
+            Box::new(io::empty()),
+            Box::new(io::sink()),
+            Box::new(|_, _| (None, None)),
+        )
+    }
+
+    #[test]
+    fn leg_extension_slots_default_empty_and_builders_set_them() {
+        let mut leg = bare_leg();
+        assert_eq!(leg.admission_token(), None);
+        assert_eq!(leg.silence_timeout(), None);
+        assert!(leg.take_standby().is_none());
+        #[cfg(unix)]
+        assert!(leg.take_render_lane().is_none());
+        let mut leg = bare_leg()
+            .with_admission_token("tok".into())
+            .with_silence_timeout(Duration::from_secs(30))
+            .with_standby(bare_leg());
+        assert_eq!(leg.admission_token(), Some("tok"));
+        assert_eq!(leg.silence_timeout(), Some(Duration::from_secs(30)));
+        assert!(leg.take_standby().is_some());
+        assert!(leg.take_standby().is_none(), "taken once");
+        #[cfg(unix)]
+        assert!(leg.take_render_lane().is_none(), "ssh legs carry no render lane");
+    }
+
+    #[test]
+    fn finish_reports_close_reason() {
+        let cell = Arc::new(Mutex::new(None));
+        let leg = bare_leg().with_close_reason(Arc::clone(&cell));
+        *cell.lock().unwrap() = Some("quic: idle timeout".to_owned());
+        let report = leg.finish(false, soon());
+        assert_eq!(report.close_reason.as_deref(), Some("quic: idle timeout"));
+        let report = bare_leg().with_close_reason(Arc::new(Mutex::new(None))).finish(false, soon());
+        assert_eq!(report.close_reason, None, "an unset cell reports nothing");
+        assert_eq!(bare_leg().finish(false, soon()).close_reason, None);
+    }
+
+    // ---- bootstrap mode --------------------------------------------------------------------
+
+    use super::super::quic_bootstrap::{Fingerprint, QuicBootstrap, QuicToken};
+
+    fn sample_bootstrap() -> QuicBootstrap {
+        QuicBootstrap {
+            port: 4433,
+            fingerprint: Fingerprint([7; 32]),
+            token: QuicToken([9; 32]),
+        }
+    }
+
+    fn bootstrap_dial(
+        script: &str,
+        line_timeout: Duration,
+    ) -> (Leg, Option<QuicBootstrap>, Duration) {
+        let stop = AtomicBool::new(false);
+        let started = Instant::now();
+        let (leg, bootstrap) = dialer(None, false)
+            .dial_bootstrap_command(
+                sh(&ready_script(script)),
+                LegKind::Reconnect,
+                None,
+                &stop,
+                line_timeout,
+            )
+            .unwrap();
+        (leg, bootstrap, started.elapsed())
+    }
+
+    fn read_all(leg: &mut Leg) -> String {
+        let mut text = String::new();
+        leg.take_reader().unwrap().read_to_string(&mut text).unwrap();
+        text
+    }
+
+    #[test]
+    fn bootstrap_valid_line_is_some() {
+        let line = QuicBootstrap::encode_line(Some(&sample_bootstrap()));
+        let (leg, bootstrap, _) = bootstrap_dial(&format!("echo '{line}'; exec cat"), Duration::from_secs(5));
+        assert_eq!(bootstrap, Some(sample_bootstrap()));
+        leg.finish(true, soon());
+    }
+
+    #[test]
+    fn bootstrap_none_line_is_none_immediately() {
+        let (leg, bootstrap, took) = bootstrap_dial("echo 'herdr-mosh-quic:1 none'; exec cat", Duration::from_secs(5));
+        assert_eq!(bootstrap, None);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        leg.finish(true, soon());
+        let (leg, bootstrap, took) = bootstrap_dial("echo 'garbage'; exec cat", Duration::from_secs(5));
+        assert_eq!(bootstrap, None, "a malformed line is none");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        leg.finish(true, soon());
+    }
+
+    #[test]
+    fn bootstrap_missing_line_is_none_after_timeout() {
+        let (leg, bootstrap, took) = bootstrap_dial("exec sleep 30", Duration::from_millis(300));
+        assert_eq!(bootstrap, None);
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_millis(900),
+            "{took:?}"
+        );
+        leg.finish(true, soon());
+    }
+
+    #[test]
+    fn bootstrap_session_bytes_after_line_untouched() {
+        let line = QuicBootstrap::encode_line(Some(&sample_bootstrap()));
+        let (mut leg, bootstrap, _) = bootstrap_dial(&format!("echo '{line}'; printf SESSION"), Duration::from_secs(5));
+        assert!(bootstrap.is_some());
+        assert_eq!(read_all(&mut leg), "SESSION");
+        leg.finish(false, soon());
+    }
+
+    #[test]
+    fn late_line_never_reaches_session_bytes() {
+        let line = QuicBootstrap::encode_line(Some(&sample_bootstrap()));
+        let (mut leg, bootstrap, took) = bootstrap_dial(
+            &format!("sleep 0.6; echo '{line}'; printf SESSION"),
+            Duration::from_millis(200),
+        );
+        assert_eq!(bootstrap, None, "a late line is not used");
+        assert!(took < Duration::from_millis(550), "{took:?}");
+        assert_eq!(read_all(&mut leg), "SESSION");
+        leg.finish(false, soon());
+    }
+
+    #[test]
+    fn bootstrap_eof_before_line_is_none_and_leg_reads_eof() {
+        let (mut leg, bootstrap, _) = bootstrap_dial("printf 'no newline'", Duration::from_secs(5));
+        assert_eq!(bootstrap, None);
+        assert_eq!(read_all(&mut leg), "");
+        leg.finish(false, soon());
+    }
+
+    #[test]
+    fn bootstrap_wait_honours_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = dialer(None, false).dial_bootstrap_command(
+            sh(&ready_script("exec sleep 30")),
+            LegKind::Reconnect,
+            None,
+            &stop,
+            Duration::from_secs(5),
+        );
+        setter.join().unwrap();
+        assert!(matches!(result, Err(LegError::Retryable(_))));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn bootstrap_timeout_constant_is_5s() {
+        assert_eq!(BOOTSTRAP_LINE_TIMEOUT, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn bootstrap_command_puts_quic_flag_first() {
+        let plain_tail = "remote-client-bridge --x-mosh-quic-v1 --x-mosh-session-v1";
+        let idle_tail = "remote-client-bridge --x-mosh-quic-v1 --idle-timeout-v1 --x-mosh-session-v1";
+        let d = dialer(None, false);
+        assert!(d.bootstrap_command.contains(plain_tail), "{}", d.bootstrap_command);
+        assert!(!d.remote_command.contains("--x-mosh-quic-v1"), "{}", d.remote_command);
+        let idle = SshLegDialer::new(
+            "user@host".into(),
+            &RemoteHerdr::for_platform(linux()),
+            "work",
+            None,
+            true,
+            true,
+        );
+        assert!(idle.bootstrap_command.contains(idle_tail), "{}", idle.bootstrap_command);
+        let command = idle.leg_command_for(LegKind::Initial, &idle.bootstrap_command);
+        assert_eq!(args(&command).last(), Some(&idle.bootstrap_command));
+    }
+
     // ---- classification --------------------------------------------------------------------
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1142,7 +1640,7 @@ mod tests {
         selected: &str,
         candidates: &[&str],
         table: Vec<(&str, io::Result<Option<RemoteClientStatusJson>>)>,
-    ) -> (io::Result<Option<RemoteHerdr>>, Vec<String>, bool) {
+    ) -> (io::Result<Option<ResumeCandidate>>, Vec<String>, bool) {
         let mut table = table;
         let mut probed = Vec::new();
         let mut asked = false;
@@ -1171,7 +1669,12 @@ mod tests {
             &["/b/herdr"],
             vec![("/a/herdr", Ok(Some(status_json(true, good()))))],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/a/herdr");
+        let chosen = result.unwrap().unwrap();
+        assert_eq!(path_of(&chosen.herdr), "/a/herdr");
+        assert!(chosen
+            .capabilities
+            .iter()
+            .any(|c| c == super::super::STATUS_CAPABILITY));
         assert_eq!(probed, ["/a/herdr"]);
         assert!(!asked, "candidates must not be discovered");
     }
@@ -1187,7 +1690,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        let chosen = result.unwrap().unwrap();
+        let chosen = result.unwrap().unwrap().herdr;
         assert_eq!(path_of(&chosen), "/c/herdr");
         assert!(chosen.bridge_idle_timeout, "copied from the candidate's status");
         assert_eq!(probed, ["/a/herdr", "/b/herdr", "/c/herdr"]);
@@ -1217,7 +1720,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
+        assert_eq!(path_of(&result.unwrap().unwrap().herdr), "/c/herdr");
     }
 
     #[test]
@@ -1230,7 +1733,7 @@ mod tests {
                 ("/c/herdr", Ok(Some(status_json(true, good())))),
             ],
         );
-        assert_eq!(path_of(&result.unwrap().unwrap()), "/c/herdr");
+        assert_eq!(path_of(&result.unwrap().unwrap().herdr), "/c/herdr");
 
         let (result, _, asked) = select(
             "/a/herdr",

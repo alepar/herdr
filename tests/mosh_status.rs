@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::process::Command;
 
 #[test]
-fn status_client_json_advertises_resume_bridge_capability() {
+fn status_client_json_advertises_fork_capabilities() {
     let root = std::env::temp_dir().join(format!("mosh-status-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
@@ -27,5 +27,9 @@ fn status_client_json_advertises_resume_bridge_capability() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(caps.contains(&"x-mosh-resume-bridge-v1"), "{caps:?}");
-    assert_eq!(caps.len(), 4, "three upstream entries plus ours: {caps:?}");
+    assert!(caps.contains(&"x-mosh-quic-v1"), "{caps:?}");
+    assert!(caps.contains(&"x-mosh-supersede-v1"), "{caps:?}");
+    assert!(caps.contains(&"x-mosh-echo-v1"), "{caps:?}");
+    let upstream = caps.iter().filter(|c| !c.starts_with("x-mosh-")).count();
+    assert_eq!(upstream, 3, "exactly three upstream capabilities: {caps:?}");
 }

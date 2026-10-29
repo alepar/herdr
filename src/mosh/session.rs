@@ -52,6 +52,20 @@ const TYPE_HEARTBEAT: u8 = 5;
 const TYPE_END: u8 = 6;
 const HEADER_LEN: usize = 5;
 
+/// The HELLO type byte, which the keeper's producers read first on a new connection.
+pub(super) const HELLO_TYPE: u8 = TYPE_HELLO;
+/// First byte of a bootstrap query to the keeper. Not a session message type.
+pub(super) const BOOTSTRAP_QUERY: u8 = b'Q';
+
+const _: () = assert!(
+    BOOTSTRAP_QUERY != TYPE_HELLO
+        && BOOTSTRAP_QUERY != TYPE_WELCOME
+        && BOOTSTRAP_QUERY != TYPE_DATA
+        && BOOTSTRAP_QUERY != TYPE_ACK
+        && BOOTSTRAP_QUERY != TYPE_HEARTBEAT
+        && BOOTSTRAP_QUERY != TYPE_END
+);
+
 /// END reasons and the local reaction each requires.
 pub(super) mod end_reason {
     /// Leg 0: plain fallback. Reconnect leg: Fatal.
@@ -68,6 +82,8 @@ pub(super) mod end_reason {
     pub const RING_OVERFLOW: &str = "ring-overflow";
     /// The keeper ends the session.
     pub const CLIENT_GONE: &str = "client-gone";
+    /// The keeper refused the QUIC admission token on a QUIC leg: the dialer falls back.
+    pub const QUIC_TOKEN: &str = "quic-token";
 }
 
 /// A problem that ends the current leg, never the session.
@@ -179,6 +195,13 @@ pub(super) struct Hello {
     pub grace_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_token: Option<Token>,
+    /// QUIC admission token (hex text, opaque here); only the keeper's QUIC acceptor parses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_token: Option<String>,
+    /// The client wants render frames on the render lane (3b); fixed by the HELLO that
+    /// creates the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub render_split: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,7 +378,8 @@ pub(super) enum LinkVerdict {
     PreWelcomeBound,
 }
 
-/// One end of a session: owns offsets, dedup, acks, flow control (the `InflightWindow`'s window,
+/// One end of a session: owns the heartbeat round-trip probe (a HEARTBEAT is answered by one ACK),
+/// offsets, dedup, acks, flow control (the `InflightWindow`'s window,
 /// capped at `WINDOW`, and the window reading rule, also applied while down), link timers and resume negotiation. Bridge and keeper never do offset arithmetic.
 pub(super) struct SessionEndpoint {
     role: Role,
@@ -374,6 +398,10 @@ pub(super) struct SessionEndpoint {
     last_ack_sent: u64,
     /// When the first not-yet-acked delivered byte was reported.
     ack_pending_since: Option<Instant>,
+    /// A HEARTBEAT arrived and its ACK answer has not been sent.
+    answer_heartbeat: bool,
+    /// When the last HEARTBEAT went out with nothing unacked: the next ACK is its answer.
+    probe_sent_at: Option<Instant>,
     phase: LinkPhase,
     decoder: Decoder,
     /// Retained session state: re-sent on every leg until the session is removed.
@@ -383,6 +411,12 @@ pub(super) struct SessionEndpoint {
     established: bool,
     last_contact: Option<Instant>,
     grace_ms: u32,
+    /// Per-leg override of `SILENCE_TIMEOUT`; `None` is the Phase 1 value.
+    silence_timeout: Option<Duration>,
+    /// Sent in every HELLO while set (QUIC legs only).
+    quic_token: Option<String>,
+    /// Sent in every HELLO (3b render split).
+    render_split: bool,
 }
 
 impl SessionEndpoint {
@@ -398,6 +432,8 @@ impl SessionEndpoint {
             delivered: 0,
             last_ack_sent: 0,
             ack_pending_since: None,
+            answer_heartbeat: false,
+            probe_sent_at: None,
             phase: LinkPhase::Down,
             decoder: Decoder::default(),
             final_end: None,
@@ -405,7 +441,33 @@ impl SessionEndpoint {
             established: false,
             last_contact: None,
             grace_ms: 0,
+            silence_timeout: None,
+            quic_token: None,
+            render_split: false,
         }
+    }
+
+    /// Whether the next HELLOs ask for render-split delivery.
+    // mosh-19g.2.9 (the attacher) is its only non-test caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_render_split(&mut self, split: bool) {
+        self.render_split = split;
+    }
+
+    /// The QUIC admission token the next HELLOs carry; `None` for ssh legs.
+    // The attacher's QUIC dialer (the attacher half of mosh-19g.1.3) is its only non-test caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_quic_token(&mut self, token: Option<String>) {
+        self.quic_token = token;
+    }
+
+    /// Sets the inbound silence that kills the current leg; `None` restores `SILENCE_TIMEOUT`.
+    pub fn set_silence_timeout(&mut self, timeout: Option<Duration>) {
+        self.silence_timeout = timeout;
+    }
+
+    fn silence_limit(&self) -> Duration {
+        self.silence_timeout.unwrap_or(SILENCE_TIMEOUT)
     }
 
     pub fn token(&self) -> Token {
@@ -428,6 +490,11 @@ impl SessionEndpoint {
     /// Every outbound byte has been acked (the keeper drops an eof session on this).
     pub fn fully_acked(&self) -> bool {
         self.ring.occupancy() == 0
+    }
+
+    /// Smoothed RTT of the current leg from ACK and heartbeat samples; `None` while unknown.
+    pub fn srtt(&self) -> Option<Duration> {
+        self.window.srtt()
     }
 
     pub fn is_up(&self) -> bool {
@@ -453,6 +520,8 @@ impl SessionEndpoint {
             recv_offset: self.recv_offset,
             grace_ms,
             previous_token,
+            quic_token: self.quic_token.clone(),
+            render_split: self.render_split,
         })
         .encode()
     }
@@ -523,6 +592,8 @@ impl SessionEndpoint {
         };
         // Acks sent on a dead leg may have been lost; re-announce what was delivered.
         self.ack_pending_since = (self.delivered > self.last_ack_sent).then_some(now);
+        self.answer_heartbeat = false;
+        self.probe_sent_at = None;
     }
 
     /// Feed inbound leg bytes. Any byte, including part of a message, resets the silence clock.
@@ -577,9 +648,17 @@ impl SessionEndpoint {
                         return leg_err(format!("ACK {n} beyond sent bytes"));
                     }
                     self.send_next = self.send_next.max(n);
+                    if let Some(sent) = self.probe_sent_at.take() {
+                        if let Some(rtt) = now.checked_duration_since(sent) {
+                            self.window.on_rtt_probe_sample(rtt);
+                        }
+                    }
                     self.window.on_ack(now, n);
                 }
-                SessionMsg::Heartbeat => self.require_up("HEARTBEAT")?,
+                SessionMsg::Heartbeat => {
+                    self.require_up("HEARTBEAT")?;
+                    self.answer_heartbeat = true;
+                }
                 SessionMsg::Hello(h) => {
                     if self.role != Role::Keeper || self.is_up() {
                         return leg_err("unexpected HELLO");
@@ -642,6 +721,8 @@ impl SessionEndpoint {
         self.decoder = Decoder::default();
         self.ack_pending_since = None;
         self.last_ack_sent = 0;
+        self.answer_heartbeat = false;
+        self.probe_sent_at = None;
     }
 
     /// Bytes the owner may queue from its source now: up to the controller's window (capped by
@@ -718,22 +799,25 @@ impl SessionEndpoint {
     }
 
     fn ack_due(&self, now: Instant) -> bool {
-        self.delivered > self.last_ack_sent
-            && (self.delivered - self.last_ack_sent >= ACK_EVERY_BYTES
-                || self
-                    .ack_pending_since
-                    .is_some_and(|since| now.saturating_duration_since(since) >= ACK_EVERY))
+        self.answer_heartbeat
+            || (self.delivered > self.last_ack_sent
+                && (self.delivered - self.last_ack_sent >= ACK_EVERY_BYTES
+                    || self
+                        .ack_pending_since
+                        .is_some_and(|since| now.saturating_duration_since(since) >= ACK_EVERY)))
     }
 
     fn take_ack(&mut self) -> Vec<u8> {
+        self.answer_heartbeat = false;
         self.last_ack_sent = self.delivered;
         self.ack_pending_since = None;
         SessionMsg::Ack(self.delivered).encode()
     }
 
     /// The next message to write, or `None`. Call until `None`. One DATA chunk per call, so a
-    /// control message never waits behind more than one chunk. Order: due ACK, due HEARTBEAT
-    /// (preceded by a fresh ACK), one DATA chunk, the session-final END once the ring is sent.
+    /// control message never waits behind more than one chunk. Order: due ACK (including a heartbeat
+    /// answer), due HEARTBEAT (preceded by a fresh ACK), one DATA chunk, the session-final END
+    /// once the ring is sent.
     pub fn poll_send(&mut self, now: Instant) -> Option<Vec<u8>> {
         let LinkPhase::Up { last_heartbeat, .. } = self.phase else {
             return None;
@@ -748,6 +832,8 @@ impl SessionEndpoint {
             if let LinkPhase::Up { last_heartbeat, .. } = &mut self.phase {
                 *last_heartbeat = now;
             }
+            // With nothing unacked the peer has no other reason to ACK: its next ACK answers this.
+            self.probe_sent_at = self.fully_acked().then_some(now);
             return Some(SessionMsg::Heartbeat.encode());
         }
         let end = self.ring.end_offset();
@@ -759,6 +845,8 @@ impl SessionEndpoint {
                 let bytes = self.ring.read_at(self.send_next, n)?;
                 let offset = self.send_next;
                 self.send_next += bytes.len() as u64;
+                // The next ACK may be for this data, not the heartbeat: no clean sample.
+                self.probe_sent_at = None;
                 if self.send_next > self.fresh_end {
                     self.window
                         .on_send(now, offset.max(self.fresh_end), self.send_next);
@@ -795,7 +883,7 @@ impl SessionEndpoint {
     pub fn poll_timers(&self, now: Instant) -> Option<LinkVerdict> {
         match self.phase {
             LinkPhase::Up { last_inbound, .. }
-                if now.saturating_duration_since(last_inbound) >= SILENCE_TIMEOUT =>
+                if now.saturating_duration_since(last_inbound) >= self.silence_limit() =>
             {
                 Some(LinkVerdict::Silence)
             }
@@ -818,7 +906,7 @@ impl SessionEndpoint {
                 last_heartbeat,
             } => {
                 let mut next =
-                    (last_inbound + SILENCE_TIMEOUT).min(last_heartbeat + HEARTBEAT_INTERVAL);
+                    (last_inbound + self.silence_limit()).min(last_heartbeat + HEARTBEAT_INTERVAL);
                 if self.ack_due(now) {
                     next = now;
                 } else if let Some(since) = self.ack_pending_since {
@@ -857,6 +945,8 @@ mod tests {
             recv_offset: 7,
             grace_ms: 60_000,
             previous_token: None,
+            quic_token: None,
+            render_split: false,
         }
     }
 
@@ -1035,6 +1125,68 @@ mod tests {
         assert_eq!(serde_json::from_str::<Token>(&json).unwrap(), t);
         assert!(serde_json::from_str::<Token>("\"abc\"").is_err());
         assert_ne!(Token::generate().unwrap(), Token::generate().unwrap());
+    }
+
+    #[test]
+    fn hello_without_quic_token_omits_the_field() {
+        let wire = SessionMsg::Hello(hello_msg(false)).encode();
+        assert!(!std::str::from_utf8(&wire[5..]).unwrap().contains("quic_token"));
+    }
+
+    #[test]
+    fn old_hello_json_parses() {
+        let json = br#"{"v":1,"token":"000102030405060708090a0b0c0d0e0f","resume":true,"recv_offset":7,"grace_ms":60000}"#;
+        let mut wire = vec![TYPE_HELLO];
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(json);
+        let SessionMsg::Hello(hello) = one(&wire) else {
+            panic!("not a HELLO");
+        };
+        assert_eq!(hello.quic_token, None);
+        assert_eq!(hello, hello_msg(true));
+    }
+
+    #[test]
+    fn hello_render_split_round_trips() {
+        let mut endpoint = SessionEndpoint::new(Role::Local, tok(), 1024);
+        let off = endpoint.hello(Instant::now(), 60_000, None);
+        assert!(!std::str::from_utf8(&off[5..]).unwrap().contains("render_split"));
+        let SessionMsg::Hello(hello) = one(&off) else {
+            panic!("not a HELLO");
+        };
+        assert!(!hello.render_split);
+
+        endpoint.set_render_split(true);
+        let on = endpoint.hello(Instant::now(), 60_000, None);
+        assert!(std::str::from_utf8(&on[5..]).unwrap().contains(r#""render_split":true"#));
+        let SessionMsg::Hello(hello) = one(&on) else {
+            panic!("not a HELLO");
+        };
+        assert!(hello.render_split);
+    }
+
+    #[test]
+    fn old_hello_json_parses_as_not_split() {
+        let json = br#"{"v":1,"token":"000102030405060708090a0b0c0d0e0f","resume":false,"recv_offset":0,"grace_ms":1}"#;
+        let mut wire = vec![TYPE_HELLO];
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(json);
+        let SessionMsg::Hello(hello) = one(&wire) else {
+            panic!("not a HELLO");
+        };
+        assert!(!hello.render_split);
+    }
+
+    #[test]
+    fn hello_with_quic_token_round_trips() {
+        let mut endpoint = SessionEndpoint::new(Role::Local, tok(), 1024);
+        endpoint.set_quic_token(Some("ab".repeat(32)));
+        let bytes = endpoint.hello(Instant::now(), 60_000, None);
+        let SessionMsg::Hello(hello) = one(&bytes) else {
+            panic!("not a HELLO");
+        };
+        assert_eq!(hello.quic_token, Some("ab".repeat(32)));
+        assert!(std::str::from_utf8(&bytes[5..]).unwrap().contains(r#""quic_token":"abab"#));
     }
 
     // ---- negotiation ----
@@ -1720,6 +1872,19 @@ mod tests {
     }
 
     #[test]
+    fn silence_override_extends_the_verdict() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let t0 = p.now;
+        p.keeper.set_silence_timeout(Some(secs(30)));
+        assert_eq!(p.keeper.poll_timers(t0 + secs(10)), None);
+        assert_eq!(p.keeper.poll_timers(t0 + ms(29999)), None);
+        assert_eq!(p.keeper.poll_timers(t0 + secs(30)), Some(LinkVerdict::Silence));
+        p.keeper.set_silence_timeout(None);
+        assert_eq!(p.keeper.poll_timers(t0 + secs(8)), Some(LinkVerdict::Silence));
+    }
+
+    #[test]
     fn keeper_silence_clock_starts_when_it_writes_welcome() {
         let mut p = Pair::new(MIB, MIB);
         p.now += secs(3);
@@ -1780,8 +1945,63 @@ mod tests {
         let hb = |m: &SessionMsg| matches!(m, SessionMsg::Heartbeat);
         assert_eq!(p.count(true, hb), 15);
         assert_eq!(p.count(false, hb), 15);
+        let ack = |m: &SessionMsg| matches!(m, SessionMsg::Ack(0));
+        // Every heartbeat is answered by one ACK; within a round the keeper writes last, so
+        // its final heartbeat's answer is still pending when the loop ends.
+        assert_eq!(p.count(false, ack), 15);
+        assert_eq!(p.count(true, ack), 14);
         assert_eq!(p.count(true, is_data) + p.count(false, is_data), 0);
-        assert_eq!(p.log.len(), 30, "only heartbeats crossed the wire");
+        assert_eq!(p.log.len(), 59, "only heartbeats and their answers crossed the wire");
+    }
+
+    #[test]
+    fn heartbeat_is_answered_by_ack() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let now = p.now;
+        let hb = SessionMsg::Heartbeat.encode();
+        p.local.on_leg_bytes(now, &hb).unwrap();
+        assert_eq!(p.local.next_deadline(now), Some(now));
+        assert_eq!(one(&p.local.poll_send(now).unwrap()), SessionMsg::Ack(0));
+        assert!(p.local.poll_send(now).is_none());
+        assert_ne!(p.local.next_deadline(now), Some(now));
+    }
+
+    #[test]
+    fn heartbeats_alone_produce_srtt_samples() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let t0 = p.now;
+        assert_eq!(p.local.srtt(), None);
+        // The local heartbeat goes out at t0 + 2 s, reaches the keeper 150 ms later, and the
+        // keeper's ACK reaches the local end 150 ms after that.
+        let sent = t0 + HEARTBEAT_INTERVAL;
+        assert_eq!(one(&p.local.poll_send(sent).unwrap()), SessionMsg::Heartbeat);
+        let at_keeper = sent + ms(150);
+        p.keeper.on_leg_bytes(at_keeper, &SessionMsg::Heartbeat.encode()).unwrap();
+        assert_eq!(p.local.srtt(), None);
+        let ack = p.keeper.poll_send(at_keeper).unwrap();
+        assert_eq!(one(&ack), SessionMsg::Ack(0));
+        p.local.on_leg_bytes(at_keeper + ms(150), &ack).unwrap();
+        assert_eq!(p.local.srtt(), Some(ms(300)));
+        // The keeper has measured nothing yet: its own heartbeat is not out.
+        assert_eq!(p.keeper.srtt(), None);
+    }
+
+    #[test]
+    fn heartbeat_probe_not_armed_with_unacked_data() {
+        let mut p = Pair::new(MIB, MIB);
+        p.connect();
+        let t0 = p.now;
+        p.local.push_source(&[7; 100]).unwrap();
+        // Data first (one chunk), then the heartbeat is due with the data still unacked.
+        let sent = t0 + HEARTBEAT_INTERVAL;
+        let msgs = drain(&mut p.local, sent);
+        assert!(msgs.contains(&SessionMsg::Heartbeat) && msgs.iter().any(is_data));
+        p.local
+            .on_leg_bytes(sent + ms(300), &SessionMsg::Ack(100).encode())
+            .unwrap();
+        assert_eq!(p.local.srtt(), None, "a data ACK is not a heartbeat answer");
     }
 
     #[test]

@@ -1,0 +1,1551 @@
+[
+  {
+    "id": "mosh-19g.7",
+    "title": "Integration sweep: mosh phases 3-4 end to end",
+    "description": "Root integration sweep for mosh-19g (super-design §Coverage). Verify the goal's main flows end to end and add the integration tests no per-seam bead covers; sweep for unwired config values, parameters and interfaces; fix small gaps inline, file blockers for big ones.\nowns: the three-phase end-to-end scenario (R15), the merged-tree hook budget check (R11).\nAcceptance:\n- [ ] One opt-in scenario (#[ignore], timing_lock()) runs a QUIC leg through UdpRelay at 150 ms one-way and 10 % loss with supersede on and HERDR_MOSH_PREDICT=on: typing shows predictions, output keeps advancing, a relay rebind mid-run resumes on the same connection, and there is no client disconnect.\n- [ ] scripts/mosh-diff-budget.sh passes at 30 on the merged tree, and its count is recorded in the root spec's Post-Implementation Notes.\n- [ ] Full sweep green: cargo nextest run --locked --no-fail-fast, cargo clippy --all-targets --locked -- -D warnings, cargo fmt --check.\n- [ ] grep finds no unused fork constant, capability or env var (HERDR_MOSH_QUIC, HERDR_MOSH_PREDICT, QUIC_SILENCE_WINDOW, x-mosh-* kinds and capabilities) — each is read somewhere.\n",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:41:40Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:42:26Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:56Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:59Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:04Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.8",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:55Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.3.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:50Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.3.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:45Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:01Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:22Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:18Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:05Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:12Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:07Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.3.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:42Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.9",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:52Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:41:40Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.3.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:51Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:20Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:19Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:13Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:15Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:02Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:16Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.1.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:42:08Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.3.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:44Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.7",
+        "depends_on_id": "mosh-19g.2.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:57Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 24,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.3.5",
+    "title": "4: prediction integration and timing tests",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md §5. tests/mosh_predict.rs using the Phase 2 harness link knob (150 ms one-way) with HERDR_MOSH_PREDICT=on: typed text appears and stays correct; with stty -echo; cat a typed char is painted then cleared within 1 RTT + 50 ms + one render; old remote (strip-capability extended to x-mosh-echo-v1 if needed) → no predictions, no subscribe. Timing (#[ignore], --run-ignored all, timing_lock()): median keypress-to-paint for 50 printable keys under 5 ms, from the facade's HERDR_MOSH_TRACE tap/paint timestamps (mosh-19g.3.2), cross-checked by the harness screen showing the char before 1 RTT.\nowns: tests/mosh_predict.rs.\nFiles: tests/mosh_predict.rs, tests/mosh_harness.rs (small helpers only).\nAcceptance:\n- [ ] Integration tests pass in the default suite.\n- [ ] Timing test passes with --run-ignored all; median logged.\nblocked-by mosh-19g.3.2: client side\nblocked-by mosh-19g.3.3: server side\nblocked-by mosh-19g.3.4: bridge side\nCoverage r1 additions:\n- [ ] Opt-in wall-clock R8 test: under stty -echo, from the facade's tap trace timestamp to the clearing paint ≤ RTT + 50 ms + one render.\n- [ ] Integration: HERDR_MOSH_PREDICT=adaptive on a fast link → no predictions, fast path taken; the existing client suites run with prediction unset.\n- [ ] Opt-in: prediction over a QUIC leg via UdpRelay (bootstrap-port rewrite from mosh-19g.1.5) with supersede on and 10 % loss — confirmed predictions stay, wrong ones clear, no stuck overlay.\nblocked-by mosh-19g.1.5: consumes the harness bootstrap-port rewrite helper\nblocked-by mosh-19g.4: consumes UdpRelay\nblocked-by mosh-19g.2.7: consumes the supersede test setup over QUIC",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:28:40Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:37:45Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.2.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:37:44Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.3",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:28:40Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.3.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:29:12Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.1.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:37:39Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:37:41Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.3.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:29:06Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.5",
+        "depends_on_id": "mosh-19g.3.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:29:09Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 6,
+    "dependent_count": 1,
+    "comment_count": 0,
+    "parent": "mosh-19g.3"
+  },
+  {
+    "id": "mosh-19g.3.4",
+    "title": "4: bridge echo subscribe and LinkStatus.echo",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md Key abstractions (LinkStatus, LocalBridge / link_frames). link_frames: encode_echo_subscribe_frame beside encode_resync_frame (through write_message). LocalBridge: when the probe shows x-mosh-echo-v1 and the predict mode is not off, inject the subscribe once per session right after the first client frame (Hello) through the upstream FrameSplitter path as offset-bearing DATA (replayed on new legs); then set LinkStatus Linked.echo=true (field defined by mosh-19g.3.2). Probe parsing of x-mosh-echo-v1 next to the supersede flag.\nowns: encode_echo_subscribe_frame, the bridge subscribe injection, setting LinkStatus.echo.\nFiles: src/mosh/{link_frames,local_bridge,outage,mod,ssh_leg}.rs.\nAcceptance:\n- [ ] Bridge test with a scripted leg: the subscribe frame appears exactly once, immediately after the client's Hello frame, and is replayed after a resume (byte offsets intact).\n- [ ] Without the capability or with mode off: no subscribe, Linked has no echo field.\n- [ ] Linked frames carry echo:true only after the subscribe was injected.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.3.1: consumes EchoAck and mode\nblocked-by mosh-19g.2.9: consumes the bridge upstream FrameSplitter path and probe flags\nblocked-by mosh-19g.6: consumes LinkStatus srtt_ms re-injection\nblocked-by mosh-19g.3.2: consumes LinkStatus.echo field\nCoverage r1: consumes the mode read point and x-mosh-echo-v1 constant from mosh-19g.3.1 and the client-frame injection API from mosh-19g.2.9.\nowns: the bridge echo probe flag.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:28:38Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:37:37Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3.4",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:29:03Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.4",
+        "depends_on_id": "mosh-19g.3.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:30:40Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.4",
+        "depends_on_id": "mosh-19g.3.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:58Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.4",
+        "depends_on_id": "mosh-19g.3",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:28:38Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.4",
+        "depends_on_id": "mosh-19g.2.9",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:29:01Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 4,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.3"
+  },
+  {
+    "id": "mosh-19g.3.3",
+    "title": "4: server EchoTracker and echo hooks",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md §1, §2 and Key abstractions (EchoTracker / server_hooks). In src/mosh/server_hooks.rs: EchoTracker process-global mutex keyed by client id (per pane received, acked, FIFO of (count, received_at)), never held across a channel send; the subscribe arm in 3b's client EndpointControl dispatch creates the entry (no ServerEvent); receipt counting for subscribed clients; echo_due(clients, now) queues x-mosh.echo-ack.v1 (EchoAck encoding) on the client's existing control lane (upstream writer queue, no 3b dependency) for input received ≥ 50 ms earlier with the client's last committed surface_revision via render_state.last_pane_surface() (no baseline → wait); echo_deadline(next_deadline) folds the next due time in; disconnect cleanup. Upstream hook lines (each one tagged statement): count at client_transport.rs:1196; echo_due before headless.rs step 8 (~:608); echo_deadline folded into next_deadline; cleanup in remove_client (headless.rs:946); status.rs advertising x-mosh-echo-v1.\nowns: EchoTracker behaviour, server echo hook lines, capability x-mosh-echo-v1.\nFiles: src/mosh/server_hooks.rs, src/server/client_transport.rs, src/server/headless.rs, src/cli/status.rs.\nAcceptance:\n- [ ] Unit tests: unsubscribed clients are not counted; ack only after 50 ms; ack carries the last committed revision; no baseline → no ack until one exists; remove_client drops the entry.\n- [ ] Server-level test: a subscribed client typing into a pane receives echo-acks whose input_seq equals the events it sent; an unsubscribed client receives none.\n- [ ] Server-level test: input that causes no render (stty -echo) is still acked.\n- [ ] status client --json lists x-mosh-echo-v1; scripts/mosh-diff-budget.sh passes at 30 (needs: mosh-19g.5).\n- [ ] clippy and fmt clean.\nblocked-by mosh-19g.3.1: consumes EchoAck\nblocked-by mosh-19g.5: consumes server_hooks seam and budget\nblocked-by mosh-19g.2.2: consumes the client EndpointControl dispatch hook\nCoverage r1: uses the x-mosh-echo-v1 constant from EchoAck (mosh-19g.3.1).\nDesign roast r1: the counting unit is one element of ClientShellPaneInput.events counted at receipt; the EchoTracker entry is created on the first subscribe and a repeated subscribe (replay on a new leg) is idempotent and does not reset counts.\n- [ ] Unit test: a second subscribe for the same client leaves counts unchanged.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:28:37Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:05:04Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3.3",
+        "depends_on_id": "mosh-19g.3",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:28:37Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.3",
+        "depends_on_id": "mosh-19g.2.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:56Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.3",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:53Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.3",
+        "depends_on_id": "mosh-19g.3.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:51Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.3"
+  },
+  {
+    "id": "mosh-19g.3.2",
+    "title": "4: client facade routing, paint and client hooks",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md §3 and Key abstractions (client fork facade, Predictor painting). outage.rs facade: one process-global mutex for OutageState + Predictor; observe becomes one closed match (LINK_KIND → outage state + Predictor srtt/echo from LinkStatus; echo-ack → Predictor; else false); paint paints banner then predictions and moves frame.cursor past the last visible prediction; new entry points tap (counts every ClientShellPaneInput request, creates predictions, returns a recomposed frame when one was added) and blocks_fast_path (true while any prediction exists for the active endpoint). Upstream hook lines (tagged // mosh-fork hook): EDIT client/mod.rs:2095 observe to pass the generation; EDIT composition.rs:723 paint to pass the retained surface, pane_surface_generation and layout.pane_surface; ADD one tap statement in shell_runtime.rs before 'for request in outcome.requests' gated on active_endpoint_online \u0026\u0026 pending_activation.is_none() (never in push_target_event); ADD one guard statement at the top of fast_path_blocker (surface_patch.rs:57). Verify pane_surface_generation matches the registry connection.generation numbering; record the finding in the spec's Post-Implementation Notes.\nAlso: add LinkStatus Linked.echo (serde default, skipped when false; old JSON parses) in outage.rs, and HERDR_MOSH_TRACE events for tap and paint timestamps (consumed by the timing test).\nowns: the facade's routing and paint, the tap and fast-path-guard entry points and hook lines, LinkStatus.echo field, the tap/paint trace events.\nFiles: src/mosh/outage.rs, src/client/mod.rs, src/client/shell/composition.rs, src/client/shell_runtime.rs, src/client/shell/surface_patch.rs.\nAcceptance:\n- [ ] Facade unit tests: link frame updates both outage and predictor; echo-ack routed; unknown kind returns false.\n- [ ] Client-level test: with prediction on and a fake Linked{srtt_ms:300, echo:true}, a typed printable key yields a presented frame containing the predicted character before any server response.\n- [ ] With HERDR_MOSH_PREDICT unset, presented frames and the fast path are byte-identical to before (existing client suites pass unchanged).\n- [ ] scripts/mosh-diff-budget.sh passes (needs: mosh-19g.5); every added line is one tagged statement.\n- [ ] clippy and fmt clean.\nblocked-by mosh-19g.3.1: consumes Predictor\nblocked-by mosh-19g.5: consumes hook budget 30\nblocked-by mosh-19g.6: consumes LinkStatus srtt_ms",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:28:35Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:30:35Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3.2",
+        "depends_on_id": "mosh-19g.3",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:28:35Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.2",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:48Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.2",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:46Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.2",
+        "depends_on_id": "mosh-19g.3.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:43Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.3"
+  },
+  {
+    "id": "mosh-19g.3.1",
+    "title": "4: EchoAck and Predictor core",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md §3 and Key abstractions (EchoAck, Predictor). src/mosh/predict.rs (mounted as a #[path] child of outage.rs, no upstream line): EchoAck (kind strings for echo-ack and echo-subscribe, ack JSON {pane_id,input_seq,surface_revision}, malformed → none); Predictor: mode enum from HERDR_MOSH_PREDICT read once (off default | on | adaptive), state keyed by (endpoint id, connection generation) then pane, input class match (Printable / EpochBreak / ClearPane / Ignore incl. key releases and modifier-only keys), sent counter per pane, prediction creation only when echo on and the mode threshold met (adaptive \u003e 60 ms; underline \u003e 160 ms), cursor placement with unicode-width and right-edge stop, epochs with adaptive hidden-until-confirmed, judging (ack input_seq ≥ seq AND surface revision ≥ ack revision; inner_rect change clears), wrong → clear pane + hide epoch, no-ack timeout max(1 s, 4×SRTT) → clear + off for the generation; a pure 'cells to paint + cursor position' output and an 'any prediction exists' query. No I/O; time is an input. Before building the keying, read-only verify that the client's pane_surface_generation is numbered like the registry's connection.generation; if not, key by the value the paint hook can see and note it in the spec's Post-Implementation Notes.\nowns: EchoAck, Predictor.\nFiles: src/mosh/predict.rs, src/mosh/outage.rs (mount line only).\nAcceptance:\n- [ ] Unit tests: every input class; epoch break / hidden epoch / confirm reveals; paste and rect-change clear; right-edge stop; wide characters; ack ahead of its surface leaves the prediction pending; wrong prediction clears the pane; timeout turns prediction off; generation change resets counts.\n- [ ] Mode thresholds unit-tested (off, on, adaptive below/above 60 ms, underline above 160 ms).\n- [ ] EchoAck round-trips; malformed JSON → none.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.6: consumes LinkStatus srtt_ms semantics\nCoverage r1: the mode enum and its single read function are public for the bridge (mosh-19g.3.4); EchoAck also defines the capability constant x-mosh-echo-v1 used by the status line (3.3) and the bridge probe (3.4).\nowns: the prediction mode enum and read point, the x-mosh-echo-v1 constant, the (endpoint, generation) keying identity.\nDesign roast r1: the counting unit is one element of ClientShellPaneInput.events, counted at the tap; counts are per (connection generation, pane) and reset only on a new generation.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:28:34Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:05:03Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3.1",
+        "depends_on_id": "mosh-19g.3",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:28:34Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3.1",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:28:41Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "mosh-19g.3"
+  },
+  {
+    "id": "mosh-19g.2.9",
+    "title": "3b: LocalBridge render hosting, resync path and resume rule",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §3, §4 and Key abstractions (LocalBridge, Hello). LocalBridge: create a RenderReorder when the session is render-split and the Leg carries a lane; pass SRTT from the mosh-19g.6 process-local read (unknown → RenderReorder's 250 ms default) and fold its deadline into the leg I/O wait; write delivered frames as ClientOut::Injected (no offset); an upstream client→server FrameSplitter and one request_resync path writing encode_resync_frame between client frames as session DATA (offset-bearing); the §4 resume rule (one resync after WELCOME on every leg after the first, render-split sessions, any leg type); on lane-bearing legs, drop render-class frames arriving on the session stream (ack still advances). Probe: parse x-mosh-supersede-v1 from the status probe result (where 3a's mosh-19g.1.7 parses x-mosh-quic-v1) into BridgeParams and set Hello.render_split on every leg.\nowns: LocalBridge render hosting, resync path, resume resync, session-stream render drop on lane legs, the supersede probe flag.\nFiles: src/mosh/{local_bridge,mod,ssh_leg}.rs.\nAcceptance:\n- [ ] Bridge test with a scripted leg: a resume after the first leg emits exactly one resync between client frames.\n- [ ] Bridge test: render-class frames on the session stream of a lane-bearing leg are not forwarded; on an ssh leg they are.\n- [ ] Bridge test with a scripted lane: a gap produces exactly one resync and no Chained frame reaches the client before the next SelfContained.\n- [ ] Probe without the capability → HELLO has no render_split.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.2.6: consumes the lane reader\nblocked-by mosh-19g.2.5: consumes RenderReorder\nblocked-by mosh-19g.2.8: consumes Hello.render_split\nblocked-by mosh-19g.2.1: consumes encode_resync_frame, FrameSplitter, FrameClass\nblocked-by mosh-19g.6: consumes SRTT read\nblocked-by mosh-19g.1.7: consumes the probe parsing location\nCoverage r1: the injection path is a small API used by later work: inject a client-direction frame either at the next client frame boundary or immediately after the first client frame (Hello), as offset-bearing DATA so it is replayed on a new leg. Phase 4's subscribe (mosh-19g.3.4) uses it.\nowns: the bridge client-frame injection API (position, offset-bearing, replay).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:18:34Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:37:33Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.2.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:55Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.1.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:19:10Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:19:07Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.2.8",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:19:01Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.2.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:58Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:18:34Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.9",
+        "depends_on_id": "mosh-19g.2.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:19:04Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 6,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.8",
+    "title": "3b: keeper render-split plumbing and lane queue handle",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §1, §2 and Key abstractions (Hello, keeper Session/LegSlot, RenderLane producer queue). The unblocking artifact split out of mosh-19g.2.3. Hello gains optional render_split (serde default, skipped when false; old JSON parses). Session gains render_split, fixed from the HELLO that answered new. The RenderLane producer-side queue handle type (src/mosh/remote/render_lane.rs): a clearable bounded queue of 64 frames shared between the keeper thread (producer) and the lane's runtime task (consumer); offer(class, bytes) → Accepted | Rejected (Chained rejected when full; SelfContained clears the queue and is always accepted); a consumer pop that waits. This replaces 3a's placeholder render-lane slot type in KeeperLeg (extends mosh-19g.1.2's slot, same field). admit copies KeeperLeg's lane handle into LegSlot (None for Unix legs).\nowns: Hello.render_split, Session.render_split, the lane queue handle type and its offer semantics, the KeeperLeg→LegSlot lane wiring at admit.\nFiles: src/mosh/session.rs, src/mosh/remote/{keeper,render_lane}.rs.\nAcceptance:\n- [ ] Hello round-trips with and without render_split; old HELLO JSON parses.\n- [ ] Queue unit tests: capacity 64, Chained rejected when full, SelfContained clears and is accepted, consumer pop wakes on offer.\n- [ ] Session.render_split is fixed at new and unchanged by a later HELLO (keeper unit test).\n- [ ] Existing suites unchanged; no upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.1.2: consumes KeeperLeg and its render-lane slot",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:18:15Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:41:38Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.8",
+        "depends_on_id": "mosh-19g.1.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:36Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.8",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:18:15Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.7",
+    "title": "3b: supersede integration and timing tests",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §6. tests/mosh_supersede.rs. Integration: patch burst under 20 % relay loss on a QUIC leg, an ssh leg, and across a QUIC → ssh change, with no client disconnect; old remote (strip-capability) → no split; use the Phase 1 harness's strip-capability knob, extending it in tests/mosh_harness.rs to strip x-mosh-supersede-v1 if it does not already take a capability name. Timing (#[ignore], --run-ignored all, timing_lock(), dense flood base64 /dev/urandom at a large pane, UdpRelay 10 % loss, 150 ms one-way): typed marker echo visible within 2 s while flooding; screen changes at least once per second over 20 s; the same scenario over a Phase 1 ssh-only leg recorded for comparison without assertion.\nowns: tests/mosh_supersede.rs.\nFiles: tests/mosh_supersede.rs, tests/mosh_harness.rs (only if a small helper is needed).\nAcceptance:\n- [ ] Integration tests above pass in the default suite.\n- [ ] Timing tests pass with --run-ignored all; comparison numbers logged.\nblocked-by mosh-19g.2.2: server hook\nblocked-by mosh-19g.2.4: keeper lane\nblocked-by mosh-19g.1.7: registered QUIC leg\nblocked-by mosh-19g.4: UdpRelay\nblocked-by mosh-19g.2.9: bridge side\nCoverage r1: mixed-version cases — new bridge with the remote's x-mosh-supersede-v1 stripped (no render_split, no resync sent, plain Phase 1 behaviour); old HELLO without render_split admitted as non-split; a plain non-mosh client attached to the same server receives no x-mosh.surface-resync/echo frames. QUIC tests route through UdpRelay via mosh-19g.1.5's bootstrap-port rewrite helper.\n- [ ] Mixed-version cases above pass in the default suite.\nblocked-by mosh-19g.1.5: consumes the harness bootstrap-port rewrite helper\nCoverage r2: the leg-change case goes QUIC → ssh → QUIC (fallback then redial) under loss, asserting no client disconnect and one resync per resume.\nblocked-by mosh-19g.2.3: consumes keeper ChainGate routing and resync injection\nParked escalation (design roast r1): log the full-PaneSurface delivery time at 10 % loss / 150 ms one-way in the timing test (loss-based congestion control vs the 2 s bound); a miss is recorded in the 3b spec's Post-Implementation Notes with the measured value.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:32Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:11:27Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.2.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:16:06Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:16:13Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.2.9",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:19:20Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.2.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:32Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.1.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:16:11Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.1.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:37:30Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:32Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.7",
+        "depends_on_id": "mosh-19g.2.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:16:04Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 7,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.6",
+    "title": "3b: bridge QUIC render-lane reader",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §3 and Key abstractions (quic module / Leg render-lane slot). On the QUIC Leg (mosh-19g.1.6), fill the client render-lane receiver slot: the keeper-opened uni streams are accepted in the client QUIC runtime and turned into RenderArrival events (Header when a stream's header is read, Complete with bytes at stream end, Reset on RESET_STREAM), delivered to the bridge's leg I/O thread through one reader thread / channel per leg. Decodes the quic-module render header.\nowns: the bridge render-lane reader.\nFiles: src/mosh/{quic,quic_leg}.rs.\nAcceptance:\n- [ ] Loopback quinn test: frames sent on uni streams arrive as Header then Complete with the right seq/class/bytes; a reset stream yields Reset(seq).\n- [ ] Leg teardown stops the reader without blocking on the runtime.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.2.5: consumes RenderArrival\nblocked-by mosh-19g.1.6: consumes the QUIC Leg render-lane slot\nblocked-by mosh-19g.1.1: consumes quic module render header",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:30Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:18:54Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.6",
+        "depends_on_id": "mosh-19g.1.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:50Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.6",
+        "depends_on_id": "mosh-19g.2.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:47Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.6",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:30Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.6",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:53Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.5",
+    "title": "3b: bridge RenderReorder",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §3 and Key abstractions (RenderReorder extended). Sans-IO state machine in src/mosh/render_reorder.rs: inputs RenderArrival {Header(seq,class), Complete(seq,class,bytes), Reset(seq)}, now, SRTT or unknown (250 ms); outputs frames to deliver, request-resync, next deadline. Rules: in-order delivery; gap on reset or overdue \u003e max(SRTT,50 ms) after a later seq arrived; after a gap drop Chained until SelfContained; SelfContained releases immediately and supersedes missing seqs; Reset(n) with a known higher SelfContained header = supersede (gap, no request); other gaps request once; each leg starts in gap with the request counted as sent. Define the RenderArrival enum here; the bridge lane reader (mosh-19g.2.6) produces it.\nowns: RenderReorder, RenderArrival.\nFiles: src/mosh/render_reorder.rs, src/mosh/mod.rs.\nAcceptance:\n- [ ] Unit tests with a fake clock for every rule above, including once-per-gap and the supersede-without-request case.\n- [ ] No I/O in the module (pure); clippy and fmt clean.\nblocked-by mosh-19g.2.1: consumes FrameClass\nblocked-by mosh-19g.6: consumes SRTT read",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:29Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:18:33Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.5",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:29Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.5",
+        "depends_on_id": "mosh-19g.2.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:50Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.5",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:52Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.4",
+    "title": "3b: keeper RenderLane",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §2 and Key abstractions (RenderLane extended). Keeper-side per-QUIC-leg sender in the keeper's QUIC runtime: the consumer side of the lane queue handle from mosh-19g.2.8 (QuicAcceptor creates the handle and puts it in the KeeperLeg it builds); per-leg sequence from 0; one uni stream per frame with the quic-module render header; on SelfContained, write the new stream's header first, then reset every older in-flight stream; max_concurrent_uni_streams 64 in the leg's transport config.\nowns: RenderLane (stream sender, sequence, supersede resets).\nFiles: src/mosh/remote/{render_lane,quic_acceptor}.rs.\nAcceptance:\n- [ ] QuicAcceptor-built KeeperLegs carry a lane handle; Unix legs carry None.\n- [ ] Loopback quinn test: frames arrive on uni streams with correct headers; a SelfContained frame causes older still-open streams to be reset at the receiver, and its header is observed before those resets.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.1.3: consumes QuicAcceptor\nblocked-by mosh-19g.1.1: consumes quic module render header\nblocked-by mosh-19g.2.8: consumes the lane queue handle type",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:28Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:18:29Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.4",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:28Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.4",
+        "depends_on_id": "mosh-19g.2.8",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:27Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.4",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:48Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.4",
+        "depends_on_id": "mosh-19g.1.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:45Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.3",
+    "title": "3b: keeper ChainGate, render-split routing and resync injection",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §1, §2 and Key abstractions (ChainGate, keeper Session/LegSlot/server_reader/server_writer, Hello). Uses Hello/Session.render_split and the lane queue handle from mosh-19g.2.8. Session gains a ChainGate (sans-IO, the §2 table, close on leg end, inject-resync verdict when a lane rejects while the leg is up). server_reader (render-split only): FrameSplitter → whole frames, FrameClass, ChainGate verdicts; ring path for Reliable and for render frames on lane-less legs; lane path offers to the LegSlot's lane queue handle (Rejected → ChainGate close + inject); drop_leg and steal report leg end to the gate. server_writer: channel item becomes a closed enum (client bytes+offset | resync); client→server FrameSplitter; resync written at the next frame boundary via encode_resync_frame; acks offset − held_back only after the write.\nowns: ChainGate, server_reader render routing, server_writer resync injection.\nFiles: src/mosh/remote/{keeper,chain_gate}.rs, src/mosh/session.rs.\nAcceptance:\n- [ ] ChainGate unit tests: every row of the §2 table; leg end closes; lane-reject while up returns inject.\n- [ ] Keeper test (ssh-style Unix legs): render-split session with a leg drop mid-burst never forwards a Chained frame before a SelfContained one after the drop.\n- [ ] Keeper test: an injected resync lands between two client frames, unsplit, and acks never cover unwritten bytes.\n- [ ] Non-render-split sessions behave byte-identically (existing suites unchanged); old HELLO JSON parses.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.2.1: consumes FrameClass, FrameSplitter, encode_resync_frame\nblocked-by mosh-19g.1.2: consumes KeeperLeg/LegSlot\nblocked-by mosh-19g.2.8: consumes Hello/Session.render_split and the lane queue handle",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:27Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:18:32Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.3",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:27Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.3",
+        "depends_on_id": "mosh-19g.2.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:38Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.3",
+        "depends_on_id": "mosh-19g.1.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:40Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.3",
+        "depends_on_id": "mosh-19g.2.8",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:18:30Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.2",
+    "title": "3b: server surface-resync hook and supersede capability",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §1, §5 and Key abstractions (server_hooks). In src/mosh/server_hooks.rs (seam from mosh-19g.5): the client EndpointControl dispatch maps x-mosh.surface-resync.v1 to ServerEvent::MoshSurfaceResync{client_id}; the resync body takes \u0026mut Client and does render_state.reset_baseline(), writer.discard_pending_render(), request_repaint() (no projection bump/geometry work). Upstream hook lines (each one statement, tagged // mosh-fork hook): the dispatch call at client_transport.rs:1349, the ServerEvent variant, one arm in headless.rs's event match; status.rs one line advertising x-mosh-supersede-v1.\nowns: the resync behaviour behind server_hooks, ServerEvent::MoshSurfaceResync, capability x-mosh-supersede-v1.\nFiles: src/mosh/server_hooks.rs, src/server/client_transport.rs, src/server/headless.rs (or wherever ServerEvent and its match live), src/cli/status.rs.\nAcceptance:\n- [ ] Server-level test: a client sends the resync frame (encode_resync_frame) and its next render is a full PaneSurface (tag 13), not a patch.\n- [ ] Unknown x-mosh.* kinds are still ignored.\n- [ ] status client --json lists x-mosh-supersede-v1.\n- [ ] scripts/mosh-diff-budget.sh passes at 30 (needs: mosh-19g.5); every new upstream line is one tagged statement.\n- [ ] clippy and fmt clean.\nblocked-by mosh-19g.2.1: consumes encode_resync_frame\nblocked-by mosh-19g.5: consumes server_hooks seam and budget 30\nCoverage r1: surface revisions stay server-owned and monotonic across a resync (the bridge/keeper only request; they never synthesize surfaces).\nowns: surface_revision monotonicity across resync.\n- [ ] Server-level test: the full PaneSurface after a resync has surface_revision greater than every revision sent before it.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:25Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:37:27Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.2",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:25Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.2",
+        "depends_on_id": "mosh-19g.2.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:33Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2.2",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:15:35Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.2.1",
+    "title": "3b: FrameClass and resync frame encoder",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md §2, §3 and Key abstractions (FrameClass from the root, link_frames extended). src/mosh/link_frames.rs: FrameClass closed enum SelfContained|Chained|Reliable and the one classifier (tags 13,12 → SelfContained; tag 19 and tag-20 kinds endpoint.surface-reuse/delta/scroll.v1 → Chained; else and unparseable → Reliable); encode_resync_frame building ClientMessage::EndpointControl{kind:x-mosh.surface-resync.v1} through the crate's write_message (never hand-rolled bytes); FrameSplitter confirmed usable on the client→server direction (ClientMessage frames use the same u32 LE length framing).\nowns: FrameClass, encode_resync_frame.\nFiles: src/mosh/link_frames.rs.\nAcceptance:\n- [ ] Unit tests: every tag 0-20 classified per the table; each tag-20 render kind Chained; another tag-20 kind Reliable; truncated/garbage → Reliable.\n- [ ] Unit test: encode_resync_frame decodes with the crate's ClientMessage reader to EndpointControl with that kind.\n- [ ] Unit test: FrameSplitter splits a client→server byte stream at frame boundaries across arbitrary chunking.\n- [ ] No upstream file changed; clippy and fmt clean.\nCoverage r1: FrameClass classifies every non-render tag-20 kind, including x-mosh.echo-ack.v1 and x-mosh.link.v1, as Reliable.\n- [ ] Unit test: x-mosh.echo-ack.v1 and x-mosh.link.v1 classify Reliable.\nCoverage r2: also defines the x-mosh-supersede-v1 capability constant (consumed by 2.2 status line and 2.9 probe).\nowns: the x-mosh-supersede-v1 constant.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:15:24Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:41:30Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2.1",
+        "depends_on_id": "mosh-19g.2",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:15:24Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 5,
+    "comment_count": 0,
+    "parent": "mosh-19g.2"
+  },
+  {
+    "id": "mosh-19g.1.7",
+    "title": "3a: QUIC registration and capability",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §3, §6 and Key abstractions (start_ui_bridge, status.rs). start_ui_bridge wraps SshLegDialer in QuicLegDialer only when status reports x-mosh-quic-v1, HERDR_MOSH_QUIC != 0 and ssh -G \u003ctarget\u003e shows no proxyjump/proxycommand; the dial host is ssh -G's hostname. The -G parse is a small function in src/mosh (not in upstream attach.rs). src/cli/status.rs: one tagged hook line advertising x-mosh-quic-v1 (unix only).\nowns: the QUIC registration decision, the ssh -G parse, capability x-mosh-quic-v1.\nFiles: src/mosh/{mod,local_bridge}.rs (start_ui_bridge), src/mosh/ssh_config.rs (or similar), src/cli/status.rs (one hook line).\nAcceptance:\n- [ ] Unit test: -G parse extracts hostname and detects proxyjump / proxycommand.\n- [ ] Unit-tested selection fn: HERDR_MOSH_QUIC=0, missing capability, or a jump → SshLegDialer alone; otherwise QuicLegDialer.\n- [ ] status client --json lists x-mosh-quic-v1; scripts/mosh-diff-budget.sh passes (needs: mosh-19g.5).\n- [ ] clippy and fmt clean.\nblocked-by mosh-19g.1.6: consumes QuicLegDialer\nblocked-by mosh-19g.5: consumes hook budget 30 (status.rs hook line)\nCoverage r1: the registration decision and the -G parse are cfg(unix); non-unix builds register SshLegDialer only (or nothing, as Phase 1).\nCoverage r2: uses the x-mosh-quic-v1 constant from the quic module (mosh-19g.1.1).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:08:46Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:41:23Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.7",
+        "depends_on_id": "mosh-19g.1.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:09:02Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.7",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:08:46Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.7",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:09:06Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.6",
+    "title": "3a: QuicLegDialer state machine",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §3, §6 and Key abstractions (QuicLegDialer). src/mosh/quic_leg.rs: composes a concrete SshLegDialer; leg 0 = ssh bootstrap mode, then a ≤3 s pinned QUIC handshake to \u003cdial host\u003e:\u003cport\u003e (dial host passed in by the registration), success tears the ssh child down and returns a QUIC Leg (admission token = bootstrap token, RTT probe from Connection::rtt()), failure returns the ssh leg; reconnects try QUIC (3 s) then ssh; the classification table from Key abstractions (leg-0 pre-WELCOME → Phase 1 leg-0 table; reconnect quic-token END → Retryable and cached bootstrap cleared; pre-WELCOME QUIC death → skip QUIC on next dial; fingerprint mismatch Retryable; post-WELCOME Retryable); runtime + endpoint in an Arc shared with every QUIC Leg.\nowns: QuicLegDialer.\nFiles: src/mosh/quic_leg.rs, src/mosh/mod.rs.\nAcceptance:\n- [ ] Unit tests for every classification row above.\n- [ ] Loopback test (keeper QuicAcceptor in-process or a quic-module server): leg 0 returns a QUIC leg and the ssh child is gone; with the server port blackholed, leg 0 returns the ssh leg within 3.5 s.\n- [ ] The QUIC Leg's RTT probe returns Some after traffic.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.1.4: consumes Leg extensions and SshLegDialer bootstrap mode\nblocked-by mosh-19g.1.1: consumes quic module client config and adapter\nCoverage r1: QUIC legs set the silence-timeout override to 30 s. ssh reconnect legs also use bootstrap mode, and a fresh QuicBootstrap replaces the cache (so a transient leg-0 UDP failure is not permanent).\n- [ ] Unit test: after an ssh reconnect leg returns a bootstrap, the next dial tries QUIC with it.\nCoverage r2: owns: the QUIC Leg RTT probe (from quinn Connection::rtt(), interface from mosh-19g.6).\nblocked-by mosh-19g.6: consumes the Leg RTT probe interface\nDesign roast r1: the ssh child stays alive until WELCOME arrives over QUIC; any pre-WELCOME QUIC failure on leg 0 (token refusal, pre-WELCOME bound, early loss) returns the live ssh leg, not the plain bridge. A reconnect fingerprint mismatch falls through to an ssh leg in the same dial (Retryable, never Fatal). Dial the address family ssh -G's hostname resolves to.\n- [ ] Unit test: leg 0 with a QUIC handshake that succeeds but a refused token returns the ssh leg, which is still alive and usable.\nDesign roast r1: on leg 0 the returned QUIC Leg carries the live ssh leg as its standby (interface from mosh-19g.1.4) instead of tearing ssh down at handshake.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:08:45Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:11:25Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.6",
+        "depends_on_id": "mosh-19g.1.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:08:56Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.6",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:08:59Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.6",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:08:45Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.6",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:41:15Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.5",
+    "title": "3a: QUIC acceptance tests over UdpRelay",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §6 and §7. tests/mosh_quic.rs plus the fake-ssh bootstrap-port rewrite in tests/mosh_harness.rs (uses QuicBootstrap's parser to rewrite the port to a UdpRelay's client-facing port; production code gets no address override). Timing tests #[ignore], run with --run-ignored all, take timing_lock(), dense flood where load matters.\nowns: tests/mosh_quic.rs, the harness bootstrap-port rewrite.\nFiles: tests/mosh_quic.rs, tests/mosh_harness.rs (rewrite helper only).\nAcceptance:\n- [ ] QUIC in use: after leg 0 no ssh child is alive and keystroke echo + output work.\n- [ ] Fallback: relay at 100 % loss → session up on ssh within ssh time + 3.5 s.\n- [ ] Address change: relay.rebind() mid-session; next keystroke echo within 2 RTT + one render at 150 ms one-way delay.\n- [ ] Idle gap: 20 s blackhole within 60 s grace, then restore; echo within 2 RTT + one render, no new ssh process.\n- [ ] Mid-session UDP block longer than the silence timeout → reconnect falls back to ssh and the session continues.\n- [ ] strip-capability remote → ssh-only session.\n- [ ] Non-ignored suite still passes; ignored suite passes with --run-ignored all (needs: mosh-19g.4).\nblocked-by mosh-19g.1.4: consumes the working QUIC leg end to end\nblocked-by mosh-19g.4: consumes UdpRelay\nblocked-by mosh-19g.1.7: consumes the registered QUIC leg end to end\nCoverage r1 (replaces the idle-gap bullet): short idle gap — 20 s blackhole, same QUIC leg survives (no new leg, no ssh), echo within 2 RTT + one render after restore; long idle gap — 60 s blackhole within a 120 s grace with relay.rebind() during the gap, a new QUIC leg (not ssh) is admitted and echo appears within 3 RTT + one reconnect backoff step + one render. Fallback bound stays ssh time + 3.5 s (0.5 s measurement slack over the 3 s QUIC attempt). Expose the bootstrap-port rewrite as a reusable harness helper for 2.7 and 3.5.\nCoverage r2 additions:\n- [ ] Short idle gap also asserts the keeper did not enter grace (no leg drop on the keeper side).\n- [ ] Long idle gap asserts the redial reuses the cached bootstrap and token (no ssh process).\n- [ ] Exactly-once input: type a continuous sequence across a mid-session UDP block (QUIC→ssh fallback) and across a QUIC redial; the remote received the byte sequence exactly once.\nDesign roast r1: long idle gap bound becomes 3 RTT + one reconnect backoff step + up to the 3 s handshake bound of an attempt in flight when the link returns (+ one render).\nParked escalation (design roast r1): log the time from relay restore to the first keystroke echo in the short-idle-gap test (QUIC PTO backoff vs the 2 RTT bound); a miss is recorded in the 3a spec's Post-Implementation Notes with the measured value.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:06:47Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:11:26Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.5",
+        "depends_on_id": "mosh-19g.1.7",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:09:10Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.5",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:07:04Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.5",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:06:47Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.4",
+    "title": "3a: Leg extensions and SshLegDialer bootstrap mode",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §1, §6 and Key abstractions (Leg, SshLegDialer, QuicBootstrap read). Leg gains: an optional opaque admission token (LocalBridge copies it into HELLO.quic_token without interpreting it); a QUIC close reason in the end report (alongside ExitStatus); the client render-lane receiver slot, always None in 3a (3b fills it); the RTT probe slot from mosh-19g.6 stays as that bead defines it. SshLegDialer gains a separate bootstrap-mode method: adds --x-mosh-quic-v1 to the remote command and, after the ready marker, reads one line within 500 ms (this bead owns the bounded read; parsing is QuicBootstrap's), returning the leg plus Option\u003cQuicBootstrap\u003e.\nowns: Leg admission token, Leg close reason, client Leg render-lane slot, SshLegDialer bootstrap mode and its 500 ms read.\nFiles: src/mosh/{ssh_leg,local_bridge,mod}.rs.\nAcceptance:\n- [ ] Unit test: bootstrap-mode read returns None within ~600 ms when no line follows the ready marker, and Some for a valid line.\n- [ ] Unit test: LocalBridge puts a Leg's admission token into HELLO.quic_token, and omits the field when None (needs: mosh-19g.1.3).\n- [ ] Existing ssh-leg suites pass unmodified.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.1.1: consumes QuicBootstrap parser\nblocked-by mosh-19g.1.3: consumes Hello.quic_token and attacher --x-mosh-quic-v1\nblocked-by mosh-19g.6: consumes the Leg RTT probe slot\nCoverage r1: Leg also carries an optional silence-timeout override that LocalBridge's silence verdict honours (None = Phase 1 value).\nowns: LocalBridge copying Leg admission token into Hello.quic_token; the Leg silence-timeout override and LocalBridge honouring it.\n- [ ] Bridge unit test: a leg with a 30 s override is not ended by 10 s of silence; a leg without one keeps Phase 1 behaviour.\nDesign roast r1 (replaces the 500 ms read): bootstrap mode waits for the attacher's one line (bootstrap or none) with a 5 s safety timeout treated as none; nothing after the ready marker is ever consumed as session bytes until that line is read.\n- [ ] Unit test: a 'none' line yields None immediately; a missing line yields None after the safety timeout; session bytes after the line are untouched.\nDesign roast r1 (ssh handoff): Leg gains an optional ssh standby leg. LocalBridge drops the standby on WELCOME (tearing the ssh child down) and, if the leg ends before WELCOME, switches to the standby and re-sends HELLO on it (Phase 1 never redials leg 0).\nowns: the Leg ssh standby slot and LocalBridge's standby switch/drop.\n- [ ] Bridge test with scripted legs: a leg that ends before WELCOME switches to its standby (HELLO re-sent, session admitted); WELCOME drops the standby.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:06:46Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:11:24Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.4",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:08:53Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.4",
+        "depends_on_id": "mosh-19g.1.3",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:08:50Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.4",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:08:47Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.4",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:06:46Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 3,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.3",
+    "title": "3a: QuicAcceptor, QuicTokens and the bootstrap query",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §1, §2, §4 and Key abstractions (QuicAcceptor, QuicTokens, Attacher, Hello). Keeper: QuicTokens (sans-IO, time as input: mint, 60 s unbound expiry, bind to HELLO.token at first QUIC HELLO, bound token must match its session); QuicAcceptor (lazy start on first Q query, one tokio runtime thread, cert + port + fingerprint, max_idle_timeout advertised 3600 s, accept connections + first bidi stream, per-connection std thread counted in Shared.pending reads HELLO under the pre-WELCOME bound, token check, refusal → END {reason:\"quic-token\"}, else KeeperLeg (shutdown = Connection::close) → shared admit); the Q arm in the Unix producer replies one JSON line from QuicBootstrap ({} on bind failure, not cached). Hello/SessionEndpoint gain optional quic_token (skip_serializing_if). Attacher: only when started with --x-mosh-quic-v1, sends Q after connecting, reads the reply, prints the herdr-mosh-quic:1 line right after the ready marker, then sends HELLO/pumps as today.\nowns: QuicAcceptor, QuicTokens, the Q query protocol, Hello.quic_token, attacher --x-mosh-quic-v1.\nFiles: src/mosh/remote/{keeper,attacher,mod}.rs, src/mosh/remote/quic_acceptor.rs, src/mosh/session.rs.\nAcceptance:\n- [ ] QuicTokens unit tests: unknown refused; unbound \u003c60 s binds; unbound ≥60 s refused; bound token with another session refused; bound session presenting another token refused.\n- [ ] Hello encodes without quic_token when None and old HELLO JSON still parses.\n- [ ] Keeper test: Q on a rendezvous connection returns a parseable reply; a QUIC connection (pinned client from the quic module) sending HELLO with the minted token gets WELCOME new; a bad token gets END quic-token.\n- [ ] Attacher without --x-mosh-quic-v1 prints no bootstrap line (existing tests unchanged); with it prints exactly one valid line after the ready marker.\n- [ ] No upstream file changed; clippy and fmt clean.\nblocked-by mosh-19g.1.1: consumes quic module (TLS, adapter) and QuicBootstrap reply format\nblocked-by mosh-19g.1.2: consumes KeeperLeg and the first-byte match's Q arm\nCoverage r2: QuicAcceptor sets QUIC_SILENCE_WINDOW on the KeeperLegs it builds. A bound token stays valid for its session's whole life (QuicTokens never removes bound entries), so QUIC redials within grace reuse it with no ssh round trip.\nowns: keeper-side QUIC silence window, bound-token reuse across QUIC redials.\nDesign roast r1: with --x-mosh-quic-v1 the attacher writes exactly one line before any session bytes — the bootstrap line, or 'herdr-mosh-quic:1 none' on bind failure or a keeper reply timeout of 2 s. QuicAcceptor binds dual-stack [::] with IPV6_V6ONLY off, falling back to 0.0.0.0.\n- [ ] Attacher test: with the keeper's reply withheld past 2 s, exactly one 'none' line is printed before session bytes.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:06:45Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:04:57Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.3",
+        "depends_on_id": "mosh-19g.1.2",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:06:51Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.3",
+        "depends_on_id": "mosh-19g.1.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:06:48Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1.3",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:06:45Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 3,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.2",
+    "title": "3a: KeeperLeg transport-neutral keeper legs",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §5 and Key abstractions (KeeperLeg). Behaviour-preserving refactor of src/mosh/remote/keeper.rs: admit, run_leg, leg_writer, answer_and_close and LegSlot take a KeeperLeg (boxed reader, boxed writer, a shutdown closure callable from other threads, an optional render-lane slot that stays None). HELLO reading moves from admit into the producer: the Unix accept loop reads the first byte under PRE_WELCOME_BOUND and dispatches with a closed match (the HELLO type byte → read HELLO; a reserved arm for the bootstrap query byte Q that the QuicAcceptor task fills (until then it closes the connection, like an unknown byte); anything else → close), then calls admit(KeeperLeg, Hello).\nowns: KeeperLeg.\nFiles: src/mosh/remote/keeper.rs (and a small keeper_leg.rs if it reads better).\nAcceptance:\n- [ ] All existing tests/mosh_*.rs suites and keeper unit tests pass unmodified.\n- [ ] admit/run_leg/LegSlot no longer name UnixStream (grep).\n- [ ] Unit test: the first-byte match closes a connection whose first byte is neither HELLO nor Q.\n- [ ] No upstream file changed; clippy and fmt clean.\nCoverage r2: KeeperLeg also carries an optional silence-timeout override that the keeper's leg silence verdict honours (None = Phase 1 value), and the render-lane slot (placeholder type; mosh-19g.2.8 replaces it with the lane queue handle).\nowns: KeeperLeg silence-timeout override, the KeeperLeg render-lane slot.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:06:44Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:41:02Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.2",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:06:44Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.1.1",
+    "title": "3a: quic module and QuicBootstrap",
+    "description": "Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md §1, §4 and Key abstractions (quic module, QuicBootstrap). Add quinn (runtime-tokio, rustls-ring, no aws-lc-rs), rustls, rcgen to Cargo.toml. src/mosh/quic.rs: lazily started tokio runtime handle owner; blocking Read/Write adapter over quinn SendStream/RecvStream (block_on from caller std threads, never from runtime workers); keeper TLS server config from an rcgen self-signed cert with SHA-256 hex fingerprint; client config with a verifier that accepts exactly one pinned fingerprint, plus the client transport config (max_idle_timeout = the caller-supplied grace, no QUIC keepalive, one bidi stream; no error-triggered rebind, the endpoint binds the wildcard address); render-stream header type (u64 seq + class byte) encode/decode. src/mosh/quic_bootstrap.rs (or inside quic.rs): QuicBootstrap value type — the herdr-mosh-quic:1 \u003cport\u003e \u003cfingerprint\u003e \u003ctoken\u003e line, the keeper JSON reply ({} or {port,fingerprint,token}), the 32-byte token type, format validation.\nowns: quic module, QuicBootstrap.\nFiles: Cargo.toml, Cargo.lock, src/mosh/quic.rs, src/mosh/quic_bootstrap.rs, src/mosh/mod.rs.\nAcceptance:\n- [ ] cargo tree shows no aws-lc-rs / aws-lc-sys.\n- [ ] Unit test: loopback quinn connection with the keeper cert and pinned client verifier transfers bytes both ways through the blocking adapter from plain std threads.\n- [ ] Unit test: a client pinned to a different fingerprint fails the handshake.\n- [ ] Unit tests: bootstrap line and JSON reply round-trip; malformed lines (wrong prefix, bad port, short fingerprint/token, extra fields) parse as none; render header round-trips.\n- [ ] No upstream file changed except Cargo.toml/Cargo.lock; clippy -D warnings and fmt clean.\nCoverage r1: the Cargo deps go under a cfg(unix) target table with quinn features runtime-tokio + rustls-ring only (default-features off where they pull aws-lc-rs); the quic module and every QUIC type are cfg(unix).\nowns: Cargo QUIC deps (ring only, unix target), cfg(unix) gating of QUIC code.\n- [ ] cargo tree -e features shows ring and no aws-lc-rs/aws-lc-sys.\nCoverage r2: the quic module also defines the shared constants: QUIC_SILENCE_WINDOW (30 s) and the capability string x-mosh-quic-v1 (consumed by 1.3 attacher flag/keeper and 1.7 status line).\nowns: render-stream header encode/decode (u64 seq + class byte), QUIC_SILENCE_WINDOW, the x-mosh-quic-v1 constant.\nDesign roast r1: Cargo — quinn and rustls with default-features = false (quinn: runtime-tokio, rustls-ring; rustls: ring, std, tls12), rcgen with ring, under [target.'cfg(unix)'.dependencies]. TransportConfig max_idle_timeout is set before the dial on both peers (keeper 3600 s, client = its grace); grace stays a keeper application timer. QuicBootstrap also parses/encodes the explicit 'herdr-mosh-quic:1 none' line.\n- [ ] cargo tree -i aws-lc-rs and cargo tree -i aws-lc-sys both come back empty.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T15:06:43Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:04:56Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1.1",
+        "depends_on_id": "mosh-19g.1",
+        "type": "parent-child",
+        "created_at": "2026-10-28T15:06:43Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 6,
+    "comment_count": 0,
+    "parent": "mosh-19g.1"
+  },
+  {
+    "id": "mosh-19g.6",
+    "title": "SRTT provider: smoothed RTT exposed to the process and in LinkStatus",
+    "description": "Key abstractions: InflightWindow extended with SRTT; LinkStatus extended with srtt_ms; gap (b). Decide and implement the sampling rule: on a QUIC leg the SRTT comes from the QUIC connection's own RTT estimate (quinn Connection::rtt(), surfaced through the Leg as an optional RTT probe); on ssh legs InflightWindow keeps an EWMA (alpha 1/8) over its existing quantum-gated samples, and is 'unknown' until the first sample. Expose a process-local read (current SRTT or unknown) for the local bridge, and re-inject LinkStatus Linked with optional srtt_ms when SRTT changes by more than 20 % or 20 ms (JSON field optional; older clients ignore it).\nowns: InflightWindow SRTT, the Leg optional RTT probe, the process-local SRTT read, LinkStatus srtt_ms.\nFiles: src/mosh/{window,session,local_bridge,outage,ssh_leg}.rs.\nAcceptance:\n- [ ] Unit tests: EWMA converges on synthetic samples; unknown before the first sample; LinkStatus encodes and decodes with and without srtt_ms (old JSON still parses).\n- [ ] The bridge re-injects srtt_ms only on the stated change threshold (unit-tested with a fake clock).\n- [ ] The Leg RTT probe is None for ssh legs and defined for the QUIC leg type's interface (the QUIC implementation fills it in mosh-19g.1's subtree).\n- [ ] No upstream file changed; session protocol unchanged.\nDesign roast r1 (root gap b): ssh-leg SRTT also samples the heartbeat→ACK round trip (each HEARTBEAT answered by an ACK), so a typing-only session gets samples; QUIC legs use the Leg RTT probe.\n- [ ] Unit test: heartbeats alone (no data) produce SRTT samples.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:59:51Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T16:11:23Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.6",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:59:51Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 10,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.5",
+    "title": "Seam contract: fork server hooks module and hook budget 30",
+    "description": "Spec §2, §3, §4 and the EchoTracker / server hooks key abstraction. Land only the unblocking artifact: src/mosh/server_hooks.rs mounted for the server (via one tagged hook line or an existing fork mount), with the EchoTracker type and inert entry points for (1) client EndpointControl dispatch of fork kinds (resync), (2) pane input applied, (3) render sent, (4) client disconnected — each a no-op returning 'not handled' until 3b/4 fill them in; the type's responsibility comment; and raise scripts/mosh-diff-budget.sh to 30. No upstream call sites are added here (each consumer adds its own one-statement hook).\nowns: EchoTracker / server hooks module (src/mosh/server_hooks.rs) and its entry-point names; the hook budget 30.\nFiles: src/mosh/server_hooks.rs, src/mosh/mod.rs (fork mount), scripts/mosh-diff-budget.sh.\nAcceptance:\n- [ ] server_hooks.rs compiles with the four inert entry points and the EchoTracker responsibility comment (what it owns, what it doesn't, where new behaviour goes).\n- [ ] scripts/mosh-diff-budget.sh enforces 30 and still reports 12 lines on this commit.\n- [ ] No upstream file changed; clippy and fmt clean.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:59:50Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T14:59:50Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.5",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:59:50Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 8,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.4",
+    "title": "UdpRelay test helper: userspace UDP delay, loss and rebind",
+    "description": "Spec §5 and the UdpRelay key abstraction. Add a Rust UDP relay to tests/mosh_harness.rs: forwards between a local client-facing port and a target UDP address; one-way delay; seeded random loss rate per direction; rebind() (switch the relay's upstream-facing socket to a new local port mid-session to emulate an address change); counters for packets dropped/forwarded. The bootstrap-port rewrite in the fake-ssh output is owned by mosh-19g.1 (it uses QuicBootstrap's parser).\nowns: UdpRelay (test API: start, set_delay, set_loss, rebind, stats).\nFiles: tests/mosh_harness.rs, a small self-test in tests/mosh_udp_relay.rs.\nAcceptance:\n- [ ] A self-test sends N datagrams through the relay with delay D and loss L and observes delay within 20% of D and loss within ±5 percentage points of L for N=2000 (seeded, deterministic).\n- [ ] rebind() changes the source address the target sees, and traffic continues.\n- [ ] No root, no tc, no new Cargo dependency (std::net::UdpSocket only).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:58:16Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:00:16Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.4",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:58:16Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 6,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.3",
+    "title": "Phase 4: predictive local echo with server echo-ack",
+    "description": "Spec §3, §6 (4). Deliver prediction: Predictor (src/mosh/predict.rs: mode HERDR_MOSH_PREDICT, epochs, validation, overlay, fast-path veto); client facade routing in mosh_outage (link vs echo-ack) and overlay painting; client input-tap hook and fast-path guard hook; server echo-ack hooks (input applied count, emit x-mosh.echo-ack.v1 after the render via the ordered lane) in src/mosh/server_hooks.rs with client-disconnect cleanup (gap c) and an ordering guard so the client judges only against a surface after the ack (gap a); acceptance per §6 4 over the Phase 2 link knob (works over ssh legs too).\nowns: Predictor, the echo-ack behaviour behind the server_hooks input/render/disconnect entry points, EndpointControl kind x-mosh.echo-ack.v1.\nconsumes: EchoTracker / server hooks module (mosh-19g.5 seam contract); process-local SRTT and LinkStatus srtt_ms (mosh-19g.6).\nFiles: src/mosh/{predict,outage,window,session,local_bridge,server_hooks}.rs, src/client/{mod.rs,shell/surface_patch.rs,shell/input.rs or shell_runtime.rs} (hooks), src/server/... input and render paths (hooks), tests/mosh_predict*.rs.\nblocked-by mosh-19g.5: consumes the EchoTracker / server hooks module entry points and the hook budget 30\nblocked-by mosh-19g.6: consumes the process-local SRTT read and LinkStatus srtt_ms",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:58:14Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:30:49Z",
+    "metadata": {
+      "sp_spec": "docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--4-prediction-design.md",
+      "sp_depth": 1,
+      "sp_order": 3
+    },
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.3",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T14:59:57Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:58:14Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.3",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:00:01Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.2",
+    "title": "Phase 3b: render frames on cancellable QUIC streams with resync",
+    "description": "Spec §2, §6 (3b). Deliver cancel-on-supersede: FrameClass (closed enum + classifier next to FrameSplitter); RenderLane (keeper per-leg render streams, sequence, supersede resets); keeper render-split flag and server_reader classification; RenderReorder (bridge ordering, gap detection, chain dropping, once-per-gap resync); LocalBridge render-lane reading and client→server FrameSplitter to inject x-mosh.surface-resync.v1; server resync hook (one statement at client_transport.rs:1349) in src/mosh/server_hooks.rs; capability x-mosh-supersede-v1; acceptance per §6 3b at 10% loss using UdpRelay.\nowns: FrameClass, RenderLane, RenderReorder, the resync behaviour behind the server_hooks dispatch entry point, capability x-mosh-supersede-v1, EndpointControl kind x-mosh.surface-resync.v1.\nconsumes: EchoTracker / server hooks module (mosh-19g.5 seam contract); process-local SRTT (mosh-19g.6).\nconsumes: quic module render-stream header, KeeperLeg render-lane slot and Leg render-lane receiver (Phase 3a); UdpRelay.\nFiles: src/mosh/{link_frames,local_bridge,server_hooks,render_lane,render_reorder}.rs, src/mosh/remote/keeper.rs, src/server/client_transport.rs (hook), src/cli/status.rs (hook), tests/mosh_supersede*.rs.\nblocked-by mosh-19g.1: consumes quic module render-stream header type, KeeperLeg render-lane slot and Leg render-lane receiver (provisional epic-level edge; narrowed after 3a's nested design)\nblocked-by mosh-19g.5: consumes the EchoTracker / server hooks module entry points\nblocked-by mosh-19g.6: consumes the process-local SRTT read (RenderReorder overdue rule)\nblocked-by mosh-19g.4: consumes UdpRelay",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:58:13Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:19:25Z",
+    "metadata": {
+      "sp_spec": "docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3b-supersede-design.md",
+      "sp_depth": 1,
+      "sp_order": 2
+    },
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.2",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:00:06Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:58:13Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2",
+        "depends_on_id": "mosh-19g.6",
+        "type": "blocks",
+        "created_at": "2026-10-28T14:59:59Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T14:59:54Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.2",
+        "depends_on_id": "mosh-19g.1",
+        "type": "blocks",
+        "created_at": "2026-10-28T14:58:17Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 4,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g.1",
+    "title": "Phase 3a: QUIC leg with ssh bootstrap, roaming and fallback",
+    "description": "Spec §1, §4, §6 (3a). Deliver the QUIC leg: QuicBootstrap line from attacher via a keeper bootstrap query; quic module (blocking stream adapter, rcgen/rustls pinning, render-stream header type); QuicAcceptor (keeper UDP endpoint, token admission, idle timeout from grace); KeeperLeg refactor so admit/run_leg are transport-blind; QuicLegDialer (3 s handshake bound, sticky leg-0 ssh fallback, roaming via rebind); Leg extended with an optional render-lane receiver (None for now, consumed by 3b); capability x-mosh-quic-v1 in status (hook lines); fills the Leg RTT probe for QUIC legs (interface from mosh-19g.6); the fake-ssh bootstrap-port rewrite for tests, using QuicBootstrap's parser; acceptance per §6 3a using UdpRelay.\nowns: QuicLegDialer, QuicBootstrap, quic module, KeeperLeg, QuicAcceptor; the Leg render-lane receiver slot; capability x-mosh-quic-v1; the HELLO optional QUIC token field (gap d).\nconsumes: UdpRelay.\nFiles: src/mosh/{quic_leg,quic,ssh_leg,local_bridge,mod,session}.rs, src/mosh/remote/{keeper,attacher,mod}.rs, src/cli/status.rs (hook), Cargo.toml/Cargo.lock, tests/mosh_quic*.rs, tests/mosh_harness.rs (bootstrap-port rewrite only).\nblocked-by mosh-19g.5: consumes the hook budget 30 (status.rs capability hook lines)\nblocked-by mosh-19g.4: consumes UdpRelay",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:58:12Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T15:09:17Z",
+    "metadata": {
+      "sp_spec": "docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction--3a-quic-leg-design.md",
+      "sp_depth": 1,
+      "sp_order": 1
+    },
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependencies": [
+      {
+        "issue_id": "mosh-19g.1",
+        "depends_on_id": "mosh-19g.4",
+        "type": "blocks",
+        "created_at": "2026-10-28T15:00:04Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1",
+        "depends_on_id": "mosh-19g",
+        "type": "parent-child",
+        "created_at": "2026-10-28T14:58:12Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "mosh-19g.1",
+        "depends_on_id": "mosh-19g.5",
+        "type": "blocks",
+        "created_at": "2026-10-28T14:59:52Z",
+        "created_by": "Alexey Parfenov",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 1,
+    "comment_count": 0,
+    "parent": "mosh-19g"
+  },
+  {
+    "id": "mosh-19g",
+    "title": "Mosh Phases 3-4: QUIC leg, cancel-on-supersede, predictive echo",
+    "description": "Phases 3 and 4 of HERDR_MOSH_VISION.md: a QUIC leg with roaming and ssh fallback (3a), render frames on cancellable QUIC streams with a resync hook (3b), and client predictive local echo with a server echo signal (4). Spec: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-design.md (file:line research brief: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/inputs/seam-brief.md).\n\n## Global Constraints\n- New code under src/mosh/ (mounted already) and tests/mosh_*.rs. Every edit to an upstream file is ONE statement tagged `// mosh-fork hook`; the upstream budget is 30 lines for these phases (scripts/mosh-diff-budget.sh raised from 20; currently 12 used).\n- No change to frozen codecs, ServerMessage/ClientMessage variants, PROTOCOL_VERSION or hello fields; new behaviour only through EndpointControl kinds (x-mosh.*) and advertised capabilities (x-mosh-quic-v1, x-mosh-supersede-v1) per AGENTS.md \"Stable client endpoint contract\"; older peers must keep working (fallback, ignored kinds).\n- New Cargo dependencies ONLY for QUIC: quinn (runtime-tokio, rustls-ring), rustls, rcgen; ring, never aws-lc-rs. Unix only (like Phase 1).\n- Tests in fork files only (src/mosh #[cfg(test)] modules, tests/mosh_*.rs). Wall-clock acceptance tests are #[ignore] (run with --run-ignored all), take timing_lock(), and load the system with a dense flood (base64 /dev/urandom at a large pane size) — herdr sends screen diffs, so `yes` does not load the link.\n- Conventional-commit messages with NO AI co-author / Co-Authored-By lines (repo AGENTS.md line 237). Rust: no unwrap() in production code; tracing for logging.\n- Build needs zig 0.16.0 (~/.local/bin/zig). Sweep: cargo nextest run --locked --no-fail-fast \u0026\u0026 cargo clippy --all-targets --locked -- -D warnings \u0026\u0026 cargo fmt --check.\n\u003c!-- key-abstractions digest: begin --\u003e\n- QuicLegDialer: owns QUIC legs, ssh bootstrap and fallback, pinning and roaming;\n  new QUIC dial behaviour goes in `quic_leg.rs`; the bridge never knows a leg is QUIC.\n- QuicBootstrap: the one definition of the `herdr-mosh-quic:1` line and the keeper's bootstrap answer;\n  new bootstrap fields go here; no one else formats or parses the line.\n- quic module: owns the blocking adapter over quinn streams, TLS and pinning configs, and the render-stream header;\n  shared QUIC plumbing goes here; callers never touch async or rustls directly.\n- KeeperLeg: owns a keeper-side leg's stream halves, shutdown and optional render lane;\n  a new leg source is a new producer of KeeperLeg; admit/run_leg never name a transport.\n- QuicAcceptor: owns the keeper's UDP endpoint, certificate, token admission and idle timeout;\n  QUIC admission rules go here; admit never checks QUIC tokens.\n- FrameClass: owns which herdr frames are self-contained, chained or reliable;\n  a new render kind is one match arm; no caller inspects tags or kind strings itself.\n- RenderLane: owns render sequence numbers, per-frame streams and supersede resets for one QUIC leg;\n  supersede policy changes go here; never classifies or touches the ring.\n- RenderReorder: owns render ordering, gap detection, chain dropping and the resync decision on the bridge;\n  gap and resync rules go here; LocalBridge never reasons about render chains.\n- Predictor: owns client-side predictive echo (mode, epochs, validation, echo-ack, overlay, fast-path veto);\n  prediction rules go in predict.rs; hooks only call it and never touch prediction state.\n- EchoTracker / server hooks: owns server-side resync marking and per-pane echo-ack bookkeeping;\n  new server-side fork behaviour goes behind these hook functions; upstream lines stay one statement.\n- UdpRelay: owns test-only UDP delay, loss and rebind;\n  new network faults are relay knobs; tests never open raw sockets themselves.\n\u003c!-- key-abstractions digest: end --\u003e",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "epic",
+    "owner": "alepar@gmail.com",
+    "created_at": "2026-10-28T14:58:10Z",
+    "created_by": "Alexey Parfenov",
+    "updated_at": "2026-10-28T14:58:10Z",
+    "labels": [
+      "sp:mosh-19g"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

@@ -802,6 +802,7 @@ pub(super) fn finish_client_shell_input(
         .as_ref()
         .is_none_or(|shell| shell.endpoint_is_online(endpoints.active_id()))
         && endpoints.active_surface_available();
+    #[rustfmt::skip] let frame = crate::client::mosh_outage::tap(active_endpoint_online && pending_activation.is_none(), endpoints, &outcome.requests, state.shell.as_mut(), state.reported_size).or(frame); // mosh-fork hook
     for request in outcome.requests {
         if let ClientMessage::ClientShellHostTheme { update } = &request {
             state.record_host_theme_update(update);

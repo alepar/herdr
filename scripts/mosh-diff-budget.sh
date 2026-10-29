@@ -4,13 +4,15 @@
 #
 # Fork paths (excluded from the audit): src/mosh, tests/mosh_*, scripts/mosh-*,
 # HERDR_MOSH_VISION.md, docs/superpowers. Everything else is "upstream".
+# Cargo.toml and Cargo.lock are also excluded: the QUIC dependencies (quinn,
+# rustls, rcgen) were allowed as dependency changes, and they are not hook lines.
 #
 # The diff is taken from the merge base with origin/master to the working tree,
 # so uncommitted edits are audited too.
 #
 # Exit codes:
 #   0  within budget and every upstream hunk is tagged
-#   1  more than 20 inserted upstream lines, or an upstream hunk without a
+#   1  more than 30 inserted upstream lines, or an upstream hunk without a
 #      "mosh-fork" tag on an added line (deletion-only hunks are untagged)
 #   2  usage or setup error (for example, no origin/master)
 #
@@ -20,7 +22,7 @@
 
 set -euo pipefail
 
-budget=20
+budget=30
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -35,6 +37,8 @@ fork_excludes=(
   ':(exclude,glob)scripts/mosh-*'
   ':(exclude)HERDR_MOSH_VISION.md'
   ':(exclude)docs/superpowers'
+  ':(exclude)Cargo.toml'
+  ':(exclude)Cargo.lock'
 )
 
 git diff "$base" --stat -- . "${fork_excludes[@]}"

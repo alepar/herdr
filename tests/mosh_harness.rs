@@ -9,6 +9,12 @@
 #[path = "support/terminal_screen.rs"]
 mod terminal_screen;
 
+// The crate is bin-only, so the bootstrap line parser is included by path (the file is
+// self-contained on purpose). Its own unit tests ride along in every harness user.
+#[allow(dead_code)]
+#[path = "../src/mosh/quic_bootstrap.rs"]
+mod quic_bootstrap;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -193,7 +199,124 @@ pub mod knob {
     /// delay line (`<one-way delay ms> <rate bytes/s>`); see `Remote::set_link`. Checked
     /// before `THROTTLE`.
     pub const LINK: &str = "link";
+    /// The fake `ssh -G` also reports `hostname 127.0.0.1`, so `start_ui_bridge` registers the
+    /// QUIC leg dialer. Without it existing suites keep plain ssh legs.
+    pub const QUIC: &str = "quic";
+    /// Space-separated capability names the fake `herdr` wrapper removes from
+    /// `status client --json`, like `STRIP_CAPABILITY` does for the resume capability.
+    pub const STRIP_CAPS: &str = "strip-caps";
+    /// A UDP port. Session legs started while it is set pass their stdout through
+    /// [`QUIC_PORT_FILTER`], which rewrites the port field of the attacher's bootstrap line.
+    pub const QUIC_PORT: &str = "quic-port";
+    /// Every session leg ends like an unreachable host (`ssh` exit 255, "Connection timed
+    /// out": retryable on a reconnect leg), as a network that drops all traffic does.
+    pub const SSH_DOWN: &str = "ssh-down";
+    /// Plain bridges started while set tee their server-to-client bytes into `plain-tap`
+    /// (see `Remote::plain_tap`).
+    pub const TAP_PLAIN: &str = "tap-plain";
 }
+
+/// Perl filter the fake `ssh` puts on a session leg's stdout while the `quic-port` knob is set
+/// (`perl <path> <port> <command...>`): runs the command, rewrites the port field of the first
+/// `herdr-mosh-quic:1 <port> ...` line to `<port>` (a `none` line passes untouched), and then
+/// copies bytes raw. Production code gets no address override; this is the test-only seam.
+/// Bytes up to and including the ready marker pass at once (the dialer waits for it); when no
+/// bootstrap line follows the marker the stream is copied raw from the first non-matching byte.
+const QUIC_PORT_FILTER: &str = r##"use strict;
+use warnings;
+
+my ($port, @cmd) = @ARGV;
+my $MARK = "herdr-remote-output-ready:1\n";
+my $PFX = "herdr-mosh-quic:1";
+pipe(my $r, my $w) or die "pipe: $!";
+my $pid = fork();
+die "fork: $!" unless defined $pid;
+if (!$pid) {
+    close $r;
+    open(STDOUT, '>&', $w) or die "dup: $!";
+    close $w;
+    exec @cmd or die "exec: $!";
+}
+close $w;
+for my $sig (qw(TERM HUP INT)) {
+    $SIG{$sig} = sub { kill 'KILL', $pid; exit 143 };
+}
+binmode STDOUT;
+binmode $r;
+
+sub out {
+    my ($data) = @_;
+    while (length $data) {
+        my $n = syswrite(STDOUT, $data);
+        if (!defined $n) {
+            next if $!{EINTR};
+            kill 'KILL', $pid;
+            exit 0;
+        }
+        substr($data, 0, $n, '');
+    }
+}
+
+sub rewrite {
+    my ($line) = @_;
+    $line =~ s/^(\Q$PFX\E )\d+ /$1$port /;
+    return $line;
+}
+
+my $buf = '';
+my $state = 0;    # 0: preamble lines, 1: after the marker, 2: raw
+while (1) {
+    my $n = sysread($r, my $chunk, 65536);
+    if (!defined $n) {
+        next if $!{EINTR};
+        last;
+    }
+    last if $n == 0;
+    if ($state == 2) {
+        out($chunk);
+        next;
+    }
+    $buf .= $chunk;
+    while ($state < 2) {
+        if ($state == 0) {
+            my $i = index($buf, "\n");
+            last if $i < 0;
+            my $line = substr($buf, 0, $i + 1, '');
+            if (index($line, $PFX) == 0) {
+                out(rewrite($line));
+                $state = 2;
+            } else {
+                out($line);
+                $state = 1 if $line eq $MARK;
+            }
+        } else {
+            my $len = length $buf;
+            last if $len == 0;
+            my $cmp = $len < length($PFX) ? $len : length($PFX);
+            if (substr($buf, 0, $cmp) ne substr($PFX, 0, $cmp)) {
+                $state = 2;
+            } elsif ($len < length($PFX)) {
+                last;
+            } else {
+                my $i = index($buf, "\n");
+                if ($i < 0) {
+                    $state = 2 if $len > 4096;
+                    last;
+                }
+                out(rewrite(substr($buf, 0, $i + 1, '')));
+                $state = 2;
+            }
+        }
+    }
+    if ($state == 2 && length $buf) {
+        out($buf);
+        $buf = '';
+    }
+}
+out($buf) if length $buf;
+waitpid($pid, 0);
+exit($? >> 8);
+"##;
 
 /// Perl delay line the fake `ssh` puts on both directions of a leg while the `link` knob is
 /// set: a serializing bottleneck plus propagation delay. Each chunk read at `t` departs at
@@ -266,6 +389,25 @@ pub fn write_delay_line(dir: &Path) -> PathBuf {
     let path = dir.join("delay-line.pl");
     fs::write(&path, DELAY_LINE).unwrap();
     path
+}
+
+/// Write the bootstrap-port filter into `dir` and return its path; run it as
+/// `perl <path> <port> <command...>`.
+pub fn write_quic_port_filter(dir: &Path) -> PathBuf {
+    let path = dir.join("quic-port-filter.pl");
+    fs::write(&path, QUIC_PORT_FILTER).unwrap();
+    path
+}
+
+/// The port field of a `herdr-mosh-quic:1 <port> <fingerprint> <token>` line (`None` for the
+/// `none` line and anything malformed), parsed with the production parser.
+pub fn bootstrap_line_port(line: &str) -> Option<u16> {
+    quic_bootstrap::QuicBootstrap::parse_line(line).map(|b| b.port)
+}
+
+/// The fingerprint field of a bootstrap line, as lowercase hex.
+pub fn bootstrap_line_fingerprint(line: &str) -> Option<String> {
+    quic_bootstrap::QuicBootstrap::parse_line(line).map(|b| b.fingerprint.to_string())
 }
 
 /// A disposable remote herdr server plus the fake `ssh` that reaches it.
@@ -398,6 +540,11 @@ impl Remote {
         })
     }
 
+    /// Server-to-client bytes of every plain bridge started under `knob::TAP_PLAIN`.
+    pub fn plain_tap(&self) -> Vec<u8> {
+        fs::read(self.base.join("plain-tap")).unwrap_or_default()
+    }
+
     pub fn trace_dir(&self) -> PathBuf {
         self.base.join("trace")
     }
@@ -410,6 +557,7 @@ impl Remote {
         let legs = sh_quote(&base.join("legs.log"));
         let delay_line = sh_quote(&write_delay_line(&base.join("bin")));
         let links = sh_quote(&base.join("links.log"));
+        let port_filter = sh_quote(&write_quic_port_filter(&base.join("bin")));
         let marker = "printf '\\nherdr-remote-output-ready:1\\n'";
         let throttle = "perl -e '$|=1; while (my $n = sysread(STDIN,$b,65536)) { syswrite(STDOUT,$b); select(undef,undef,undef,$n/1300000); }'";
         write_executable(
@@ -432,7 +580,11 @@ for arg do
   if [ "$arg" = -G ]; then configuration=yes; fi
   previous=$arg; last=$arg
 done
-if [ -n "$configuration" ]; then printf 'controlpath %s\n' "$control"; exit 0; fi
+if [ -n "$configuration" ]; then
+  printf 'controlpath %s\n' "$control"
+  if [ -e "$K/quic" ]; then printf 'hostname 127.0.0.1\n'; fi
+  exit 0
+fi
 printf '%s %s\n' "$FAKE_SSH_CLIENT" "$(printf '%s' "$*" | tr '\n' ' ')" >> {argv}
 kind=other
 case "$last" in
@@ -441,6 +593,7 @@ case "$last" in
 esac
 if [ "$kind" = session ]; then
   printf '%s %s\n' "$FAKE_SSH_CLIENT" "$$" >> {legs}
+  if [ -e "$K/ssh-down" ]; then echo 'ssh: connect to host test-only port 22: Connection timed out' >&2; exit 255; fi
   if take fail255; then echo 'Permission denied (publickey).' >&2; exit 255; fi
   if take hostkey255; then echo 'Host key verification failed.' >&2; exit 255; fi
   if take hang; then exec sleep 600; fi
@@ -451,6 +604,9 @@ if [ "$kind" = session ]; then
   esac
   if take fake-end; then {marker}; cat "$K/fake-end.bytes"; exit 0; fi
 fi
+if [ "$kind" = session ] && [ -e "$K/quic-port" ]; then
+  exec perl {port_filter} "$(cat "$K/quic-port")" /bin/sh -c "$last"
+fi
 if [ "$kind" != other ] && [ -e "$K/link" ]; then
   read -r delay rate < "$K/link"
   printf '%s %s %s %s %s\n' "$FAKE_SSH_CLIENT" "$kind" "$$" "$delay" "$rate" >> {links}
@@ -459,6 +615,10 @@ if [ "$kind" != other ] && [ -e "$K/link" ]; then
 fi
 if [ "$kind" != other ] && [ -e "$K/throttle" ]; then
   {throttle} | /bin/sh -c "$last" | {throttle}
+  exit $?
+fi
+if [ "$kind" = plain ] && [ -e "$K/tap-plain" ]; then
+  /bin/sh -c "$last" | tee -a {tap}
   exit $?
 fi
 exec /bin/sh -c "$last"
@@ -476,6 +636,8 @@ exec /bin/sh -c "$last"
                 throttle = throttle,
                 delay_line = delay_line,
                 links = links,
+                port_filter = port_filter,
+                tap = sh_quote(&base.join("plain-tap")),
             ),
         );
         write_executable(
@@ -486,6 +648,12 @@ K={knobs}
 REAL={real}
 case "$*" in
   *status\ client*--json*)
+    if [ -e "$K/strip-caps" ]; then
+      script=
+      for cap in $(cat "$K/strip-caps"); do script="$script;s/$cap/x-herdr-test-removed/g"; done
+      "$REAL" "$@" | sed "${{script#;}}"
+      exit $?
+    fi
     if [ -e "$K/strip-capability" ]; then
       "$REAL" "$@" | sed 's/x-mosh-resume-bridge-v1/x-herdr-test-removed/g'
       exit $?
@@ -1054,6 +1222,13 @@ impl Client {
         read_jsonl(&self.dirs.trace.join("local.jsonl"))
     }
 
+    /// Prediction facade trace lines (`predict.jsonl`: `tap`, `paint`, `judge`), written when
+    /// the client runs with `HERDR_MOSH_TRACE` (every harness client does). Each line has the
+    /// wall-clock `ms` since the epoch.
+    pub fn predict_events(&self) -> Vec<Value> {
+        read_jsonl(&self.dirs.trace.join("predict.jsonl"))
+    }
+
     pub fn event_count(&self, event: &str) -> usize {
         self.events()
             .iter()
@@ -1141,5 +1316,327 @@ impl Remote {
     pub fn arm_fake_end(&self, reason: &str) {
         fs::write(self.base.join("knobs/fake-end.bytes"), encode_end(reason)).unwrap();
         self.set_knob(knob::FAKE_END, "");
+    }
+}
+
+fn pid_alive(pid: libc::pid_t) -> bool {
+    if cfg!(target_os = "linux") {
+        // A zombie still answers kill(pid, 0); its state letter says it is gone.
+        return fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim().chars().next())
+                .is_some_and(|state| state != 'Z' && state != 'X')
+        });
+    }
+    // SAFETY: signal 0 only checks that the pid exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+impl Remote {
+    /// Number of session-leg ssh processes of `client` (from `legs.log`) still alive: the
+    /// attacher the fake ssh `exec`s into, or the port filter wrapping it.
+    pub fn ssh_session_children_alive(&self, client: &str) -> usize {
+        self.leg_pids(client)
+            .into_iter()
+            .filter(|pid| pid_alive(*pid))
+            .count()
+    }
+
+    /// Run the remote attacher once with the QUIC flag through the fake ssh (stdin closed, so
+    /// it exits without opening a session connection) and return its bootstrap line
+    /// (`herdr-mosh-quic:1 ...`, without the newline). The line goes through the port filter
+    /// while the `quic-port` knob is set. Starts the keeper if none runs, and its acceptor.
+    pub fn quic_bootstrap_line(&self) -> String {
+        use std::process::{Command, Stdio};
+        let herdr = sh_quote(&self.base.join("bin/herdr"));
+        let mut child = Command::new(self.base.join("bin/ssh"))
+            .args(["-T", "test-only"])
+            .arg(format!(
+                "exec {herdr} remote-client-bridge --x-mosh-quic-v1 --x-mosh-session-v1"
+            ))
+            .env("FAKE_SSH_CLIENT", "prime")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the priming attacher");
+        let stdout = child.stdout.take().expect("attacher stdout");
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.starts_with("herdr-mosh-quic:1") {
+                    let _ = tx.send(line);
+                    return;
+                }
+            }
+        });
+        let line = rx.recv_timeout(Duration::from_secs(15));
+        let _ = child.kill();
+        let _ = child.wait();
+        line.expect("the priming attacher printed no bootstrap line")
+    }
+
+    /// Prime the keeper's acceptor and route QUIC through a [`UdpRelay`]: marks the remote as
+    /// QUIC-capable for `ssh -G` (`knob::QUIC`), reads the keeper's real bootstrap line, starts
+    /// a relay to that UDP port, and sets `knob::QUIC_PORT` to the relay's client-facing port,
+    /// so every session leg started from now on reports the relay as the keeper's address. A
+    /// keeper with no session exits after 30 s idle, so start the client right after.
+    pub fn start_quic_relay(&self, seed: u64) -> UdpRelay {
+        self.clear_knob(knob::QUIC_PORT);
+        self.set_knob(knob::QUIC, "");
+        let line = self.quic_bootstrap_line();
+        let port = bootstrap_line_port(&line)
+            .unwrap_or_else(|| panic!("the keeper offered no QUIC bootstrap: {line:?}"));
+        let relay = UdpRelay::start(std::net::SocketAddr::from(([127, 0, 0, 1], port)), seed);
+        self.set_knob(knob::QUIC_PORT, &relay.local_addr().port().to_string());
+        relay
+    }
+}
+
+// ---- UDP relay (link emulation for QUIC legs) ----
+
+/// Packet counters of a [`UdpRelay`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RelayStats {
+    pub forwarded_up: u64,   // client -> target
+    pub forwarded_down: u64, // target -> client
+    pub dropped_up: u64,
+    pub dropped_down: u64,
+}
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn chance(&mut self, p: f64) -> bool {
+        ((self.next_u64() >> 11) as f64 / (1u64 << 53) as f64) < p
+    }
+}
+
+struct RelayState {
+    delay: Duration,
+    loss_up: f64,
+    loss_down: f64,
+    rng_up: SplitMix64,
+    rng_down: SplitMix64,
+    peer: Option<std::net::SocketAddr>,
+}
+
+#[derive(Default)]
+struct RelayCounters {
+    forwarded_up: std::sync::atomic::AtomicU64,
+    forwarded_down: std::sync::atomic::AtomicU64,
+    dropped_up: std::sync::atomic::AtomicU64,
+    dropped_down: std::sync::atomic::AtomicU64,
+}
+
+type Queued = (Instant, Vec<u8>);
+
+const RELAY_POLL: Duration = Duration::from_millis(20);
+
+fn relay_socket() -> Arc<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind relay socket");
+    socket
+        .set_read_timeout(Some(RELAY_POLL))
+        .expect("relay read timeout");
+    Arc::new(socket)
+}
+
+/// Userspace UDP relay between a client-facing local port and `target`: one-way delay,
+/// seeded random loss per direction, and `rebind` of the upstream-facing socket.
+/// Owns: both relay sockets, the delay queues, the PRNG and the counters. Tests never open raw
+/// sockets for link faults themselves; a new network fault is a new knob here.
+pub struct UdpRelay {
+    client_side: Arc<std::net::UdpSocket>,
+    upstream: Arc<Mutex<Arc<std::net::UdpSocket>>>,
+    state: Arc<Mutex<RelayState>>,
+    counters: Arc<RelayCounters>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl UdpRelay {
+    /// Bind 127.0.0.1:0 on both sides and start forwarding to `target`. `seed` fixes the loss
+    /// sequence. Delay 0, loss 0.
+    pub fn start(target: std::net::SocketAddr, seed: u64) -> UdpRelay {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+
+        let client_side = relay_socket();
+        let upstream = Arc::new(Mutex::new(relay_socket()));
+        let state = Arc::new(Mutex::new(RelayState {
+            delay: Duration::ZERO,
+            loss_up: 0.0,
+            loss_down: 0.0,
+            rng_up: SplitMix64(seed),
+            rng_down: SplitMix64(seed ^ 0x9e37_79b9_7f4a_7c15),
+            peer: None,
+        }));
+        let counters = Arc::new(RelayCounters::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (up_tx, up_rx) = mpsc::channel::<Queued>();
+        let (down_tx, down_rx) = mpsc::channel::<Queued>();
+        let mut threads = Vec::new();
+
+        {
+            let (sock, state, counters, stop) = (
+                client_side.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((n, from)) = sock.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    let due = {
+                        let mut st = state.lock().expect("relay state");
+                        st.peer = Some(from);
+                        let p = st.loss_up;
+                        if st.rng_up.chance(p) {
+                            counters.dropped_up.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        Instant::now() + st.delay
+                    };
+                    let _ = up_tx.send((due, buf[..n].to_vec()));
+                }
+            }));
+        }
+        {
+            let (upstream, counters, stop) = (upstream.clone(), counters.clone(), stop.clone());
+            threads.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((due, bytes)) = up_rx.recv_timeout(RELAY_POLL) else {
+                        continue;
+                    };
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    }
+                    let sock = upstream.lock().expect("relay upstream").clone();
+                    let _ = sock.send_to(&bytes, target);
+                    counters.forwarded_up.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        {
+            let (upstream, state, counters, stop) = (
+                upstream.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                let mut buf = vec![0u8; 65536];
+                while !stop.load(Ordering::Relaxed) {
+                    let sock = upstream.lock().expect("relay upstream").clone();
+                    let Ok((n, _)) = sock.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    let due = {
+                        let mut st = state.lock().expect("relay state");
+                        let p = st.loss_down;
+                        if st.rng_down.chance(p) {
+                            counters.dropped_down.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        Instant::now() + st.delay
+                    };
+                    let _ = down_tx.send((due, buf[..n].to_vec()));
+                }
+            }));
+        }
+        {
+            let (sock, state, counters, stop) = (
+                client_side.clone(),
+                state.clone(),
+                counters.clone(),
+                stop.clone(),
+            );
+            threads.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((due, bytes)) = down_rx.recv_timeout(RELAY_POLL) else {
+                        continue;
+                    };
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    }
+                    let peer = state.lock().expect("relay state").peer;
+                    if let Some(peer) = peer {
+                        let _ = sock.send_to(&bytes, peer);
+                        counters.forwarded_down.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        UdpRelay {
+            client_side,
+            upstream,
+            state,
+            counters,
+            stop,
+            threads,
+        }
+    }
+
+    /// The address clients send to (the "server" address a dialer is pointed at).
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.client_side.local_addr().expect("relay local addr")
+    }
+
+    /// The relay's current upstream-facing address (what the target sees as the source).
+    pub fn upstream_addr(&self) -> std::net::SocketAddr {
+        self.upstream
+            .lock()
+            .expect("relay upstream")
+            .local_addr()
+            .expect("relay upstream addr")
+    }
+
+    /// One-way delay applied to each direction.
+    pub fn set_delay(&self, one_way: Duration) {
+        self.state.lock().expect("relay state").delay = one_way;
+    }
+
+    /// Loss probability in [0, 1] per direction (1.0 blocks UDP).
+    pub fn set_loss(&self, up: f64, down: f64) {
+        let mut st = self.state.lock().expect("relay state");
+        st.loss_up = up;
+        st.loss_down = down;
+    }
+
+    /// Replace the upstream-facing socket with a fresh one on a new local port.
+    pub fn rebind(&self) {
+        *self.upstream.lock().expect("relay upstream") = relay_socket();
+    }
+
+    pub fn stats(&self) -> RelayStats {
+        let c = &self.counters;
+        RelayStats {
+            forwarded_up: c.forwarded_up.load(Ordering::SeqCst),
+            forwarded_down: c.forwarded_down.load(Ordering::SeqCst),
+            dropped_up: c.dropped_up.load(Ordering::SeqCst),
+            dropped_down: c.dropped_down.load(Ordering::SeqCst),
+        }
+    }
+}
+
+impl Drop for UdpRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
