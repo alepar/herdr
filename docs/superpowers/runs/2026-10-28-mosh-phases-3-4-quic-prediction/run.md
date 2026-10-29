@@ -81,3 +81,5 @@ roastCodeReport-3: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-predict
 stepBackCode-round-3: local — single test-fallout finding (predict-erase-tests-must-prove-paint); quic-preauth-bounds still punch-listed
 roastCodeExit: capped
 capped-round-3: 0 Blocking open; [Should-fix] tests/mosh_predict.rs:783 (vacuous wrong-prediction-clear assertions in the ignored QUIC acceptance test, fallout of fix 7673aad4) goes to the punch list with the 5 earlier punch-listed items
+codeBuckets.sweep: nextest 4754 run · 4740 passed · 14 failed (all 14 also fail at run base 59f7d8fc: agent/api_ping/cli agent/cross_area/live_handoff — pre-existing, none introduced by this run) · 40 skipped · clippy -D warnings pass · fmt --check pass @ 57e13e29d62e61fa5965b365362cfc084c98ccd7
+sweepFix: none — no failure introduced by the branch
