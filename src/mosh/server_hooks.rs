@@ -2,10 +2,6 @@
 //! (`crate::client::mosh_outage::server_hooks`) because that is the only fork mount the server
 //! can name; every upstream call site is one statement tagged `// mosh-fork hook`.
 
-// The entry points are inert until the 3b resync dispatch and the Phase 4 echo hooks add their
-// call sites; remove this allow when the last one lands.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -325,12 +321,6 @@ fn send_acks(due: Vec<(ClientWriter, EchoAck)>) {
 pub(crate) fn echo_deadline(next_deadline: Option<Instant>) -> Option<Instant> {
     let now = Instant::now();
     with_tracker(|tracker| tracker.deadline(next_deadline, now))
-}
-
-/// A render carrying `surface_revision` was committed for the client. Inert: echo acks read the
-/// committed revision from the client's render state instead.
-pub(crate) fn on_render_sent(client_id: u64, surface_revision: u64) {
-    let _ = (client_id, surface_revision);
 }
 
 /// The client is gone (anchor: headless.rs `remove_client`, ~:946). Drops its echo entry.
