@@ -71,3 +71,8 @@ fixBeads-round-1: mosh-19g.8 (reorder cluster) mosh-19g.9 (predict timeout) mosh
 parked-r1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md · escalation · "ring's cc build dependency may break the aarch64-unknown-linux-musl cross builds in release.yml/preview.yml/build-artifacts-manual.yml (external-unverified); run build-artifacts-manual for that target before release"
 codeBuckets (invocation 7, inv-553d0b11-c4a0-4079-ae5e-e97f3d787d01, stopReason closure-unconfirmed): completed mosh-19g.8 .9 .10 .11 .12 .13; mosh-19g.7 closed by caller (landing cc2b77a rewritten, same tree)
 roastCodeReport-2: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-2.md
+stepBackCode-round-2: local — unrelated findings; targeted sweeps (predict-tentative-epoch-hiding, keeper-kick-spurious-notify); quic-preauth-bounds stays punch-listed
+scopeFilter-round-2: [Should-fix] src/mosh/remote/keeper.rs:913; src/mosh/remote/keeper.rs:915 in-scope — The new ring-backlog wait busy-spins on the keeper-wide mutex during the outage recovery the goal names.
+scopeFilter-round-2: [Should-fix] src/mosh/predict.rs:314 in-scope — on mode shows epochs right after an epoch break, painting text typed at no-echo prompts; a correctness deviation in goal-named prediction.
+scope-filter: 2 in-scope · 0 punch-listed
+fixBeads-round-2: mosh-19g.14 (prediction epoch hiding) mosh-19g.15 (keeper kick notify)
