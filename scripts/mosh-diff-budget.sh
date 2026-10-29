@@ -4,6 +4,8 @@
 #
 # Fork paths (excluded from the audit): src/mosh, tests/mosh_*, scripts/mosh-*,
 # HERDR_MOSH_VISION.md, docs/superpowers. Everything else is "upstream".
+# Cargo.toml and Cargo.lock are also excluded: the QUIC dependencies (quinn,
+# rustls, rcgen) were allowed as dependency changes, and they are not hook lines.
 #
 # The diff is taken from the merge base with origin/master to the working tree,
 # so uncommitted edits are audited too.
@@ -35,6 +37,8 @@ fork_excludes=(
   ':(exclude,glob)scripts/mosh-*'
   ':(exclude)HERDR_MOSH_VISION.md'
   ':(exclude)docs/superpowers'
+  ':(exclude)Cargo.toml'
+  ':(exclude)Cargo.lock'
 )
 
 git diff "$base" --stat -- . "${fork_excludes[@]}"
