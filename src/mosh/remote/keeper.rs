@@ -486,14 +486,32 @@ fn accept_leg(shared: &Arc<Shared>, mut stream: UnixStream) -> io::Result<Option
     }
 }
 
-/// Counts the connection as pending and runs its admission on a std thread. Called on the
+/// Most connections awaiting their HELLO verdict at once (Unix and QUIC together) before a new
+/// QUIC connection is turned away. Each holds an OS thread for up to `PRE_WELCOME_BOUND`; a
+/// real client needs one, so the cap only bites on a flood from unauthenticated peers.
+const MAX_PENDING_QUIC: usize = 32;
+
+/// Take one `pending` slot unless `cap` are taken. Compare-and-swap, so racing connections
+/// cannot overshoot.
+fn take_pending_slot(pending: &AtomicUsize, cap: usize) -> bool {
+    pending
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < cap).then_some(n + 1))
+        .is_ok()
+}
+
+/// Takes a pending slot against `MAX_PENDING_QUIC` (a connection over the cap is closed at
+/// once and spawns nothing), then runs its admission on a std thread. Called on the
 /// acceptor's runtime, so it only spawns. Holds the keeper weakly: the acceptor lives in
 /// `Shared`.
 fn quic_conn_handler(shared: &Arc<Shared>) -> OnConn {
     let weak = Arc::downgrade(shared);
     Arc::new(move |conn: QuicConn| {
         let Some(shared) = weak.upgrade() else { return };
-        shared.pending.fetch_add(1, Ordering::SeqCst);
+        if !take_pending_slot(&shared.pending, MAX_PENDING_QUIC) {
+            shared.trace_keeper("quic_busy", json!({"cap": MAX_PENDING_QUIC}));
+            conn.conn.close(0u32.into(), b"busy");
+            return;
+        }
         thread::spawn(move || {
             let admitted = accept_quic_leg(&shared, conn);
             shared.pending.fetch_sub(1, Ordering::SeqCst);
@@ -504,18 +522,33 @@ fn quic_conn_handler(shared: &Arc<Shared>) -> OnConn {
     })
 }
 
-/// The QUIC producer: reads HELLO under `PRE_WELCOME_BOUND`, gates it on the admission token,
-/// then hands the leg to the shared `admit`, which never sees the token.
+/// How long a refused QUIC peer gets to read its END before the connection closes.
+const END_LINGER: Duration = Duration::from_secs(2);
+
+/// The QUIC producer. Any failure before a verdict closes the connection at once.
 fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Admitted>> {
+    let conn = quic.conn.clone();
+    let admitted = admit_quic(shared, quic);
+    if admitted.is_err() {
+        conn.close(0u32.into(), b"pre-welcome");
+    }
+    admitted
+}
+
+/// Reads HELLO within the connection's pre-WELCOME deadline, gates it on the admission token,
+/// then hands the leg to the shared `admit`, which never sees the token.
+fn admit_quic(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Admitted>> {
     let QuicConn {
         handle,
         tokens,
         conn,
         send,
         recv,
+        deadline,
     } = quic;
     let mut reader = BlockingRecv::new(handle.clone(), recv);
-    reader.set_read_timeout(Some(PRE_WELCOME_BOUND));
+    // One absolute bound for the whole HELLO: a peer trickling bytes cannot extend it.
+    reader.set_read_deadline(Some(deadline));
     let mut writer = BlockingSend::new(handle.clone(), send);
     let mut first = [0u8; 1];
     reader.read_exact(&mut first)?;
@@ -538,14 +571,16 @@ fn accept_quic_leg(shared: &Arc<Shared>, quic: QuicConn) -> io::Result<Option<Ad
         let _ = writer.write_all(&end_bytes(end_reason::QUIC_TOKEN));
         let _ = writer.finish();
         // Closing at once would discard the END; give the peer a moment to read it and close.
-        // `timeout` must be built inside the runtime: outside it, it panics for want of a reactor.
+        // The linger also spends the pre-WELCOME deadline.
+        let linger = tokio::time::Instant::from_std(deadline.min(Instant::now() + END_LINGER));
+        // `timeout_at` must be built inside the runtime: outside it, it panics for want of a reactor.
         handle.block_on(async {
-            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+            let _ = tokio::time::timeout_at(linger, conn.closed()).await;
         });
         conn.close(0u32.into(), b"quic-token");
         return Ok(None);
     }
-    reader.set_read_timeout(None);
+    reader.set_read_deadline(None);
     let trace: Option<LaneTrace> = shared.trace_dir.is_some().then(|| {
         let shared = Arc::clone(shared);
         Arc::new(move |event: &str, fields: Value| shared.trace_keeper(event, fields)) as LaneTrace
@@ -2187,13 +2222,9 @@ mod tests {
         assert_ne!(first.token, second.token);
     }
 
-    /// A pinned QUIC client dialled at the keeper's endpoint, HELLO sent with `quic_token`.
-    /// Returns the first message the keeper answers with (the connection stays up until the
-    /// returned guard drops; the connection is declared before its runtime so it drops first).
-    fn quic_hello(
-        reply: &QuicBootstrap,
-        quic_token: String,
-    ) -> (SessionMsg, (quinn::Connection, Arc<QuicRuntime>)) {
+    /// A pinned, handshaken QUIC connection to the keeper; it sends nothing. The connection is
+    /// declared before its runtime so it drops first.
+    fn quic_dial(reply: &QuicBootstrap) -> (quinn::Connection, Arc<QuicRuntime>) {
         let rt = QuicRuntime::new("test-quic-client").unwrap();
         let endpoint = quic::client_endpoint(&rt, false).unwrap();
         let config = quic::client_config(reply.fingerprint, Duration::from_secs(30)).unwrap();
@@ -2208,6 +2239,17 @@ mod tests {
             })
             .unwrap()
             .unwrap();
+        (conn, rt)
+    }
+
+    /// A pinned QUIC client dialled at the keeper's endpoint, HELLO sent with `quic_token`.
+    /// Returns the first message the keeper answers with (the connection stays up until the
+    /// returned guard drops; the connection is declared before its runtime so it drops first).
+    fn quic_hello(
+        reply: &QuicBootstrap,
+        quic_token: String,
+    ) -> (SessionMsg, (quinn::Connection, Arc<QuicRuntime>)) {
+        let (conn, rt) = quic_dial(reply);
         let (send, recv) = rt.block_on(conn.open_bi()).unwrap().unwrap();
         let mut writer = BlockingSend::new(rt.handle(), send);
         let mut reader = BlockingRecv::new(rt.handle(), recv);
@@ -2258,6 +2300,150 @@ mod tests {
             .unwrap();
         assert!(closed_early.is_err(), "keeper closed the connection without lingering");
         assert_eq!(h.server().connections(), 0);
+    }
+
+    /// The bound the pre-WELCOME tests run with: short, so each test takes about a second.
+    const TEST_BOUND: Duration = Duration::from_millis(1000);
+    /// Scheduling slack on top of a bound under a loaded test run.
+    const SLACK: Duration = Duration::from_millis(1500);
+
+    /// A keeper table whose QUIC acceptor runs with `bound`, started the way a bootstrap query
+    /// starts it. Admission never reaches `admit` in these tests, so no server socket is needed.
+    fn quic_keeper(bound: Duration) -> (Arc<Shared>, QuicBootstrap) {
+        let shared = shared_with_quic(PathBuf::new(), QuicAcceptor::with_pre_welcome_bound(bound));
+        let reply = shared
+            .quic
+            .query(quic_conn_handler(&shared), Instant::now())
+            .expect("acceptor starts");
+        (shared, reply)
+    }
+
+    /// Opens the first stream and writes `bytes` on it (a stream is invisible to the keeper
+    /// until it carries a byte). Keep the returned halves alive for the test.
+    fn quic_send(
+        conn: &quinn::Connection,
+        rt: &Arc<QuicRuntime>,
+        bytes: &[u8],
+    ) -> (BlockingSend, quinn::RecvStream) {
+        let (send, recv) = rt.block_on(conn.open_bi()).unwrap().unwrap();
+        let mut writer = BlockingSend::new(rt.handle(), send);
+        writer.write_all(bytes).unwrap();
+        (writer, recv)
+    }
+
+    /// Whether the keeper closed `conn` within `limit`.
+    fn closed_within(conn: &quinn::Connection, rt: &QuicRuntime, limit: Duration) -> bool {
+        rt.block_on(async { tokio::time::timeout(limit, conn.closed()).await })
+            .unwrap()
+            .is_ok()
+    }
+
+    fn pending_drains(shared: &Shared) -> bool {
+        wait_until(Duration::from_secs(2), || {
+            shared.pending.load(Ordering::SeqCst) == 0
+        })
+    }
+
+    #[test]
+    fn quic_connection_that_never_opens_a_stream_closes_at_the_bound() {
+        let (shared, reply) = quic_keeper(TEST_BOUND);
+        let (conn, rt) = quic_dial(&reply);
+        assert!(
+            closed_within(&conn, &rt, TEST_BOUND + SLACK),
+            "no-stream connection outlived the bound"
+        );
+        // It never reached admission.
+        assert_eq!(shared.pending.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn quic_silent_peer_closes_at_the_bound() {
+        let (shared, reply) = quic_keeper(TEST_BOUND);
+        let (conn, rt) = quic_dial(&reply);
+        // The type byte makes the stream visible; then nothing.
+        let _stream = quic_send(&conn, &rt, &[session::HELLO_TYPE]);
+        assert!(
+            closed_within(&conn, &rt, TEST_BOUND + SLACK),
+            "silent peer outlived the bound"
+        );
+        assert!(pending_drains(&shared));
+    }
+
+    #[test]
+    fn quic_non_hello_first_byte_closes_at_once() {
+        // A long bound, so "at once" is distinguishable from "at the bound".
+        let (shared, reply) = quic_keeper(Duration::from_secs(10));
+        let (conn, rt) = quic_dial(&reply);
+        let _stream = quic_send(&conn, &rt, &[0x07, 1, 2, 3, 4, 5, 6]);
+        assert!(closed_within(&conn, &rt, Duration::from_secs(2)));
+        assert!(pending_drains(&shared));
+    }
+
+    #[test]
+    fn quic_oversized_hello_length_closes_at_once() {
+        let (shared, reply) = quic_keeper(Duration::from_secs(10));
+        let (conn, rt) = quic_dial(&reply);
+        let len = u32::try_from(MAX_CONTROL_PAYLOAD + 1).unwrap().to_le_bytes();
+        let mut bytes = vec![session::HELLO_TYPE];
+        bytes.extend_from_slice(&len);
+        let _stream = quic_send(&conn, &rt, &bytes);
+        assert!(closed_within(&conn, &rt, Duration::from_secs(2)));
+        assert!(pending_drains(&shared));
+    }
+
+    #[test]
+    fn quic_trickled_hello_cannot_extend_the_bound() {
+        let (shared, reply) = quic_keeper(TEST_BOUND);
+        let (conn, rt) = quic_dial(&reply);
+        let mut endpoint = SessionEndpoint::new(Role::Local, Token::generate().unwrap(), 1024);
+        endpoint.set_quic_token(Some(reply.token.to_string()));
+        let hello = endpoint.hello(Instant::now(), 60_000, None);
+        // One byte every 200 ms: each read finishes well inside the bound, the whole HELLO
+        // takes several bounds. A per-read timeout never fires; the absolute deadline must.
+        assert!(hello.len() * 200 > 4 * TEST_BOUND.as_millis() as usize);
+        let started = Instant::now();
+        let (mut writer, _recv) = quic_send(&conn, &rt, &hello[..1]);
+        let trickle = thread::spawn(move || {
+            for byte in &hello[1..] {
+                thread::sleep(Duration::from_millis(200));
+                if writer.write_all(std::slice::from_ref(byte)).is_err() {
+                    return;
+                }
+            }
+        });
+        assert!(
+            closed_within(&conn, &rt, TEST_BOUND + SLACK),
+            "trickled HELLO extended the bound"
+        );
+        assert!(started.elapsed() < TEST_BOUND + SLACK);
+        assert!(pending_drains(&shared));
+        trickle.join().unwrap();
+    }
+
+    #[test]
+    fn quic_connection_over_the_pending_cap_closes_at_once() {
+        let (shared, reply) = quic_keeper(Duration::from_secs(10));
+        shared.pending.store(MAX_PENDING_QUIC, Ordering::SeqCst);
+        let (conn, rt) = quic_dial(&reply);
+        let _stream = quic_send(&conn, &rt, &[session::HELLO_TYPE]);
+        assert!(
+            closed_within(&conn, &rt, Duration::from_secs(2)),
+            "over-cap connection was admitted"
+        );
+        // No slot was taken, so no admission thread will give one back.
+        assert_eq!(shared.pending.load(Ordering::SeqCst), MAX_PENDING_QUIC);
+        shared.pending.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn pending_slot_respects_the_cap() {
+        let pending = AtomicUsize::new(0);
+        assert!(take_pending_slot(&pending, 2));
+        assert!(take_pending_slot(&pending, 2));
+        assert!(!take_pending_slot(&pending, 2));
+        assert_eq!(pending.load(Ordering::SeqCst), 2);
+        pending.fetch_sub(1, Ordering::SeqCst);
+        assert!(take_pending_slot(&pending, 2));
     }
 
     fn hello_for(endpoint: &mut SessionEndpoint) -> Hello {
@@ -2332,6 +2518,10 @@ mod tests {
     }
 
     fn shared_at(server_socket: PathBuf) -> Arc<Shared> {
+        shared_with_quic(server_socket, QuicAcceptor::default())
+    }
+
+    fn shared_with_quic(server_socket: PathBuf, quic: QuicAcceptor) -> Arc<Shared> {
         Arc::new(Shared {
             table: Mutex::new(Table {
                 sessions: HashMap::new(),
@@ -2344,7 +2534,7 @@ mod tests {
             pending: AtomicUsize::new(0),
             #[cfg(test)]
             backlog_waits: AtomicUsize::new(0),
-            quic: QuicAcceptor::default(),
+            quic,
         })
     }
 

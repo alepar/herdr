@@ -21,7 +21,7 @@ use std::future::Future;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::protocol::MAX_GRAPHICS_FRAME_SIZE;
 use tokio::runtime::{Builder, Handle, Runtime};
 
@@ -99,6 +99,8 @@ pub(super) struct BlockingRecv {
     handle: Handle,
     recv: quinn::RecvStream,
     timeout: Option<Duration>,
+    /// An absolute bound across reads: each read waits only for the time left on it.
+    deadline: Option<Instant>,
 }
 
 impl BlockingRecv {
@@ -107,11 +109,18 @@ impl BlockingRecv {
             handle,
             recv,
             timeout: None,
+            deadline: None,
         }
     }
 
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
+    }
+
+    /// Bound every later read by one fixed instant. Unlike a read timeout, it does not restart
+    /// per read, so a peer trickling bytes cannot extend it.
+    pub fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+        self.deadline = deadline;
     }
 }
 
@@ -120,13 +129,23 @@ impl Read for BlockingRecv {
         if buf.is_empty() {
             return Ok(0);
         }
-        let timeout = self.timeout;
+        let timed_out = || io::Error::new(io::ErrorKind::TimedOut, "QUIC read timed out");
+        let limit = match self.deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(timed_out());
+                }
+                Some(self.timeout.map_or(left, |timeout| timeout.min(left)))
+            }
+            None => self.timeout,
+        };
         let recv = &mut self.recv;
         let outcome = block_on_handle(&self.handle, async move {
-            match timeout {
+            match limit {
                 Some(limit) => tokio::time::timeout(limit, recv.read(buf))
                     .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "QUIC read timed out"))?,
+                    .map_err(|_| timed_out())?,
                 None => recv.read(buf).await,
             }
             .map_err(io::Error::from)
@@ -837,6 +856,67 @@ mod tests {
         assert_eq!(&byte, b"x");
         let err = recv.read(&mut byte).expect_err("no data pending");
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn read_deadline_is_absolute_across_reads() {
+        let rt = QuicRuntime::new("quic-test").expect("runtime");
+        let identity = ServerIdentity::generate().expect("identity");
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = socket.local_addr().expect("addr");
+        let server = server_endpoint(
+            &rt,
+            server_config(&identity, KEEPER_IDLE_TIMEOUT).expect("server config"),
+            socket,
+        )
+        .expect("server endpoint");
+        let endpoint = client_endpoint(&rt, false).expect("client endpoint");
+        let config = client_config(identity.fingerprint, Duration::from_secs(10)).expect("config");
+        let (client_conn, server_conn) = rt
+            .block_on(async {
+                let connecting = endpoint
+                    .connect_with(config, addr, SERVER_NAME)
+                    .expect("connect");
+                let accept = async {
+                    let incoming = server.accept().await.expect("incoming");
+                    incoming.await
+                };
+                tokio::join!(connecting, accept)
+            })
+            .expect("block_on");
+        let client_conn = client_conn.expect("client handshake");
+        let server_conn = server_conn.expect("server handshake");
+        let (send, _recv) = rt
+            .block_on(client_conn.open_bi())
+            .expect("rt")
+            .expect("open");
+        let mut send = BlockingSend::new(rt.handle(), send);
+        send.write_all(b"x").expect("write");
+        let (_s, recv) = rt
+            .block_on(server_conn.accept_bi())
+            .expect("rt")
+            .expect("accept");
+        let mut recv = BlockingRecv::new(rt.handle(), recv);
+        let deadline = Instant::now() + Duration::from_millis(600);
+        recv.set_read_deadline(Some(deadline));
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                if send.write_all(b"y").is_err() {
+                    return;
+                }
+            }
+        });
+        let mut byte = [0u8; 1];
+        let err = loop {
+            if let Err(err) = recv.read(&mut byte) {
+                break err;
+            }
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        // Each byte arrived well inside 600 ms; only an absolute deadline stops the loop here.
+        assert!(Instant::now() < deadline + Duration::from_millis(400));
+        trickle.join().expect("trickle thread");
     }
 
     #[test]

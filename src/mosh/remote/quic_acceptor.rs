@@ -3,6 +3,8 @@
 //! Owns: `QuicTokens` (mint, 60 s unbound expiry, binding to a session), the dual-stack UDP
 //! bind, the acceptor runtime and the accept task that hands each connection's first bidi
 //! stream to the keeper as a `QuicConn`.
+//! Every pre-WELCOME wait of a connection (handshake, first stream, HELLO, refusal linger)
+//! spends one deadline fixed when the endpoint accepts it.
 //! Hides: quinn and rustls. Must not: read HELLO, admit legs or touch the session table;
 //! the keeper's admission thread does that with `QuicTokens::check` as its only gate.
 //! Lifecycle: started by the first bootstrap query and kept until the keeper exits; a failed
@@ -95,6 +97,9 @@ pub(super) struct QuicConn {
     pub conn: quinn::Connection,
     pub send: quinn::SendStream,
     pub recv: quinn::RecvStream,
+    /// Fixed when the endpoint accepted the connection: the handshake, the first stream, the
+    /// HELLO and a refusal's linger all spend this one budget.
+    pub deadline: Instant,
 }
 
 /// The keeper leg for an admitted QUIC connection: it carries the render-lane queue (with its
@@ -133,19 +138,37 @@ struct Running {
     tokens: Arc<Mutex<QuicTokens>>,
 }
 
-#[derive(Default)]
 pub(super) struct QuicAcceptor {
     state: Mutex<Option<Arc<Running>>>,
+    /// How long an unauthenticated connection may take to reach its HELLO verdict.
+    pre_welcome_bound: Duration,
+}
+
+impl Default for QuicAcceptor {
+    fn default() -> QuicAcceptor {
+        QuicAcceptor {
+            state: Mutex::new(None),
+            pre_welcome_bound: PRE_WELCOME_BOUND,
+        }
+    }
 }
 
 impl QuicAcceptor {
+    #[cfg(test)]
+    pub fn with_pre_welcome_bound(pre_welcome_bound: Duration) -> QuicAcceptor {
+        QuicAcceptor {
+            pre_welcome_bound,
+            ..QuicAcceptor::default()
+        }
+    }
+
     /// The bootstrap reply for one query: starts the endpoint on first use and mints a fresh
     /// token. `None` when the endpoint cannot start (logged, not cached).
     pub fn query(&self, on_conn: OnConn, now: Instant) -> Option<QuicBootstrap> {
         let running = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.is_none() {
-                match start(on_conn) {
+                match start(on_conn, self.pre_welcome_bound) {
                     Ok(running) => *state = Some(Arc::new(running)),
                     Err(err) => {
                         tracing::warn!(%err, "keeper QUIC acceptor failed to start");
@@ -170,7 +193,7 @@ impl QuicAcceptor {
     }
 }
 
-fn start(on_conn: OnConn) -> io::Result<Running> {
+fn start(on_conn: OnConn, bound: Duration) -> io::Result<Running> {
     let socket = bind_dual_stack().or_else(|_| UdpSocket::bind("0.0.0.0:0"))?;
     socket.set_nonblocking(true)?;
     let port = socket.local_addr()?.port();
@@ -185,14 +208,20 @@ fn start(on_conn: OnConn) -> io::Result<Running> {
         let handle = handle.clone();
         async move {
             while let Some(incoming) = endpoint.accept().await {
+                // The pre-WELCOME clock starts here and never restarts: a peer that stalls its
+                // handshake, its first stream or its HELLO spends the same budget.
+                let deadline = Instant::now() + bound;
                 // One task per connection: a peer stalling its handshake blocks nobody else.
                 let handle = handle.clone();
                 let tokens = Arc::clone(&accept_tokens);
                 let on_conn = Arc::clone(&on_conn);
                 tokio::spawn(async move {
-                    let Ok(conn) = incoming.await else { return };
-                    let opened = tokio::time::timeout(PRE_WELCOME_BOUND, conn.accept_bi()).await;
-                    let Ok(Ok((send, recv))) = opened else {
+                    let at = tokio::time::Instant::from_std(deadline);
+                    let Ok(Ok(conn)) = tokio::time::timeout_at(at, incoming).await else {
+                        return;
+                    };
+                    let Ok(Ok((send, recv))) = tokio::time::timeout_at(at, conn.accept_bi()).await
+                    else {
                         conn.close(0u32.into(), b"no stream");
                         return;
                     };
@@ -202,6 +231,7 @@ fn start(on_conn: OnConn) -> io::Result<Running> {
                         conn,
                         send,
                         recv,
+                        deadline,
                     });
                 });
             }
