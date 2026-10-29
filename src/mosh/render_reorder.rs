@@ -64,7 +64,8 @@ pub(super) struct RenderReorder {
     held: BTreeMap<u64, Held>,
     /// Seqs whose self-contained header was seen and which are not yet delivered.
     sc_headers: BTreeSet<u64>,
-    /// Seqs whose stream header (any class) was seen and which are not yet delivered.
+    /// Seqs whose stream header (any class) was seen, not yet delivered, and whose body is
+    /// still expected (a discarded or reset body removes it).
     headers: BTreeSet<u64>,
     in_gap: bool,
     /// The current gap's resync is sent, or deliberately skipped.
@@ -112,11 +113,14 @@ impl RenderReorder {
             }
             RenderArrival::Complete { seq, class, bytes } => {
                 if seq >= self.next {
-                    self.headers.insert(seq);
-                    if class == FrameClass::SelfContained {
-                        self.sc_headers.insert(seq);
-                    }
-                    if !(self.in_gap && class == FrameClass::Chained) {
+                    if self.in_gap && class == FrameClass::Chained {
+                        // Never delivered: forget the header so the seq counts as missing.
+                        self.headers.remove(&seq);
+                    } else {
+                        self.headers.insert(seq);
+                        if class == FrameClass::SelfContained {
+                            self.sc_headers.insert(seq);
+                        }
                         self.held.entry(seq).or_insert(Held {
                             class,
                             bytes,
@@ -126,14 +130,19 @@ impl RenderReorder {
                 }
             }
             RenderArrival::Reset { seq } => {
-                if seq >= self.next && !self.in_gap && !self.held.contains_key(&seq) {
-                    let superseded = self.sc_headers.range(seq + 1..).next().is_some();
-                    if superseded {
-                        // The request is skipped on purpose: the SC frame is the resync.
-                        self.requested = true;
-                        self.declare_gap(GapCause::Supersede, &mut out);
-                    } else {
-                        self.declare_gap(GapCause::Reset, &mut out);
+                if seq >= self.next && !self.held.contains_key(&seq) {
+                    // Its body never comes: the seq is missing again.
+                    self.headers.remove(&seq);
+                    self.sc_headers.remove(&seq);
+                    if !self.in_gap {
+                        let superseded = self.sc_headers.range(seq + 1..).next().is_some();
+                        if superseded {
+                            // The request is skipped on purpose: the SC frame is the resync.
+                            self.requested = true;
+                            self.declare_gap(GapCause::Supersede, &mut out);
+                        } else {
+                            self.declare_gap(GapCause::Reset, &mut out);
+                        }
                     }
                 }
             }
@@ -172,7 +181,14 @@ impl RenderReorder {
     fn declare_gap(&mut self, cause: GapCause, out: &mut ReorderOutput) {
         self.in_gap = true;
         out.gap = Some(cause);
-        self.held.retain(|_, h| h.class != FrameClass::Chained);
+        let headers = &mut self.headers;
+        self.held.retain(|seq, h| {
+            let keep = h.class != FrameClass::Chained;
+            if !keep {
+                headers.remove(seq);
+            }
+            keep
+        });
     }
 
     fn deliver(&mut self, seq: u64, out: &mut ReorderOutput) {
@@ -250,6 +266,64 @@ mod tests {
         assert_eq!(out.deliver, vec![vec![0]]);
         assert!(!out.request_resync);
         r
+    }
+
+    #[test]
+    fn chained_completed_in_gap_above_the_closing_sc_goes_overdue() {
+        // Finding render_reorder.rs:113: a new leg starts in a gap; chained 6 completes and is
+        // discarded before SC 5 closes the gap. Seq 6 must count as missing, not streaming.
+        let t0 = Instant::now();
+        let mut r = RenderReorder::new();
+        r.on_arrival(header(5, SelfContained), t0, None);
+        r.on_arrival(header(6, Chained), t0, None);
+        let o = r.on_arrival(complete(6, Chained), t0, None);
+        assert_eq!(o, ReorderOutput::default());
+        let o = r.on_arrival(complete(5, SelfContained), t0, None);
+        assert_eq!(o.deliver, vec![vec![5]]);
+        let o = r.on_arrival(complete(7, Chained), t0, None);
+        assert!(o.deliver.is_empty());
+        assert_eq!(r.next_deadline(None), Some(t0 + ms(750)));
+        let o = r.poll(t0 + ms(750), None);
+        assert_eq!(o.gap, Some(GapCause::Overdue));
+        assert!(o.request_resync, "the lane must not stall without a resync");
+    }
+
+    #[test]
+    fn chained_dropped_by_a_supersede_gap_above_the_sc_goes_overdue() {
+        // Finding render_reorder.rs:175: held chained 3 is dropped by the supersede gap that
+        // reset 1 declares; SC 2 closes it. Seq 3 must count as missing.
+        let t0 = Instant::now();
+        let mut r = live(t0);
+        r.on_arrival(header(1, Chained), t0, None);
+        r.on_arrival(header(2, SelfContained), t0, None);
+        let o = r.on_arrival(complete(3, Chained), t0, None);
+        assert!(o.deliver.is_empty());
+        let o = r.on_arrival(RenderArrival::Reset { seq: 1 }, t0, None);
+        assert_eq!(o.gap, Some(GapCause::Supersede));
+        let o = r.on_arrival(complete(2, SelfContained), t0, None);
+        assert_eq!(o.deliver, vec![vec![2]]);
+        let o = r.on_arrival(complete(4, Chained), t0, None);
+        assert!(o.deliver.is_empty());
+        let o = r.poll(t0 + ms(750), None);
+        assert_eq!(o.gap, Some(GapCause::Overdue));
+        assert!(o.request_resync, "the lane must not stall without a resync");
+    }
+
+    #[test]
+    fn reset_in_gap_above_the_closing_sc_goes_overdue() {
+        // Audit site: a stream reset while the reorder is in a gap never delivers its body.
+        let t0 = Instant::now();
+        let mut r = live(t0);
+        r.on_arrival(RenderArrival::Reset { seq: 1 }, t0, None);
+        r.on_arrival(header(3, Chained), t0, None);
+        let o = r.on_arrival(RenderArrival::Reset { seq: 3 }, t0, None);
+        assert!(o.gap.is_none() && !o.request_resync);
+        let o = r.on_arrival(complete(2, SelfContained), t0, None);
+        assert_eq!(o.deliver, vec![vec![2]]);
+        r.on_arrival(complete(4, Chained), t0, None);
+        let o = r.poll(t0 + ms(750), None);
+        assert_eq!(o.gap, Some(GapCause::Overdue));
+        assert!(o.request_resync);
     }
 
     #[test]
