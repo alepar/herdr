@@ -382,3 +382,54 @@ cost: a smaller doubling threshold (frames go twice from 2 % loss), a smaller `L
 Known and left: the herdr server's own socket buffer (about 100 to 170 KB, one to three
 frames) sits in front of the keeper and is stale by the time ^C arrives; the keeper cannot shrink
 the server end of that socket, so it is a fixed part of the marker latency.
+
+### 2026-10-28: Phase 1 resume regressions under the render split (mosh-19g.2.21)
+
+Two `tests/mosh_resume.rs` tests failed on the branch and passed at the run base `59f7d8fc`:
+`a_dense_flood_through_an_outage_stays_in_the_server_socket_and_ctrl_c_answers_after_resume`
+(failed: "no server backlog plateau while down") and
+`slow_live_leg_carries_16_mib_of_pastes_without_ending_the_session` (hung over 300 s). A first-parent
+bisect names merge `87f46203` (task 2.9) as the first bad commit. 2.9 did not break the keeper code:
+it made the bridge set `render_split` for every remote that advertises `x-mosh-supersede-v1`, so the
+keeper's split paths from 2.3 and 2.8, dormant in every end-to-end test until then, ran under every
+ssh-leg Phase 1 test. Discriminator: with `supersede_advertised` forced to `false` both tests pass
+again (8 s and 22 s), so both faults are in split-only keeper code. They have different causes.
+
+**Dense flood.** `ChainGate::route` drops every render frame while no leg is up, so the frames never
+enter the ring, `source_room()` (reset window minus ring occupancy) stays positive, and
+`server_reader` keeps reading and dropping for the whole outage. Phase 1's rule, that an outage
+backlog stays in the server socket after the reset window, was not kept for dropped frames. The test
+saw no Recv-Q plateau on the keeper's server stream; the keeper trace showed one `route` line per read
+with `ring: 0` and every frame in `dropped`.
+
+**16 MiB paste.** The 3b `server_writer` wrote whole client frames only and acked
+`offset - held_back`. A bracketed paste is one client frame, far larger than the bridge's 256 KiB
+initial window. The bridge could not send the rest of the frame without acks and the keeper would not
+ack until the frame was whole. Debug lines in `server_writer` showed `held` growing 65536, 131072,
+196608, 262144 against `offset` 65992 .. 262600 and `frames=0`, then nothing: a deadlock at the
+window. The bridge stopped reading the client, the herdr client's write timed out ("endpoint write
+timed out") and it exited, which is why the harness saw the session end after about 8 s with no data
+at the server.
+
+**Change (src/mosh/remote/keeper.rs only).**
+- `server_writer` on a render-split session now writes client bytes as they arrive and acks
+  `offset` as before the split. It still runs the client `FrameSplitter` to know where frames
+  begin and end. A `ToServer::Resync` that arrives mid-frame is held and written at the first
+  boundary that follows, inside the chunk that completes the frame, ahead of the next frame's bytes.
+  Invariant kept: the resync lands only between whole client frames at the server. Decision
+  changed: 3b's "writes whole client frames only, acks `offset - held_back`" (this spec, keeper
+  section) is replaced by "forward immediately, defer only the resync". Holding back acked-but-unwritten
+  bytes was also unsafe on a leg drop (the bridge would not replay them).
+- `Session.outage_dropped` counts render bytes the gate dropped since the leg went down;
+  `server_reader` limits its read to `source_room() - outage_dropped` while the session has no leg.
+  The reset window therefore bounds an outage's reads whether the frames went to the ring or the
+  floor. `detach_leg` resets the count; a new leg lifts the limit. Not changed: the gate's rule
+  (no leg means dropped, and the gate closes).
+
+**Tests.** New keeper unit tests (red before, green after):
+`a_client_frame_larger_than_the_window_is_forwarded_and_acked` and
+`render_split_outage_leaves_the_flood_in_the_server_socket`. The existing
+`injected_resync_lands_between_client_frames_unsplit` asserted the old hold-back behaviour (a partial
+frame not reaching the server, not acked); it is renamed `injected_resync_waits_for_the_client_frame_boundary`
+and asserts the new one (partial bytes written and acked, resync after the frame, before the next).
+Results are in the task report. No upstream line was added: the diff touches `src/mosh` only.
