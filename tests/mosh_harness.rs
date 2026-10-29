@@ -1222,6 +1222,13 @@ impl Client {
         read_jsonl(&self.dirs.trace.join("local.jsonl"))
     }
 
+    /// Prediction facade trace lines (`predict.jsonl`: `tap`, `paint`, `judge`), written when
+    /// the client runs with `HERDR_MOSH_TRACE` (every harness client does). Each line has the
+    /// wall-clock `ms` since the epoch.
+    pub fn predict_events(&self) -> Vec<Value> {
+        read_jsonl(&self.dirs.trace.join("predict.jsonl"))
+    }
+
     pub fn event_count(&self, event: &str) -> usize {
         self.events()
             .iter()
