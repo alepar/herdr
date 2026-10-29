@@ -17,7 +17,7 @@ approvals:
 - coverage-round-1 · canonical R-list: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/coverage-round-1-requirements.md (R1–R13; R14, R15 appended from r-new) · requirements: 13 · mapped: 13 · unmapped: 0 · NEEDS-SPEC re-runs: both reviewers (one each); reviewer 2's re-run asked again for mosh-19g.2, not honored · auto applied C1–C6, C8–C19 (coverage-ledger.md); auto rejected C7
 - coverage-round-2 · requirements: 16 · mapped: 14 · unmapped: 2 (R15, R16) — both applied this round · divergence: findings 19 → 15 · novel 10/15 (67%) · widening: no · auto applied C20–C23, C25, C27–C33; auto rejected C24, C26, C34 · integration sweep: mosh-19g.7 (deps on all 24 leaves) · coverage loop ended (cap 2)
 roastDesignRound: 2
-findingsLedgerDesign: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger-design.md
+findingsLedgerDesign: /var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phases-3-4-quic-prediction/docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger-design.md
 roastDesignReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-design-1.md
 stepBackDesign-round-1: local — two sweepable clusters (stale-root, ssh-handoff); child specs already hold the corrected designs, fixes are small and local
 parked:
@@ -50,7 +50,7 @@ codeBuckets (invocation 4, inv-29be42a9-8cb6-4837-86d2-6c0e13d8f328, stopReason 
   held: mosh-19g.2.21 (implemented, reviewed, suites pass; merge held) · escalated: mosh-19g.3.10 (acceptance amended by comment; re-dispatch)
 roastCodeRound: 3
 roastCodeReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md
-findingsLedger: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger.md
+findingsLedger: /var/home/alepar/AleCode/herdr/.worktrees/super-auto-mosh-phases-3-4-quic-prediction/docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger.md
 stepBackCode-round-1: local — two local clusters (quic-preauth-bounds, reorder-dropped-chained-seqs) plus independent items; no design decision changes
 scopeFilter-round-1: [Should-fix] src/mosh/render_reorder.rs:113 in-scope — Correctness defect in a goal-named path: the render lane can stall permanently.
 scopeFilter-round-1: [Should-fix] src/mosh/render_reorder.rs:175 in-scope — Correctness defect in a goal-named path: a supersede/reset gap can permanently stall the render lane with no resync.
@@ -81,5 +81,13 @@ roastCodeReport-3: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-predict
 stepBackCode-round-3: local — single test-fallout finding (predict-erase-tests-must-prove-paint); quic-preauth-bounds still punch-listed
 roastCodeExit: capped
 capped-round-3: 0 Blocking open; [Should-fix] tests/mosh_predict.rs:783 (vacuous wrong-prediction-clear assertions in the ignored QUIC acceptance test, fallout of fix 7673aad4) goes to the punch list with the 5 earlier punch-listed items
-codeBuckets.sweep: nextest 4754 run · 4740 passed · 14 failed (all 14 also fail at run base 59f7d8fc: agent/api_ping/cli agent/cross_area/live_handoff — pre-existing, none introduced by this run) · 40 skipped · clippy -D warnings pass · fmt --check pass @ 57e13e29d62e61fa5965b365362cfc084c98ccd7
 sweepFix: none — no failure introduced by the branch
+friction: 26 events
+codeBuckets:
+  completed: mosh-19g.4 mosh-19g.5 mosh-19g.6 mosh-19g.1.1 mosh-19g.1.2 mosh-19g.1.3 mosh-19g.1.4 mosh-19g.1.5 mosh-19g.1.6 mosh-19g.1.7 mosh-19g.1.8 mosh-19g.1.9 mosh-19g.2.1 mosh-19g.2.2 mosh-19g.2.3 mosh-19g.2.4 mosh-19g.2.5 mosh-19g.2.6 mosh-19g.2.7 mosh-19g.2.8 mosh-19g.2.9 mosh-19g.2.19 mosh-19g.2.21 mosh-19g.3.1 mosh-19g.3.2 mosh-19g.3.3 mosh-19g.3.4 mosh-19g.3.5 mosh-19g.3.10 mosh-19g.7 mosh-19g.8 mosh-19g.9 mosh-19g.10 mosh-19g.11 mosh-19g.12 mosh-19g.13 mosh-19g.14 mosh-19g.15
+  escalated: none
+  pendingRetry: none
+  parked: none
+  stalled: none
+  review: not ready (bounded whole-epic review: provenance unavailable from inherited Phase 1 records; docs/superpowers/** unreviewed)
+  sweep: 3582da5 — 4740 passed, 14 failed, 0 errors, 40 skipped; failing: cases::agents::agent_start_command_works,cases::agents::agent_start_waits_for_a_new_pane_shell_to_finish_initializing,events_subscribe_streams_workspace_tab_and_agent_events,metadata_status_subscription_filter_and_ttl_expiry_are_observable,pane_clear_agent_authority_restores_fallback_state,official_release_waits_for_confirmed_process_exit,pane_report_agent_updates_effective_state,cases::agents::agent_start_stops_retrying_when_the_pane_shell_stays_busy,cases::agent_options::agent_wait_accepts_repeated_until_and_exits_when_one_status_matches,events_subscribe_streams_output_and_agent_status_events,cross_area_agent_process_survives_detach_and_reattach,live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session,cases::agent_wait::agent_wait_exits_when_done_status_matches,pane_info_and_subscriptions_expose_done_agent_status (all 14 also fail at run base 59f7d8fc, pre-existing); command: cargo nextest run --locked --no-fail-fast && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check @ 3582da52040f22a83cf7492f39a69a81b4fb097d
