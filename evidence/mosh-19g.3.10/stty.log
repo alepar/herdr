@@ -1,0 +1,24 @@
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+────────────
+ Nextest run ID f6018c50-db2b-4e58-9d0a-582ed82338ef with nextest profile: default
+    Starting 2 tests across 1 binary (16 tests skipped)
+       START [         ] (1/2) herdr::mosh_predict r8_wrong_prediction_cleared_within_rtt_plus_50ms_plus_render
+
+running 1 test
+R8 tap-to-clearing-paint: [405, 404, 404] ms (bound 500ms)
+test r8_wrong_prediction_cleared_within_rtt_plus_50ms_plus_render ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 6.84s
+
+        PASS [   6.847s] (1/2) herdr::mosh_predict r8_wrong_prediction_cleared_within_rtt_plus_50ms_plus_render
+       START [         ] (2/2) herdr::mosh_predict stty_echo_off_prediction_painted_then_cleared
+
+running 1 test
+test stty_echo_off_prediction_painted_then_cleared ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 5.24s
+
+        PASS [   5.240s] (2/2) herdr::mosh_predict stty_echo_off_prediction_painted_then_cleared
+────────────
+     Summary [  12.087s] 2 tests run: 2 passed, 16 skipped
