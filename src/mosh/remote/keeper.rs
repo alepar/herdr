@@ -142,6 +142,9 @@ struct Session {
     render_split: bool,
     /// Render routing state; only consulted by render-split sessions.
     gate: ChainGate,
+    /// Render bytes the gate dropped since the leg went down. They never enter the ring, so
+    /// the reset window alone cannot stop the reader; they count against it instead.
+    outage_dropped: usize,
 }
 
 struct LegSlot {
@@ -242,6 +245,7 @@ impl Shared {
             }
         }
         session.gate.leg_ended();
+        session.outage_dropped = 0;
         session.endpoint.leg_down();
         session.end_sent = false;
         session.grace_deadline = Some(now + session.grace);
@@ -665,6 +669,7 @@ fn admit(shared: &Arc<Shared>, leg: KeeperLeg, hello: Hello) -> io::Result<Optio
                     end_sent: false,
                     render_split: hello.render_split,
                     gate: ChainGate::new(),
+                    outage_dropped: 0,
                 },
             );
             drop(table);
@@ -898,7 +903,7 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
             loop {
                 match table.sessions.get(&token) {
                     Some(session) if session.gen == gen => {
-                        let size = session.endpoint.source_read_size();
+                        let size = outage_read_size(session);
                         if size > 0 && !lane_saturated(session) {
                             break size;
                         }
@@ -942,6 +947,24 @@ fn server_reader(shared: &Shared, token: Token, gen: u64, mut server: UnixStream
             return;
         }
         shared.kick.notify_all();
+    }
+}
+
+/// How many bytes the reader may take now: the endpoint's room, and on a render-split session
+/// with no leg, less the render bytes already dropped this outage. Phase 1's rule is that an
+/// outage backlog stays in the server socket once the reset window is used; dropped render
+/// frames use it too, though they never reach the ring.
+fn outage_read_size(session: &Session) -> usize {
+    let size = session.endpoint.source_read_size();
+    if session.render_split && session.leg.is_none() {
+        size.min(
+            session
+                .endpoint
+                .source_room()
+                .saturating_sub(session.outage_dropped),
+        )
+    } else {
+        size
     }
 }
 
@@ -994,7 +1017,12 @@ fn route_frames(
                     counts.lane += 1;
                 }
             }
-            Route::Drop => counts.dropped += 1,
+            Route::Drop => {
+                counts.dropped += 1;
+                if leg == LegState::Down {
+                    session.outage_dropped += frame.len();
+                }
+            }
         }
     }
     counts.trace(shared, server_backlog(&session.server));
@@ -1043,8 +1071,10 @@ impl RouteCounts {
 }
 
 /// Writes client bytes to the server; acks are released only after the write. A render-split
-/// session writes whole client frames only, so a resync request can be written between any
-/// two of them; the partial tail waits in the splitter and is not acked.
+/// session tracks client frame boundaries but forwards bytes as they arrive (a frame larger
+/// than the sender's window could not complete otherwise, and holding back acked bytes would
+/// lose them on a leg drop); a resync request is written only at a boundary, so it waits for
+/// the end of a frame in flight.
 fn server_writer(
     shared: &Shared,
     token: Token,
@@ -1054,24 +1084,38 @@ fn server_writer(
     render_split: bool,
 ) {
     let mut splitter = FrameSplitter::new();
+    let mut resync_waiting = false;
     for item in from_client {
         let (written, acked) = match item {
-            ToServer::Client { bytes, offset } if render_split => match splitter.push(&bytes) {
-                Ok(frames) => {
-                    let held = splitter.held_back() as u64;
-                    (frames.concat(), Some(offset.saturating_sub(held)))
-                }
-                Err(_) => {
-                    let mut table = shared.lock();
-                    if table.sessions.get(&token).is_some_and(|s| s.gen == gen) {
-                        shared.close_session(&mut table, token, "oversized-frame");
+            ToServer::Client { mut bytes, offset } if render_split => {
+                let held = splitter.held_back();
+                match splitter.push(&bytes) {
+                    Ok(frames) => {
+                        if let (true, Some(first)) = (resync_waiting, frames.first()) {
+                            // The frame in flight ended inside this chunk: write the resync
+                            // at that boundary, ahead of whatever follows it.
+                            let at = first.len() - held;
+                            bytes.splice(at..at, encode_resync_frame());
+                            resync_waiting = false;
+                        }
+                        (bytes, Some(offset))
                     }
-                    drop(table);
-                    let _ = server.shutdown(Shutdown::Both);
-                    return;
+                    Err(_) => {
+                        let mut table = shared.lock();
+                        if table.sessions.get(&token).is_some_and(|s| s.gen == gen) {
+                            shared.close_session(&mut table, token, "oversized-frame");
+                        }
+                        drop(table);
+                        let _ = server.shutdown(Shutdown::Both);
+                        return;
+                    }
                 }
-            },
+            }
             ToServer::Client { bytes, offset } => (bytes, Some(offset)),
+            ToServer::Resync if render_split && !splitter.at_boundary() => {
+                resync_waiting = true;
+                continue;
+            }
             ToServer::Resync => (encode_resync_frame(), None),
         };
         if server.write_all(&written).is_err() {
@@ -1619,6 +1663,7 @@ mod tests {
                 end_sent: true,
                 render_split: false,
                 gate: ChainGate::new(),
+                outage_dropped: 0,
             },
         );
         run_timers(
@@ -2416,6 +2461,53 @@ mod tests {
         assert_eq!(local.received, expected);
     }
 
+    #[test]
+    fn render_split_outage_leaves_the_flood_in_the_server_socket() {
+        let h = Harness::new();
+        let mut local = h.local();
+        local.endpoint.set_render_split(true);
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::New);
+        let conn = h.server().conn(0);
+
+        local.drop_leg();
+        h.wait_trace("leg_down", "reason", "eof");
+
+        // Render frames the gate drops while no leg is up still count against the reset
+        // window: the keeper stops reading and the rest waits in the server's socket.
+        let mut payload = vec![CHAINED; 1000];
+        payload[1] = 0;
+        let mut one = (payload.len() as u32).to_le_bytes().to_vec();
+        one.extend(&payload);
+        let flood: Vec<u8> = one.iter().copied().cycle().take(one.len() * 4000).collect();
+        conn.write_async(flood.clone());
+        thread::sleep(Duration::from_millis(1500));
+        let during = conn.written.load(Ordering::SeqCst);
+        assert!(
+            during < 2 * INITIAL + (1 << 20),
+            "the keeper drained {during} of {} bytes during the outage",
+            flood.len()
+        );
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            conn.written.load(Ordering::SeqCst),
+            during,
+            "the keeper kept reading during the outage"
+        );
+
+        // A new leg reopens reading: the backlog drains (and is dropped behind the closed gate).
+        local.start_leg(60_000, None);
+        local.wait_welcomed(WelcomeStatus::Resumed);
+        assert!(
+            wait_until(Duration::from_secs(20), || {
+                conn.written.load(Ordering::SeqCst) == flood.len()
+            }),
+            "the backlog never drained after resume: {} of {}",
+            conn.written.load(Ordering::SeqCst),
+            flood.len()
+        );
+    }
+
     /// A keeper over `server`, with one render-split session whose leg is a Unix pair
     /// carrying a lane queue that nobody consumes.
     struct LaneSession {
@@ -2445,7 +2537,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_resync_lands_between_client_frames_unsplit() {
+    fn injected_resync_waits_for_the_client_frame_boundary() {
         let dir = TestDir::new();
         let server = FakeServer::start(&dir.0.join("server.sock"));
         let LaneSession { mut local, lane, .. } = lane_session(dir.0.join("server.sock"));
@@ -2465,28 +2557,30 @@ mod tests {
             local.wait(Duration::from_secs(5), |l| l.endpoint.fully_acked()),
             "an ack for a fully written frame never came"
         );
+        let b_head = [&a[..], &b[..3]].concat();
         local.send_data(&b[..3]);
-        local.pump(Duration::from_millis(500));
+        // The partial frame is written and acked as it arrives (a frame larger than the window
+        // could not complete otherwise); only the resync waits for the frame boundary.
         assert!(
-            !local.endpoint.fully_acked(),
-            "the keeper acked bytes it holds back"
+            wait_until(Duration::from_secs(5), || conn.received() == b_head),
+            "server saw {:?}",
+            conn.received()
         );
-        assert_eq!(conn.received(), a, "a partial frame reached the server");
+        assert!(
+            local.wait(Duration::from_secs(5), |l| l.endpoint.fully_acked()),
+            "an ack for written bytes never came"
+        );
 
         // 65 chained frames overflow the 64-slot lane once: exactly one resync is injected.
         let burst: Vec<u8> = (0..65).flat_map(|id| frame(CHAINED, id)).collect();
         conn.write(&burst);
-        let before_b = [a.clone(), resync.clone()].concat();
-        assert!(
-            wait_until(Duration::from_secs(5), || conn.received() == before_b),
-            "server saw {:?}, wanted A then the resync",
-            conn.received()
-        );
-        assert!(!local.endpoint.fully_acked(), "the resync moved the ack");
+        // Inside B the resync waits: nothing but B's head has reached the server.
+        local.pump(Duration::from_millis(500));
+        assert_eq!(conn.received(), b_head, "the resync landed inside a client frame");
 
-        // The rest of B and a whole C.
+        // The rest of B and a whole C: the resync lands between B and C.
         local.send_data(&[&b[3..], &c[..]].concat());
-        let expected = [a, resync, b, c].concat();
+        let expected = [a, b, resync, c].concat();
         assert!(
             wait_until(Duration::from_secs(5), || conn.received() == expected),
             "server saw {:?}",
@@ -2504,6 +2598,33 @@ mod tests {
             queued += 1;
         }
         assert_eq!(queued, 64);
+    }
+
+    #[test]
+    fn a_client_frame_larger_than_the_window_is_forwarded_and_acked() {
+        let dir = TestDir::new();
+        let server = FakeServer::start(&dir.0.join("server.sock"));
+        let LaneSession { mut local, .. } = lane_session(dir.0.join("server.sock"));
+        let conn = server.conn(0);
+
+        // One client frame (a bracketed paste) larger than the sender's whole initial window:
+        // the sender can only finish it as acks reopen the window.
+        let payload = INITIAL + 40_000;
+        let mut big = (payload as u32).to_le_bytes().to_vec();
+        big.extend(pattern(payload));
+        local.send_data(&big);
+
+        assert!(
+            local.wait(Duration::from_secs(10), |l| l.endpoint.fully_acked()),
+            "acks stalled with the frame still held back by the keeper"
+        );
+        assert!(
+            wait_until(Duration::from_secs(5), || conn.received().len() == big.len()),
+            "server saw {} of {} bytes",
+            conn.received().len(),
+            big.len()
+        );
+        assert_eq!(conn.received(), big);
     }
 
     #[test]
