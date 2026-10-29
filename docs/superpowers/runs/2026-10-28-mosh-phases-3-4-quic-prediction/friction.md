@@ -18,3 +18,4 @@
 - [2026-10-28 phase 3] REGRESSION: mosh_resume dense-flood/ctrl-c test passes at run base 59f7d8fc, fails on branch; bisect (--first-parent) → merge 87f46203 (mosh-19g.2.9); 16 MiB paste test also hangs. No task review or mergeCheck caught it (task tests were filtered, sweep deferred). Filed P0 fix mosh-19g.2.21.
 - [2026-10-28 phase 3] invocation 4 integration-blocked by my own bisect CARGO_TARGET_DIR (target-basecheck/) left untracked in the integration worktree; removed and relaunched — use a scratchpad target dir next time
 - [2026-10-28 phase 3] invocation 5 returned recovery-held: the merge-lane hold from invocation 4 needs a caller clear record; appended Recovery clear (worktree clean) and relaunched
+- [2026-10-28 phase 3→4] stripped Co-Authored-By trailers from 5 merge commits by a tree-preserving commit-tree rewrite (backup branch backup/pre-trailer-strip-34); final tree identical
