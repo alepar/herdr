@@ -69,8 +69,11 @@ To judge a prediction it needs one more fact: which of its inputs the server has
   - The cursor comes from the retained surface. If the surface carries no cursor for the pane, there is no prediction.
 - **Epochs (mosh rules):**
   - Printable keys extend the current epoch.
-  - Any non-printable key (Enter, Backspace, arrows, control keys, mouse) ends it. Later predictions start a new epoch, which in `adaptive` mode stays hidden until one prediction in it is confirmed.
-  - Paste, a pane resize or rect change, and an endpoint reset clear all predictions for the pane.
+  - Any non-printable key (Enter, Backspace, arrows, control keys, mouse) ends it. Later predictions start a new epoch, which stays hidden, in every mode, until one prediction in it is confirmed.
+  - Paste, a pane resize or rect change, an endpoint reset, echo loss, a wrong prediction and the no-ack timeout clear all predictions for the pane; the epoch after a clear is hidden the same way.
+  - Why every mode, not only `adaptive`: the key that ends an epoch is often the one that opens a no-echo prompt (Enter after `sudo`, `ssh`, `gpg` or `stty -echo`). A visible new epoch would paint the password typed there in cleartext on the local screen until the first echo-ack judged it wrong, about one RTT plus the 50 ms ack deadline plus one render, and a screen recording or share would capture it. Upstream mosh hides tentative epochs in every display mode except Experimental; `on` differs from `adaptive` only in the SRTT threshold.
+  - The cost: the first character after Enter shows at its confirmation, one RTT late; the rest of that epoch paints at once. The first epoch of a connection is visible (nothing breaks before it), so a client that attaches or reconnects while a pane already waits at a no-echo prompt still paints that text until it is judged wrong.
+  - The `stty -echo; cat` integration test types the command and Enter through the client and asserts the text typed into `cat` is never painted (this supersedes "painted, then cleared" in §5 for text typed after Enter; the R8 timing test still covers clearing a first-epoch key).
 - **Validation** (each time the retained surface or the ack state changes):
   - A prediction is judged once its pane holds an ack with `input_seq` ≥ the prediction's own sequence, and the retained surface revision is ≥ that ack's `surface_revision`.
   - If the cell at the predicted position holds the predicted character, the prediction is confirmed and removed.

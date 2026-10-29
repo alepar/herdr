@@ -153,15 +153,21 @@ struct PaneState {
 }
 
 impl PaneState {
-    /// Drops every prediction and starts a new epoch.
-    fn clear(&mut self, hide_next: bool) {
+    /// Drops every prediction and starts a new epoch, hidden until one prediction in it is
+    /// confirmed: a clear, like an epoch break, can precede a no-echo prompt.
+    fn clear(&mut self) {
         self.predictions.clear();
         self.hidden_epochs.clear();
-        self.cursor = None;
+        self.break_epoch();
+    }
+
+    /// Starts a new epoch, hidden in every mode until one prediction in it is confirmed. The
+    /// key that ends an epoch (Enter) often starts a no-echo prompt; a visible epoch would paint
+    /// the secret typed there until its ack judged it wrong.
+    fn break_epoch(&mut self) {
         self.epoch += 1;
-        if hide_next {
-            self.hidden_epochs.insert(self.epoch);
-        }
+        self.hidden_epochs.insert(self.epoch);
+        self.cursor = None;
     }
 
     fn visible(&self, prediction: &Prediction) -> bool {
@@ -259,7 +265,7 @@ impl Predictor {
         state.echo = echo;
         if !echo {
             for pane in state.panes.values_mut() {
-                pane.clear(false);
+                pane.clear();
             }
         }
     }
@@ -300,7 +306,7 @@ impl Predictor {
         });
         if let Some((_, rect)) = surface_pane {
             if pane.inner_rect.is_some_and(|known| known != rect) {
-                pane.clear(mode == PredictMode::Adaptive);
+                pane.clear();
             }
         }
         let mut added = false;
@@ -309,14 +315,8 @@ impl Predictor {
             pane.sent += 1;
             match classify(event) {
                 InputClass::Ignore => {}
-                InputClass::ClearPane => pane.clear(mode == PredictMode::Adaptive),
-                InputClass::EpochBreak => {
-                    pane.epoch += 1;
-                    if mode == PredictMode::Adaptive {
-                        pane.hidden_epochs.insert(pane.epoch);
-                    }
-                    pane.cursor = None;
-                }
+                InputClass::ClearPane => pane.clear(),
+                InputClass::EpochBreak => pane.break_epoch(),
                 InputClass::Printable(text) => {
                     let Some((surface, rect)) = surface_pane else {
                         continue;
@@ -340,7 +340,6 @@ impl Predictor {
         surface: &PaneSurfaceFrame,
         now: Instant,
     ) -> PaintOutput {
-        let mode = self.mode;
         let Some(state) = self.state(endpoint, generation) else {
             return PaintOutput::default();
         };
@@ -356,16 +355,16 @@ impl Predictor {
                 continue;
             }
             let Some(surface_pane) = surface.panes.iter().find(|p| &p.pane_id == pane_id) else {
-                pane.clear(mode == PredictMode::Adaptive);
+                pane.clear();
                 continue;
             };
             if pane.inner_rect != Some(surface_pane.inner_rect) {
-                pane.clear(mode == PredictMode::Adaptive);
+                pane.clear();
                 continue;
             }
             let outstanding = pane.predictions.len();
             if !judge(pane, surface) {
-                pane.clear(true);
+                pane.clear();
                 output.judgments.push(Judgment::Wrong);
                 continue;
             }
@@ -379,7 +378,7 @@ impl Predictor {
                 ack_seq.is_none_or(|acked| p.seq > acked)
                     && now.saturating_duration_since(p.created_at) > timeout
             }) {
-                pane.clear(false);
+                pane.clear();
                 timed_out = true;
                 continue;
             }
@@ -407,7 +406,7 @@ impl Predictor {
         if timed_out {
             state.off = true;
             for pane in state.panes.values_mut() {
-                pane.clear(false);
+                pane.clear();
             }
             return PaintOutput {
                 judgments: vec![Judgment::Timeout],
@@ -760,14 +759,48 @@ mod tests {
     }
 
     #[test]
-    fn on_mode_does_not_hide_epochs() {
+    fn on_mode_hides_the_epoch_after_a_break_until_confirmed() {
         let now = Instant::now();
         let mut p = predictor(PredictMode::On, Some(100));
         type_events(&mut p, &[enter()], &surface(1, (0, 0), &[]), now);
         p.on_echo_ack(&ep(), GEN, ack(1, 1));
-        let s = surface(1, (0, 1), &[]);
-        type_events(&mut p, &[ch('b')], &s, now);
-        assert_eq!(painted(&p.paint(&ep(), GEN, &s, now)), vec![(0, 1, "b")]);
+        let s1 = surface(1, (0, 1), &[]);
+        assert!(type_events(&mut p, &[ch('b')], &s1, now), "hidden still counts as added");
+        assert!(p.any_prediction(&ep()));
+        assert!(p.paint(&ep(), GEN, &s1, now).cells.is_empty(), "hidden epoch paints nothing");
+        // One confirmation reveals the epoch: the next prediction in it is painted at once.
+        p.on_echo_ack(&ep(), GEN, ack(2, 2));
+        let s2 = surface(2, (1, 1), &[(0, 1, "b")]);
+        assert!(p.paint(&ep(), GEN, &s2, now).cells.is_empty());
+        assert!(!p.any_prediction(&ep()), "confirmed");
+        type_events(&mut p, &[ch('c')], &s2, now);
+        assert_eq!(painted(&p.paint(&ep(), GEN, &s2, now)), vec![(1, 1, "c")]);
+    }
+
+    #[test]
+    fn on_mode_hides_the_epoch_after_a_paste() {
+        let now = Instant::now();
+        let mut p = predictor(PredictMode::On, Some(100));
+        let s1 = surface(1, (0, 0), &[]);
+        type_events(&mut p, &[ClientPaneInputEvent::Paste("pw".into())], &s1, now);
+        p.on_echo_ack(&ep(), GEN, ack(1, 2));
+        let s2 = surface(2, (2, 0), &[(0, 0, "p"), (1, 0, "w")]);
+        assert!(type_events(&mut p, &[ch('x')], &s2, now));
+        assert!(p.paint(&ep(), GEN, &s2, now).cells.is_empty());
+    }
+
+    #[test]
+    fn the_epoch_after_echo_loss_is_hidden() {
+        let now = Instant::now();
+        let mut p = predictor(PredictMode::On, Some(100));
+        let s1 = surface(1, (0, 0), &[]);
+        type_events(&mut p, &[ch('a')], &s1, now);
+        p.on_link(&ep(), GEN, Some(100), false);
+        p.on_link(&ep(), GEN, Some(100), true);
+        p.on_echo_ack(&ep(), GEN, ack(1, 2));
+        let s2 = surface(2, (1, 0), &[(0, 0, "a")]);
+        assert!(type_events(&mut p, &[ch('b')], &s2, now));
+        assert!(p.paint(&ep(), GEN, &s2, now).cells.is_empty());
     }
 
     #[test]

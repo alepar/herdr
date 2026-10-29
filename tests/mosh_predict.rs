@@ -251,48 +251,58 @@ fn first_ms(
         .and_then(|e| e["ms"].as_u64())
 }
 
+/// A no-echo prompt reached the way a user reaches one: the command and Enter are typed through
+/// this client, then the secret. Enter starts an epoch that stays hidden until one prediction in
+/// it is confirmed, and nothing typed into `stty -echo; cat` ever is: the text is never painted.
 #[test]
-fn stty_echo_off_prediction_painted_then_cleared() {
+fn stty_echo_off_prediction_never_painted() {
     let remote = Remote::start();
     let mut client = attach_linked(&remote, Some("on"), (SCREEN_COLS, SCREEN_ROWS));
-    echo_off_cat(&remote, &client);
-    assert!(!client.screen().contains("QZX"));
-
-    let started = Instant::now();
-    client.type_keys("QZX");
+    client.type_keys("stty -echo; echo ECHO\"\"OFF; cat\r");
     assert!(
-        wait_for(RTT, || client.screen().contains("QZX")),
-        "the prediction was not painted within one RTT: {}",
+        client.wait_screen("ECHOOFF", READY),
+        "the echo-off barrier never showed: {}",
         context(&remote, &client)
     );
+    // The command line's acks and surfaces settle, so the next key is predicted (hidden).
+    thread::sleep(RTT + Duration::from_millis(200));
     assert!(
-        started.elapsed() < RTT,
-        "painted only after {:?}",
-        started.elapsed()
-    );
-
-    // Cleared: one RTT, the server's 50 ms ack deadline and one render later. The slack
-    // beyond that is for a loaded CI host; the strict wall-clock bound is the opt-in R8 test.
-    let bound = RTT + ACK_DEADLINE + ONE_RENDER + Duration::from_millis(500);
-    assert!(
-        wait_for(bound, || !client.screen().contains("QZX")),
-        "the wrong prediction was still on screen after {bound:?}: {}",
-        context(&remote, &client)
-    );
-    assert!(
-        wait_for(READY, || judgments(&client, "wrong") >= 1),
-        "no wrong judgment: {}",
-        context(&remote, &client)
-    );
-    // No stuck overlay: it stays gone, and the pane never held the text.
-    let paints_after = paints(&client);
-    thread::sleep(RTT * 2);
-    assert!(
-        !client.screen().contains("QZX"),
+        !client.screen().contains('Q'),
         "{}",
         context(&remote, &client)
     );
-    assert_eq!(paints(&client), paints_after, "predictions kept painting");
+    let from = client.predict_events().len();
+    let paints_before = paints(&client);
+
+    client.type_keys("QZX");
+    // Never painted: watch the whole window in which a visible wrong prediction would show.
+    let bound = RTT + ACK_DEADLINE + ONE_RENDER + Duration::from_millis(500);
+    let shown = wait_for(bound, || client.screen().contains('Q'));
+    assert!(
+        !shown,
+        "the no-echo text was painted: {}",
+        context(&remote, &client)
+    );
+    // Not vacuous: the keys were predicted (hidden) and judged wrong.
+    assert!(
+        first_ms(&client, from, "tap", |e| e["predicted"] == true).is_some(),
+        "no key was predicted, so the test proves nothing: {}",
+        context(&remote, &client)
+    );
+    assert!(
+        wait_for(READY, || first_ms(&client, from, "judge", |e| e["result"]
+            == "wrong")
+        .is_some()),
+        "no wrong judgment: {}",
+        context(&remote, &client)
+    );
+    thread::sleep(RTT * 2);
+    assert!(
+        !client.screen().contains('Q'),
+        "{}",
+        context(&remote, &client)
+    );
+    assert_eq!(paints(&client), paints_before, "a prediction was painted");
     assert!(
         !remote.pane_text().contains("QZX"),
         "{}",
