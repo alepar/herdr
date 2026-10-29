@@ -332,7 +332,7 @@ impl Predictor {
     }
 
     /// Judges predictions against `surface` (the only place judging happens), applies the
-    /// no-ack timeout, and returns the cells and cursor to paint.
+    /// no-ack timeout to predictions no ack covers, and returns the cells and cursor to paint.
     pub fn paint(
         &mut self,
         endpoint: &ClientEndpointId,
@@ -372,11 +372,13 @@ impl Predictor {
             if pane.predictions.len() < outstanding {
                 output.judgments.push(Judgment::Confirmed);
             }
-            if pane
-                .predictions
-                .iter()
-                .any(|p| now.saturating_duration_since(p.created_at) > timeout)
-            {
+            // Only predictions no ack covers can time out; a covered one waits for the surface
+            // to reach the ack's revision, where `judge` settles it.
+            let ack_seq = pane.ack.map(|(seq, _)| seq);
+            if pane.predictions.iter().any(|p| {
+                ack_seq.is_none_or(|acked| p.seq > acked)
+                    && now.saturating_duration_since(p.created_at) > timeout
+            }) {
                 pane.clear(false);
                 timed_out = true;
                 continue;
@@ -881,6 +883,38 @@ mod tests {
         // A new generation turns it back on.
         p.on_link(&ep(), GEN + 1, Some(100), true);
         assert!(p.tap(&ep(), GEN + 1, "p", &[ch('c')], Some(&s), now));
+    }
+
+    #[test]
+    fn covered_prediction_waiting_on_the_surface_does_not_time_out() {
+        let now = Instant::now();
+        let mut p = predictor(PredictMode::On, Some(100));
+        type_events(&mut p, &[ch('a')], &surface(1, (0, 0), &[]), now);
+        p.on_echo_ack(&ep(), GEN, ack(1, 5));
+        // Past the 1 s timeout, but the ack covers 'a': only the surface (revision 4 < 5) lags.
+        let out = p.paint(&ep(), GEN, &surface(4, (0, 0), &[]), now + Duration::from_millis(1500));
+        assert_eq!(painted(&out), vec![(0, 0, "a")]);
+        assert!(!out.judgments.contains(&Judgment::Timeout));
+        // The surface catches up and confirms; prediction is still on for the generation.
+        let s5 = surface(5, (1, 0), &[(0, 0, "a")]);
+        let out = p.paint(&ep(), GEN, &s5, now + Duration::from_millis(1600));
+        assert!(out.cells.is_empty());
+        assert!(!p.any_prediction(&ep()));
+        assert!(type_events(&mut p, &[ch('b')], &s5, now + Duration::from_millis(1700)));
+    }
+
+    #[test]
+    fn uncovered_prediction_behind_a_covered_one_still_times_out() {
+        let now = Instant::now();
+        let mut p = predictor(PredictMode::On, Some(100));
+        let s1 = surface(1, (0, 0), &[]);
+        type_events(&mut p, &[ch('a'), ch('b')], &s1, now);
+        p.on_echo_ack(&ep(), GEN, ack(1, 5));
+        // 'b' (seq 2) is uncovered by any ack after 1 s: timeout, off for the generation.
+        let out = p.paint(&ep(), GEN, &surface(4, (0, 0), &[]), now + Duration::from_millis(1100));
+        assert_eq!(out.judgments, vec![Judgment::Timeout]);
+        assert!(!p.any_prediction(&ep()));
+        assert!(!type_events(&mut p, &[ch('c')], &s1, now + Duration::from_secs(2)));
     }
 
     #[test]
