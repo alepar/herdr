@@ -48,7 +48,7 @@ agentChecks:
 - mosh-19g.3.10 acceptance '256 KiB/s without tripping the no-ack timeout' (agent-set) · amended to '0 wrong; timeout disabling prediction acceptable' — spec §5 requirement (no correct prediction cleared) met
 codeBuckets (invocation 4, inv-29be42a9-8cb6-4837-86d2-6c0e13d8f328, stopReason integration-blocked — my stray target-basecheck/ dir; removed):
   held: mosh-19g.2.21 (implemented, reviewed, suites pass; merge held) · escalated: mosh-19g.3.10 (acceptance amended by comment; re-dispatch)
-roastCodeRound: 2
+roastCodeRound: 3
 roastCodeReport-1: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/2026-10-28-mosh-phases-3-4-quic-prediction-roast-pr-1.md
 findingsLedger: docs/superpowers/runs/2026-10-28-mosh-phases-3-4-quic-prediction/findings-ledger.md
 stepBackCode-round-1: local — two local clusters (quic-preauth-bounds, reorder-dropped-chained-seqs) plus independent items; no design decision changes
@@ -76,3 +76,4 @@ scopeFilter-round-2: [Should-fix] src/mosh/remote/keeper.rs:913; src/mosh/remote
 scopeFilter-round-2: [Should-fix] src/mosh/predict.rs:314 in-scope — on mode shows epochs right after an epoch break, painting text typed at no-echo prompts; a correctness deviation in goal-named prediction.
 scope-filter: 2 in-scope · 0 punch-listed
 fixBeads-round-2: mosh-19g.14 (prediction epoch hiding) mosh-19g.15 (keeper kick notify)
+codeBuckets (invocation 8, inv-66d31eb9-a4c4-4755-b5cc-43225e274a4e, stopReason ready-drained): completed mosh-19g.14 mosh-19g.15
